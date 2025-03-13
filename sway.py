@@ -168,13 +168,7 @@ class SwayEditor:
                 pass
 
         self.stdscr.refresh()
-
-
-
-
-#№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№№
-        
-        
+  
     # Настройка цветов
     def init_colors(self):
         colors = self.config["colors"]
@@ -255,13 +249,16 @@ class SwayEditor:
         return color_map.get(color_name, 0)
             
 
+    #--------------------------------------
     # Обработка ввода
-    
+    #--------------------------------------
     def handle_input(self, key):
         if key == self.keybindings.get("quit", 17):  # 17 = Ctrl+Q
             self.exit_editor()
         elif key == self.keybindings.get("save_file", 19):  # 19 = Ctrl+S
             self.save_file()
+        elif key == self.keybindings.get("open_file", 6):  # Добавить эту строку (6 = Ctrl+F по вашей конфигурации)
+            self.open_file()
         elif key == curses.KEY_UP:
             if self.cursor_y > 0:
                 self.cursor_y -= 1
@@ -315,6 +312,40 @@ class SwayEditor:
             self.modified = True
 
 
+
+    #--------------------------------------
+    # Открытие файла
+    #--------------------------------------
+    def open_file(self):
+        if self.modified:
+            choice = self.prompt("Save changes? (y/n): ")
+            if choice.lower().startswith("y"):
+                self.save_file()
+
+        filename = self.prompt("Open file: ")
+        if not filename:
+            self.status_message = "Open cancelled"
+            return
+        
+        try:
+            with open(filename, "r") as f:
+                self.text = f.read().splitlines()
+                # Добавляем пустую строку, если список пуст
+                if not self.text:
+                    self.text = [""]
+            self.filename = filename
+            self.modified = False
+            self.cursor_x = 0
+            self.cursor_y = 0
+            self.scroll_top = 0
+            self.scroll_left = 0
+            self.status_message = f"Opened {filename}"
+        except Exception as e:
+            self.status_message = f"Error opening file: {str(e)}"
+
+    #--------------------------------------
+    # Сохранение файла
+    #--------------------------------------
     def save_file(self):
         if self.filename == "noname":
             self.filename = self.prompt("Save as: ")
@@ -355,10 +386,34 @@ class SwayEditor:
             self.handle_input(key)
 
 
+#--------------------------------------
+# Основная функция 
+# 
+# Эти изменения позволят вам открывать файлы с помощью сочетания клавиш Ctrl+F, 
+# а также защитят от потери несохраненных изменений при открытии нового файла. 
+# Дополнительное изменение позволит открывать файлы непосредственно из командной 
+# строки при запуске редактора.
+#  
+#--------------------------------------
 def main(stdscr):
-    editor = SwayEditor(stdscr)
-    editor.run()
+    import sys
+    editor = SwayEditor(stdscr)  # Создаем экземпляр редактора
+    
+    # Открытие файла, если он указан в аргументах командной строки
+    if len(sys.argv) > 1:
+        editor.filename = sys.argv[1]
+        try:
+            with open(editor.filename, "r") as f:
+                editor.text = f.read().splitlines()
+                if not editor.text:
+                    editor.text = [""]
+        except Exception as e:
+            editor.status_message = f"Error opening {editor.filename}: {str(e)}"
+            editor.filename = "noname"
+    
+    editor.run()  # Запускаем цикл редактора
 
+# Запуск редактора
 if __name__ == "__main__":
     curses.wrapper(main)
     
