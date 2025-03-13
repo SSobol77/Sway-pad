@@ -3,6 +3,21 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+#technical
+*.log
+*.out
+*.pid
+*.lock
+*.sock
+*.swp
+LICENSE
+*.md
+*.txt
+*.yml
+*.yaml
+
+
+
 # C extensions
 *.so
 
