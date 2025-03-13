@@ -10,7 +10,7 @@ A lightweight, terminal-based text editor for Linux written in Python with TOML 
 
 <br>
 
-# Sway Notepad
+# 🌊Sway Notepad
 
 ### **Описание проекта Sway Notepad**
 
