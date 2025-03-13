@@ -1,0 +1,39 @@
+# config.toml
+
+[colors]
+background = "black"
+foreground = "white"
+keyword_color = "cyan"
+string_color = "green"
+comment_color = "yellow"
+
+[fonts]
+font_family = "monospace"
+font_size = 12
+
+[keybindings]
+delete = "ctrl+d"
+paste = "ctrl+v"
+copy = "ctrl+c"
+cut = "ctrl+x"
+undo = "ctrl+z"
+open_file = "ctrl+f"
+save_file = "ctrl+s"
+select_all = "ctrl+o"
+quit = "ctrl+q"
+
+[syntax_highlighting]
+python = [
+    { pattern = "def\\s+\\w+", color = "cyan" },
+    { pattern = "\\\".*?\\\"", color = "green" },
+    { pattern = "#.*", color = "yellow" }
+]
+javascript = [
+    { pattern = "function\\s+\\w+", color = "cyan" },
+    { pattern = "\\\".*?\\\"", color = "green" },
+    { pattern = "//.*", color = "yellow" }
+]
+
+[supported_formats]
+text = [".txt"]
+code = [".py", ".js"]
