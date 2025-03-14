@@ -1,200 +1,460 @@
 #!/usr/bin/env python3
 import curses
+import locale
 import toml
-import re
+import time
+import traceback
 import os
+import re
+import sys
+import logging
 
 CONFIG_FILE = "config.toml"
 
+# Setup logging
+logging.basicConfig(filename='editor.log', level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)')
+
 def load_config():
+    """Add default configuration values"""
+    default_config = {
+        "keybindings": {
+            "delete": "del",
+            "paste": "ctrl+v",
+            "copy": "ctrl+c",
+            "cut": "ctrl+x",
+            "undo": "ctrl+z",
+            "open_file": "ctrl+o",
+            "save_file": "ctrl+s",
+            "select_all": "ctrl+a",
+            "quit": "ctrl+q"
+        },
+        "syntax_highlighting": {},
+        "supported_formats": {}
+    }
+    
     try:
         with open(CONFIG_FILE, "r") as f:
-            return toml.load(f)
+            config_content = f.read()
+            try:
+                user_config = toml.loads(config_content)
+                return {**default_config, **user_config}
+            except toml.TomlDecodeError as e:
+                logging.error(f"TOML parse error: {str(e)}")
+                logging.error(f"Config content:\n{config_content}")
+                return default_config
     except FileNotFoundError:
-        print(f"Config file '{CONFIG_FILE}' not found.")
-        exit(1)
-    except toml.TomlDecodeError as e:
-        print(f"Error parsing config file: {e}")
-        exit(1)
+        logging.warning(f"Config file '{CONFIG_FILE}' not found. Using defaults.")
+        return default_config
 
 
 class SwayEditor:
-    # Инициализация редактора
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.config = load_config()
-        self.text = [""]  # Начальный текст (пустая строка)
-        self.cursor_x = 0  # Начальная позиция X (после номера строки)
-        self.cursor_y = 0  # Начальная позиция Y
+        self.text = [""]
+        self.cursor_x = 0
+        self.cursor_y = 0
         self.scroll_top = 0
         self.scroll_left = 0
         self.filename = "noname"
         self.modified = False
-        self.syntax_rules = {}
+        self.encoding = "UTF-8"  # Добавляем информацию о кодировке
+        self.stdscr.keypad(True)  # Enable keypad
+        self.stdscr.nodelay(False)  # Синхронный режим ввода
+        # Установка локали для Unicode
+        locale.setlocale(locale.LC_ALL, '')
+        # Включаем поддержку цветов
+        curses.start_color()
+        curses.use_default_colors()
+        # Устанавливаем режим курсора
+        curses.curs_set(1)  # Видимый курсор
+        self.insert_mode = True
+        self.syntax_highlighting = {}
         self.status_message = ""
 
-        # Инициализация цветов
         curses.start_color()
         curses.use_default_colors()
         self.init_colors()
-        # Настройка видимости курсора
-        curses.curs_set(2)  # Включаем видимый курсор
-        self.cursor_color = curses.color_pair(5)  # Новый цвет для курсора
+        curses.curs_set(1)
 
-        # Настройка горячих клавиш
         self.keybindings = {
-            "delete": self.parse_key(self.config["keybindings"]["delete"]),
-            "paste": self.parse_key(self.config["keybindings"]["paste"]),
-            "copy": self.parse_key(self.config["keybindings"]["copy"]),
-            "cut": self.parse_key(self.config["keybindings"]["cut"]),
-            "undo": self.parse_key(self.config["keybindings"]["undo"]),
-            "open_file": self.parse_key(self.config["keybindings"]["open_file"]),
-            "save_file": self.parse_key(self.config["keybindings"]["save_file"]),
-            "select_all": self.parse_key(self.config["keybindings"]["select_all"]),
+            "delete": self.parse_key(self.config["keybindings"].get("delete", "del")),
+            "paste": self.parse_key(self.config["keybindings"].get("paste", "ctrl+v")),
+            "copy": self.parse_key(self.config["keybindings"].get("copy", "ctrl+c")),
+            "cut": self.parse_key(self.config["keybindings"].get("cut", "ctrl+x")),
+            "undo": self.parse_key(self.config["keybindings"].get("undo", "ctrl+z")),
+            "open_file": self.parse_key(self.config["keybindings"].get("open_file", "ctrl+o")),
+            "save_file": self.parse_key(self.config["keybindings"].get("save_file", "ctrl+s")),
+            "select_all": self.parse_key(self.config["keybindings"].get("select_all", "ctrl+a")),
             "quit": self.parse_key(self.config["keybindings"].get("quit", "ctrl+q")),
         }
 
-        # Подсветка синтаксиса
         self.load_syntax_highlighting()
-
-        # Установка начальной позиции курсора
         self.set_initial_cursor_position()
 
-    # Устанавливает начальную позицию курсора на 1:2
     def set_initial_cursor_position(self):
-        self.cursor_y = 0  # Первая строка
-        max_line_num = len(str(len(self.text)))  # Максимальная длина номера строки
-        line_num_width = max_line_num + 1  # Ширина номера строки + пробел
-        self.cursor_x = line_num_width + 1  # Позиция 1:2 (после номера строки)
+        self.cursor_x = 0
+        self.cursor_y = 0
+        self.scroll_top = 0
+        self.scroll_left = 0
 
+    def init_colors(self):
+        bg_color = -1
+        curses.init_pair(1, curses.COLOR_BLUE, bg_color)
+        curses.init_pair(2, curses.COLOR_GREEN, bg_color)
+        curses.init_pair(3, curses.COLOR_MAGENTA, bg_color)
+        curses.init_pair(4, curses.COLOR_YELLOW, bg_color)
+        curses.init_pair(5, curses.COLOR_CYAN, bg_color)
+        curses.init_pair(6, curses.COLOR_WHITE, bg_color)
+        curses.init_pair(7, curses.COLOR_YELLOW, bg_color)
+        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+
+        self.colors = {
+            'error': curses.color_pair(8),
+            'line_number': curses.color_pair(7),
+            'status': curses.color_pair(6),
+            'comment': curses.color_pair(1),
+            'keyword': curses.color_pair(2),
+            'string': curses.color_pair(3),
+            'variable': curses.color_pair(6),
+            'punctuation': curses.color_pair(6),
+            'literal': curses.color_pair(4),
+            'decorator': curses.color_pair(5),
+            'type': curses.color_pair(4),
+            'selector': curses.color_pair(2),
+            'property': curses.color_pair(5),
+            'tag': curses.color_pair(2),
+            'attribute': curses.color_pair(3),
+        }
+
+    def apply_syntax_highlighting(self, line, lang):
+        """Cache compiled regex patterns"""
+        if not hasattr(self, '_compiled_patterns'):
+            self._compiled_patterns = {}
         
-    # Отрисовка экрана
+        if lang not in self._compiled_patterns:
+            self._compiled_patterns[lang] = [
+                (re.compile(pattern), color)
+                for pattern, color in self.syntax_highlighting.get(lang, [])
+            ]
+
+        if not line.strip():
+            return [(line, curses.color_pair(0))]
+
+        if lang not in self.syntax_highlighting:
+            return [(line, curses.color_pair(0))]
+
+        all_matches = []
+        for pattern, color_pair in self._compiled_patterns[lang]:
+            for match in pattern.finditer(line):
+                start, end = match.span()
+                all_matches.append((start, end, color_pair))
+
+        if not all_matches:
+            return [(line, curses.color_pair(0))]
+
+        all_matches.sort()
+        result = []
+        last_end = 0
+
+        for start, end, color_pair in all_matches:
+            if start > last_end:
+                result.append((line[last_end:start], curses.color_pair(0)))
+            result.append((line[start:end], color_pair))
+            last_end = end
+
+        if last_end < len(line):
+            result.append((line[last_end:], curses.color_pair(0)))
+
+        return result
+
+    def load_syntax_highlighting(self):
+        self.syntax_highlighting = {}
+        try:
+            syntax_cfg = self.config.get("syntax_highlighting", {})
+            for lang, rules in syntax_cfg.items():
+                patterns = rules.get("patterns", [])
+                for rule in patterns:
+                    try:
+                        compiled = re.compile(rule["pattern"])
+                        color_pair = self.colors.get(rule["color"], curses.color_pair(0))
+                        self.syntax_highlighting.setdefault(lang, []).append((compiled, color_pair))
+                    except Exception as e:
+                        logging.exception(f"Error in syntax highlighting rule for {lang}: {rule}")
+
+        except Exception as e:
+            logging.exception("Error loading syntax highlighting")
+
+
     def draw_screen(self):
         self.stdscr.clear()
         height, width = self.stdscr.getmaxyx()
 
-        # Проверка минимальных размеров окна
-        if height < 5 or width < 50:
-            self.stdscr.addstr(0, 0, f"Window too small (min: 5x50)", curses.color_pair(4))
-            self.stdscr.refresh()
+        if height < 24 or width < 80:
+            try:
+                self.stdscr.addstr(0, 0, "Window too small (min: 80x24)", self.colors['error'])
+                self.stdscr.refresh()
+            except curses.error:
+                pass
             return
 
-        # Определение максимальной длины номера строки
         max_line_num = len(str(len(self.text)))
         line_num_format = f"{{:>{max_line_num}}} "
         line_num_width = len(line_num_format.format(0))
+        text_width = width - line_num_width
 
-        # Отображение текста с номерами строк
-        visible_lines = height - 2  # -2 для статусной строки
-        start_line = self.scroll_top
-        end_line = min(start_line + visible_lines, len(self.text))
+        if self.cursor_x < self.scroll_left:
+            self.scroll_left = max(0, self.cursor_x)
+        elif self.cursor_x >= self.scroll_left + text_width:
+            self.scroll_left = max(0, self.cursor_x - text_width + 1)
 
-        # Обновление вертикальной прокрутки
+        visible_lines = height - 2
         if self.cursor_y < self.scroll_top:
             self.scroll_top = self.cursor_y
         elif self.cursor_y >= self.scroll_top + visible_lines:
             self.scroll_top = self.cursor_y - visible_lines + 1
 
-        # Отрисовка видимых строк
         for screen_row in range(visible_lines):
-            line_num = start_line + screen_row + 1
+            line_num = self.scroll_top + screen_row + 1
             if line_num > len(self.text):
                 break
 
-            # Отрисовка номера строки
             try:
-                self.stdscr.addstr(screen_row, 0, line_num_format.format(line_num), curses.color_pair(4))
+                self.stdscr.addstr(screen_row, 0, line_num_format.format(line_num), self.colors['line_number'])
             except curses.error:
                 pass
 
-            # Отрисовка содержимого строки
-            line = self.text[line_num - 1]
-            syntax_line = self.apply_syntax_highlighting(line, "python")
-            x_pos = line_num_width - self.scroll_left  # Начальная позиция с учетом прокрутки
+            line = self.text[line_num - 1] if line_num <= len(self.text) else ""
+            syntax_line = self.apply_syntax_highlighting(line, self.detect_language())
+            x_pos = 0
 
             for text_part, color in syntax_line:
-                # Пропускаем невидимые части
-                if x_pos + len(text_part) < 0:
-                    x_pos += len(text_part)
+                if x_pos + len(text_part.encode('utf-8')) <= self.scroll_left:
+                    x_pos += len(text_part.encode('utf-8'))
                     continue
 
-                visible_part = text_part[max(0, -x_pos):]
-                visible_part = visible_part[:width - line_num_width]
+                visible_start = max(0, self.scroll_left - x_pos)
+                visible_part = text_part[visible_start:]
+                # Calculate visible width considering UTF-8 characters
+                visible_width = len(visible_part.encode('utf-8'))
+                visible_part = visible_part[:text_width - (x_pos - self.scroll_left)]
+                screen_x = line_num_width + (x_pos - self.scroll_left)
 
                 try:
-                    self.stdscr.addstr(screen_row, max(0, x_pos + self.scroll_left), 
-                                    visible_part, color)
+                    self.stdscr.addstr(screen_row, screen_x, visible_part, color)
                 except curses.error:
                     pass
 
-                x_pos += len(text_part)
+                x_pos += visible_width
 
-
-        # Обновление горизонтальной прокрутки
-        max_visible_x = width - line_num_width
-        cursor_abs_x = self.cursor_x + line_num_width
-        if cursor_abs_x < self.scroll_left:
-            self.scroll_left = cursor_abs_x
-        elif cursor_abs_x >= self.scroll_left + max_visible_x:
-            self.scroll_left = cursor_abs_x - max_visible_x + 1
-
-
-        # Позиционирование курсора
-        screen_cursor_y = self.cursor_y - self.scroll_top
-        screen_cursor_x = (self.cursor_x + line_num_width) - self.scroll_left
-
-
-        # Рисуем курсор с желтым цветом
         try:
-            self.stdscr.addch(screen_cursor_y, screen_cursor_x, '_', self.cursor_color)
+            status_y = height - 1
+            file_type = self.detect_language()
+            status_msg = (
+                f"File: {self.filename} | "
+                f"Type: {file_type} | "  # Добавляем информацию о типе файла
+                f"Encoding: {self.encoding} | "  # Добавляем информацию о кодировке
+                f"Line: {self.cursor_y + 1}/{len(self.text)} | "
+                f"Column: {self.cursor_x + 1} | "
+                f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
+            )
+            self.stdscr.addstr(status_y, 0, " " * (width - 1), self.colors['status'])
+            self.stdscr.addstr(status_y, 0, status_msg, self.colors['status'])
         except curses.error:
             pass
 
-        # Отрисовка статусной строки
-        status = f"File: {self.filename} | Pos: {self.cursor_y+1}:{self.cursor_x+1}"
-        if self.modified:
-            status += " (modified)"
-        try:
-            self.stdscr.addstr(height-1, 0, status.ljust(width), curses.color_pair(4))
-        except curses.error:
-            pass
+        cursor_screen_y = self.cursor_y - self.scroll_top
+        cursor_screen_x = self.cursor_x - self.scroll_left + line_num_width
 
-        # Временное сообщение
-        if self.status_message:
+        if (0 <= cursor_screen_y < visible_lines and
+            0 <= cursor_screen_x < width):
             try:
-                self.stdscr.addstr(height-1, 0, self.status_message.ljust(width), curses.color_pair(4))
-                self.status_message = ""
+                self.stdscr.move(cursor_screen_y, cursor_screen_x)
             except curses.error:
                 pass
 
         self.stdscr.refresh()
-  
-    # Настройка цветов
-    def init_colors(self):
-        colors = self.config["colors"]
-        curses.init_pair(1, self.get_color(colors["keyword_color"]), -1)
-        curses.init_pair(2, self.get_color(colors["string_color"]), -1)
-        curses.init_pair(3, self.get_color(colors["comment_color"]), -1)
-        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Статусная строка
-        curses.init_pair(5, curses.COLOR_YELLOW, -1)  # Цвет курсора
-    
-    # Получение кода цвета
-    def get_color(self, color_name):
-        color_map = {
-            "black": curses.COLOR_BLACK,
-            "white": curses.COLOR_WHITE,
-            "red": curses.COLOR_RED,
-            "green": curses.COLOR_GREEN,
-            "yellow": curses.COLOR_YELLOW,
-            "blue": curses.COLOR_BLUE,
-            "magenta": curses.COLOR_MAGENTA,
-            "cyan": curses.COLOR_CYAN,
-        }
-        return color_map.get(color_name.lower(), curses.COLOR_WHITE)
 
+    def detect_language(self):
+        ext = os.path.splitext(self.filename)[1].lower()
+        for lang, exts in self.config.get("supported_formats", {}).items():
+            if ext in exts:
+                return lang
+        return "text"
 
-    # Парсинг горячих клавиш
+    def handle_input(self, key):
+        if key == -1:
+            return
+
+        try:
+            # Проверка горячих клавиш
+            if key == self.keybindings.get("open_file"):
+                self.open_file()
+                return
+            if key == self.keybindings.get("save_file"):
+                self.save_file()
+                return
+            if key == self.keybindings.get("quit"):
+                self.exit_editor()
+                return
+            # Добавляем остальные горячие клавиши
+            if key == self.keybindings.get("delete"):
+                self.handle_delete()
+                return
+            if key == self.keybindings.get("paste"):
+                # Заглушка для функционала paste
+                self.status_message = "Paste not implemented yet"
+                return
+            if key == self.keybindings.get("copy"):
+                # Заглушка для функционала copy
+                self.status_message = "Copy not implemented yet"
+                return
+            if key == self.keybindings.get("cut"):
+                # Заглушка для функционала cut
+                self.status_message = "Cut not implemented yet"
+                return
+            if key == self.keybindings.get("undo"):
+                # Заглушка для функционала undo
+                self.status_message = "Undo not implemented yet"
+                return
+            if key == self.keybindings.get("select_all"):
+                # Заглушка для функционала select_all
+                self.status_message = "Select all not implemented yet"
+                return
+
+            # Handle Enter key
+            if key == ord('\n'):
+                current_line = self.text[self.cursor_y]
+                remaining = current_line[self.cursor_x:]
+                self.text[self.cursor_y] = current_line[:self.cursor_x]
+                self.text.insert(self.cursor_y + 1, remaining)
+                self.cursor_y += 1
+                self.cursor_x = 0
+                self.modified = True
+                return
+
+            # Function keys and arrow keys
+            special_keys = {
+                curses.KEY_UP: self.handle_up,
+                curses.KEY_DOWN: self.handle_down,
+                curses.KEY_LEFT: self.handle_left,
+                curses.KEY_RIGHT: self.handle_right,
+                curses.KEY_HOME: self.handle_home,
+                curses.KEY_END: self.handle_end,
+                curses.KEY_PPAGE: self.handle_page_up,
+                curses.KEY_NPAGE: self.handle_page_down,
+                curses.KEY_DC: self.handle_delete,
+                curses.KEY_BACKSPACE: self.handle_backspace,
+                127: self.handle_backspace,  # Additional backspace code
+                ord('\b'): self.handle_backspace  # Another backspace code
+            }
+
+            if key in special_keys:
+                special_keys[key]()
+                return
+
+             # Regular character input
+            if 32 <= key <= 126 or key > 127:
+                self.handle_char_input(key)
+
+        except Exception as e:
+            logging.exception("Error handling input")
+            self.status_message = f"Input error: {str(e)}"
+
+    def handle_up(self):
+        if self.cursor_y > 0:
+            self.cursor_y -= 1
+            self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+
+    def handle_down(self):
+        if self.cursor_y < len(self.text) - 1:
+            self.cursor_y += 1
+            self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+
+    def handle_left(self):
+        if self.cursor_x > 0:
+            self.cursor_x -= 1
+        elif self.cursor_y > 0:
+            self.cursor_y -= 1
+            self.cursor_x = len(self.text[self.cursor_y])
+
+    def handle_right(self):
+        if self.cursor_x < len(self.text[self.cursor_y]):
+            self.cursor_x += 1
+        elif self.cursor_y < len(self.text) - 1:
+            self.cursor_y += 1
+            self.cursor_x = 0
+
+    def handle_home(self):
+        self.cursor_x = 0
+
+    def handle_end(self):
+        self.cursor_x = len(self.text[self.cursor_y])
+
+    def handle_page_up(self):
+        self.cursor_y = max(0, self.cursor_y - 10)
+        self.scroll_top = max(0, self.scroll_top - 10)
+        self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+
+    def handle_page_down(self):
+        self.cursor_y = min(len(self.text) - 1, self.cursor_y + 10)
+        self.scroll_top = min(len(self.text) - 1, self.scroll_top + 10)
+        self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+
+    def handle_delete(self):
+        if self.cursor_x < len(self.text[self.cursor_y]):
+            self.text[self.cursor_y] = (
+                self.text[self.cursor_y][:self.cursor_x] +
+                self.text[self.cursor_y][self.cursor_x + 1:]
+            )
+            self.modified = True
+        elif self.cursor_y < len(self.text) - 1:
+            # Если курсор в конце строки и есть следующая строка,
+            # объединяем текущую строку со следующей
+            self.text[self.cursor_y] += self.text[self.cursor_y + 1]
+            del self.text[self.cursor_y + 1]
+            self.modified = True
+
+    def handle_backspace(self):
+        if self.cursor_x > 0:
+            line = self.text[self.cursor_y]
+            self.text[self.cursor_y] = line[:self.cursor_x - 1] + line[self.cursor_x:]
+            self.cursor_x -= 1
+            self.modified = True
+        elif self.cursor_y > 0:
+            prev_line = self.text[self.cursor_y - 1]
+            self.cursor_x = len(prev_line)
+            self.text[self.cursor_y - 1] += self.text[self.cursor_y]
+            del self.text[self.cursor_y]
+            self.cursor_y -= 1
+            self.modified = True
+
+    def handle_char_input(self, key):
+        try:
+            char = chr(key)
+            current_line = self.text[self.cursor_y]
+            if self.insert_mode:
+                self.text[self.cursor_y] = (
+                    current_line[:self.cursor_x] +
+                    char +
+                    current_line[self.cursor_x:]
+                )
+            else:
+                self.text[self.cursor_y] = (
+                    current_line[:self.cursor_x] +
+                    char +
+                    (current_line[self.cursor_x + 1:] if self.cursor_x < len(current_line) else '')
+                )
+            self.cursor_x += 1
+            self.modified = True
+        except (ValueError, UnicodeEncodeError):
+            logging.error(f"Cannot encode character: {key}")
+
     def parse_key(self, key_str):
+        if not key_str:
+            return -1
+
         parts = key_str.split("+")
         if len(parts) == 2 and parts[0].lower() == "ctrl":
             return ord(parts[1].lower()) - ord('a') + 1
@@ -202,218 +462,193 @@ class SwayEditor:
             return curses.KEY_DC
         elif key_str.lower() == "insert":
             return curses.KEY_IC
-        else:
-            return ord(key_str[-1])
-        
-        
-    # Загрузка правил подсветки синтаксиса
-    def load_syntax_highlighting(self):
-        for lang, rules in self.config.get("syntax_highlighting", {}).items():
-            compiled_rules = []
-            for rule in rules:
-                pattern = re.compile(rule["pattern"])
-                color = rule["color"]
-                compiled_rules.append((pattern, color))
-            self.syntax_rules[lang] = compiled_rules
-    
-    
-    # Применение подсветки синтаксиса
-    def apply_syntax_highlighting(self, line, lang):
-        if not line.strip():  # Если строка пустая или содержит только пробелы
-            return [(line, curses.color_pair(0))]
-        if lang not in self.syntax_rules:
-            return [(line, curses.color_pair(0))]
-        
-        result = []
-        current_pos = 0
-        for pattern, color_name in self.syntax_rules[lang]:
-            for match in pattern.finditer(line):
-                start, end = match.span()
-                if start > current_pos:
-                    result.append((line[current_pos:start], curses.color_pair(0)))
-                color_pair = self.get_color_code(color_name)
-                result.append((line[start:end], curses.color_pair(color_pair)))
-                current_pos = end
-        if current_pos < len(line):
-            result.append((line[current_pos:], curses.color_pair(0)))
-        return result
+        try:
+            return ord(key_str)
+        except TypeError:
+            return -1
 
-
-    # Преобразование цвета
-    def get_color_code(self, color_name):
-        color_map = {
-            "keyword_color": 1,
-            "string_color": 2,
-            "comment_color": 3
-        }
-        return color_map.get(color_name, 0)
-            
-
-    #--------------------------------------
-    # Обработка ввода
-    #--------------------------------------
-    def handle_input(self, key):
-        if key == self.keybindings.get("quit", 17):  # 17 = Ctrl+Q
-            self.exit_editor()
-        elif key == self.keybindings.get("save_file", 19):  # 19 = Ctrl+S
-            self.save_file()
-        elif key == self.keybindings.get("open_file", 6):  # Добавить эту строку (6 = Ctrl+F по вашей конфигурации)
-            self.open_file()
-        elif key == curses.KEY_UP:
-            if self.cursor_y > 0:
-                self.cursor_y -= 1
-        elif key == curses.KEY_DOWN:
-            if self.cursor_y < len(self.text) - 1:
-                self.cursor_y += 1
-        elif key == curses.KEY_LEFT:
-            if self.cursor_x > 0:
-                self.cursor_x -= 1
+    def get_char_width(self, char):
+        """Calculate the display width of a character"""
+        try:
+            if ord(char) < 128:
+                return 1
+            # Используем east_asian_width для определения ширины символа
+            import unicodedata
+            width = unicodedata.east_asian_width(char)
+            if width in ('F', 'W'):  # Full-width characters
+                return 2
+            elif width == 'A':  # Ambiguous width
+                return 2
             else:
-                # Переход на предыдущую строку
-                if self.cursor_y > 0:
-                    self.cursor_y -= 1
-                    self.cursor_x = len(self.text[self.cursor_y])
-        elif key == curses.KEY_RIGHT:
-            if self.cursor_x < len(self.text[self.cursor_y]):
-                self.cursor_x += 1
-            else:
-                # Переход на следующую строку
-                if self.cursor_y < len(self.text) - 1:
-                    self.cursor_y += 1
-                    self.cursor_x = 0
-        elif key == ord('\n'):
-            self.text.insert(self.cursor_y + 1, "")
-            self.cursor_y += 1
-            self.cursor_x = 0
-            self.modified = True
-        elif key == curses.KEY_BACKSPACE or key == 127:
-            if self.cursor_x > 0:
-                self.text[self.cursor_y] = (
-                    self.text[self.cursor_y][:self.cursor_x - 1] +
-                    self.text[self.cursor_y][self.cursor_x:]
-                )
-                self.cursor_x -= 1
-                self.modified = True
-            elif self.cursor_y > 0:
-                # Объединение со строкой выше
-                prev_line = self.text[self.cursor_y - 1]
-                self.text[self.cursor_y - 1] += self.text[self.cursor_y]
-                del self.text[self.cursor_y]
-                self.cursor_y -= 1
-                self.cursor_x = len(prev_line)
-                self.modified = True
-        else:
-            self.text[self.cursor_y] = (
-                self.text[self.cursor_y][:self.cursor_x] +
-                chr(key) +
-                self.text[self.cursor_y][self.cursor_x:]
-            )
-            self.cursor_x += 1
-            self.modified = True
+                return 1
+        except (UnicodeEncodeError, TypeError):
+            return 1
 
-
-
-    #--------------------------------------
-    # Открытие файла
-    #--------------------------------------
     def open_file(self):
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
-            if choice.lower().startswith("y"):
+            if choice and choice.lower().startswith("y"):
                 self.save_file()
 
         filename = self.prompt("Open file: ")
         if not filename:
             self.status_message = "Open cancelled"
             return
-        
+
         try:
-            with open(filename, "r") as f:
+            # Попытка определить кодировку файла
+            import chardet
+            with open(filename, 'rb') as f:
+                result = chardet.detect(f.read())
+                self.encoding = result['encoding'] or 'UTF-8'
+            
+            with open(filename, "r", encoding=self.encoding, errors='replace') as f:
                 self.text = f.read().splitlines()
-                # Добавляем пустую строку, если список пуст
                 if not self.text:
                     self.text = [""]
             self.filename = filename
             self.modified = False
-            self.cursor_x = 0
-            self.cursor_y = 0
-            self.scroll_top = 0
-            self.scroll_left = 0
-            self.status_message = f"Opened {filename}"
+            self.set_initial_cursor_position()
+            self.status_message = f"Opened {filename} with encoding {self.encoding}"
+            curses.flushinp()  # Очистка буфера ввода
+        except ImportError:
+            # Если модуль chardet не установлен, просто используем UTF-8
+            try:
+                with open(filename, "r", encoding="utf-8", errors='replace') as f:
+                    self.text = f.read().splitlines()
+                    if not self.text:
+                        self.text = [""]
+                self.filename = filename
+                self.encoding = "UTF-8"
+                self.modified = False
+                self.set_initial_cursor_position()
+                self.status_message = f"Opened {filename}"
+                curses.flushinp()  # Очистка буфера ввода
+            except FileNotFoundError:
+                self.status_message = f"File not found: {filename}"
+                logging.error(f"File not found: {filename}")
+            except OSError as e:
+                self.status_message = f"Error opening file: {e}"
+                logging.exception(f"Error opening file: {filename}")
+            except Exception as e:
+                self.status_message = f"Error opening file: {e}"
+                logging.exception(f"Error opening file: {filename}")
+        except FileNotFoundError:
+            self.status_message = f"File not found: {filename}"
+            logging.error(f"File not found: {filename}")
+        except OSError as e:
+            self.status_message = f"Error opening file: {e}"
+            logging.exception(f"Error opening file: {filename}")
         except Exception as e:
-            self.status_message = f"Error opening file: {str(e)}"
+            self.status_message = f"Error opening file: {e}"
+            logging.exception(f"Error opening file: {filename}")
 
-    #--------------------------------------
-    # Сохранение файла
-    #--------------------------------------
     def save_file(self):
         if self.filename == "noname":
             self.filename = self.prompt("Save as: ")
             if not self.filename:
                 self.status_message = "Save cancelled"
                 return
+
+        # Check if the file exists and is writable *before* attempting to open
+        if os.path.exists(self.filename):
+            if not os.access(self.filename, os.W_OK):
+                self.status_message = f"No write permission: {self.filename}"
+                return
         try:
-            with open(self.filename, "w") as f:
+            with open(self.filename, "w", encoding=self.encoding, errors='replace') as f:
                 f.write(os.linesep.join(self.text))
             self.modified = False
             self.status_message = f"Saved to {self.filename}"
+        except OSError as e:
+            self.status_message = f"Error saving file: {e}"
+            logging.exception(f"Error saving file: {self.filename}")
         except Exception as e:
-            self.status_message = f"Error saving: {str(e)}"
+            self.status_message = f"Error saving file: {e}"
+            logging.exception(f"Error saving file: {self.filename}")
 
     def exit_editor(self):
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
-            if choice.lower().startswith("y"):
+            if choice and choice.lower().startswith("y"):
                 self.save_file()
-        curses.endwin()
-        exit()
+        curses.endwin()  # Restore terminal state
+        sys.exit(0)
 
     def prompt(self, message):
-        self.stdscr.nodelay(False)
+        self.stdscr.nodelay(False)  # Переключаемся в блокирующий режим
         curses.echo()
-        self.stdscr.addstr(curses.LINES-1, 0, message)
-        self.stdscr.clrtoeol()
-        self.stdscr.refresh()
-        response = self.stdscr.getstr(curses.LINES-1, len(message), 256).decode('utf-8')
-        curses.noecho()
-        self.stdscr.nodelay(True)
+        try:
+            self.stdscr.addstr(curses.LINES - 1, 0, message)
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
+            # Use a larger buffer for UTF-8 input
+            response = self.stdscr.getstr(curses.LINES - 1, len(message), 1024).decode('utf-8', errors='replace').strip()
+        except Exception as e:
+            response = ""
+            logging.exception("Prompt error")
+        finally:
+            curses.noecho()
+            self.stdscr.nodelay(False)  # Оставляем в блокирующем режиме для основного цикла
         return response
 
+    def search_text(self, search_term):
+        """Add search functionality"""
+        matches = []
+        for line_num, line in enumerate(self.text):
+            for match in re.finditer(re.escape(search_term), line):
+                matches.append((line_num, match.start(), match.end()))
+        return matches
+
+    def validate_filename(self, filename):
+        """Add filename validation"""
+        if not filename or len(filename) > 255:
+            return False
+        if os.path.isabs(filename):
+            base_dir = os.path.dirname(os.path.abspath(filename))
+            return os.path.commonpath([base_dir, os.getcwd()]) == os.getcwd()
+        return True
+
     def run(self):
+        # Удаляем sleep для более отзывчивого интерфейса
         while True:
-            self.draw_screen()
-            key = self.stdscr.getch()
-            self.handle_input(key)
+            try:
+                self.draw_screen()
+                key = self.stdscr.getch()
+                self.handle_input(key)
+            except KeyboardInterrupt:
+                # Обработка Ctrl+C
+                self.exit_editor()
+            except Exception as e:
+                logging.exception("Unhandled exception in main loop")
+                self.status_message = f"Error: {str(e)}"
 
-
-#--------------------------------------
-# Основная функция 
-# 
-# Эти изменения позволят вам открывать файлы с помощью сочетания клавиш Ctrl+F, 
-# а также защитят от потери несохраненных изменений при открытии нового файла. 
-# Дополнительное изменение позволит открывать файлы непосредственно из командной 
-# строки при запуске редактора.
-#  
-#--------------------------------------
 def main(stdscr):
-    import sys
-    editor = SwayEditor(stdscr)  # Создаем экземпляр редактора
+    # Setup locale for Unicode
+    os.environ['LANG'] = 'en_US.UTF-8'
+    locale.setlocale(locale.LC_ALL, '')
     
-    # Открытие файла, если он указан в аргументах командной строки
-    if len(sys.argv) > 1:
-        editor.filename = sys.argv[1]
-        try:
-            with open(editor.filename, "r") as f:
-                editor.text = f.read().splitlines()
-                if not editor.text:
-                    editor.text = [""]
-        except Exception as e:
-            editor.status_message = f"Error opening {editor.filename}: {str(e)}"
-            editor.filename = "noname"
+    # Setup stdout encoding
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, errors='replace')
     
-    editor.run()  # Запускаем цикл редактора
+    # Create editor instance
+    editor = SwayEditor(stdscr)
+    try:
+        if len(sys.argv) > 1:
+            # Если указано имя файла в аргументах командной строки
+            editor.filename = sys.argv[1]
+            editor.open_file()
+    except Exception as e:
+        logging.exception(f"Error opening file from command line: {e}")
+    
+    editor.run()
 
-# Запуск редактора
 if __name__ == "__main__":
-    curses.wrapper(main)
-    
+    try:
+        curses.wrapper(main)
+    except Exception as e:
+        logging.exception("Unhandled exception in main")
+        print(f"An error occurred. See editor.log for details.")
+        sys.exit(1)
+        
