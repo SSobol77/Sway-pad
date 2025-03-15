@@ -9,12 +9,21 @@ import re
 import sys
 import logging
 
+
+# 
 CONFIG_FILE = "config.toml"
 
 # Setup logging
 logging.basicConfig(filename='editor.log', level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)')
 
+
+
+#-----------------------------------------------------------------
+# 1. Загрузка конфигурации из файла конфигурации (`config.toml`)
+#    с применением значений по умолчанию, если файл отсутствует 
+#    или содержит ошибки.
+#-----------------------------------------------------------------
 def load_config():
     """Add default configuration values"""
     default_config = {
@@ -47,8 +56,13 @@ def load_config():
         logging.warning(f"Config file '{CONFIG_FILE}' not found. Using defaults.")
         return default_config
 
-
+# 
 class SwayEditor:
+    #-----------------------------------------------------------------
+    # 2. Инициализация редактора: загрузка конфигурации,
+    #    установка начальных параметров редактора, включение цветов и 
+    #    настройка привязок клавиш.
+    #-----------------------------------------------------------------
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.config = load_config()
@@ -93,12 +107,20 @@ class SwayEditor:
         self.load_syntax_highlighting()
         self.set_initial_cursor_position()
 
+
+    #---------------------------------------------------------------
+    # 3. Установка начальной позиции курсора и параметров прокрутки текста.
+    #---------------------------------------------------------------
     def set_initial_cursor_position(self):
         self.cursor_x = 0
         self.cursor_y = 0
         self.scroll_top = 0
         self.scroll_left = 0
 
+
+    #---------------------------------------------------------------
+    # 4. Инициализация цветовых пар для выделения синтаксиса и элементов интерфейса.
+    #---------------------------------------------------------------
     def init_colors(self):
         bg_color = -1
         curses.init_pair(1, curses.COLOR_BLUE, bg_color)
@@ -128,6 +150,11 @@ class SwayEditor:
             'attribute': curses.color_pair(3),
         }
 
+
+    #---------------------------------------------------------------
+    # 5. Применение синтаксической подсветки текста с использованием 
+    #    заранее скомпилированных регулярных выражений.
+    #---------------------------------------------------------------
     def apply_syntax_highlighting(self, line, lang):
         """Cache compiled regex patterns"""
         if not hasattr(self, '_compiled_patterns'):
@@ -169,6 +196,11 @@ class SwayEditor:
 
         return result
 
+
+    #--------------------------------------------------------------
+    # 6. Загрузка и компиляция правил синтаксической подсветки из 
+    #    конфигурационного файла.
+    #--------------------------------------------------------------
     def load_syntax_highlighting(self):
         self.syntax_highlighting = {}
         try:
@@ -187,6 +219,10 @@ class SwayEditor:
             logging.exception("Error loading syntax highlighting")
 
 
+    #--------------------------------------------------------------
+    # 7. Отрисовка экрана редактора, включая строки текста, 
+    #    номера строк, статусную строку и позиционирование курсора.
+    #--------------------------------------------------------------
     def draw_screen(self):
         self.stdscr.clear()
         height, width = self.stdscr.getmaxyx()
@@ -276,6 +312,11 @@ class SwayEditor:
 
         self.stdscr.refresh()
 
+
+    #----------------------------------------------------------------
+    # 8. Определение языка файла на основе его расширения для последующего 
+    #    применения синтаксической подсветки.
+    #----------------------------------------------------------------
     def detect_language(self):
         ext = os.path.splitext(self.filename)[1].lower()
         for lang, exts in self.config.get("supported_formats", {}).items():
@@ -283,6 +324,13 @@ class SwayEditor:
                 return lang
         return "text"
 
+
+    #################################################################
+    # 9. Обработка нажатых клавиш: 
+    # 
+    #   обработка специальных команд (открыть, сохранить и т.д.) 
+    #   и ввод текста.
+    #----------------------------------------------------------------
     def handle_input(self, key):
         if key == -1:
             return
@@ -298,7 +346,8 @@ class SwayEditor:
             if key == self.keybindings.get("quit"):
                 self.exit_editor()
                 return
-            # Добавляем остальные горячие клавиши
+            
+            # TODO: Добавляем остальные горячие клавиши
             if key == self.keybindings.get("delete"):
                 self.handle_delete()
                 return
@@ -362,16 +411,32 @@ class SwayEditor:
             logging.exception("Error handling input")
             self.status_message = f"Input error: {str(e)}"
 
+
+    #---------------------------------------------------------------
+    # 10. Перемещение курсора вверх по строкам.
+    #     Клаваиша `Arr Up`.
+    #---------------------------------------------------------------
     def handle_up(self):
         if self.cursor_y > 0:
             self.cursor_y -= 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
 
+
+
+    #--------------------------------------------------------------
+    # 11. Перемещение курсора вниз по строкам.
+    #     Клаваиша `Arr Down`.
+    #--------------------------------------------------------------    
     def handle_down(self):
         if self.cursor_y < len(self.text) - 1:
             self.cursor_y += 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
 
+
+    #---------------------------------------------------------------
+    # 12. Перемещение курсора влево на один символ или на предыдущую
+    #     строку. Клаваиша `<-`.
+    #---------------------------------------------------------------
     def handle_left(self):
         if self.cursor_x > 0:
             self.cursor_x -= 1
@@ -379,6 +444,11 @@ class SwayEditor:
             self.cursor_y -= 1
             self.cursor_x = len(self.text[self.cursor_y])
 
+
+    #---------------------------------------------------------------
+    # 13. Перемещение курсора вправо на один символ или на следующую
+    #     строку. Клаваиша `->`.
+    #---------------------------------------------------------------
     def handle_right(self):
         if self.cursor_x < len(self.text[self.cursor_y]):
             self.cursor_x += 1
@@ -386,22 +456,47 @@ class SwayEditor:
             self.cursor_y += 1
             self.cursor_x = 0
 
+
+    #---------------------------------------------------------------
+    # 14. Перемещение курсора в начало текущей строки. 
+    #     Клаваиша `Home`.
+    #---------------------------------------------------------------
     def handle_home(self):
         self.cursor_x = 0
 
+
+    #---------------------------------------------------------------
+    # 15. Перемещение курсора в конец текущей строки. 
+    #     Клаваиша `End`.
+    #---------------------------------------------------------------
     def handle_end(self):
         self.cursor_x = len(self.text[self.cursor_y])
 
+
+    #---------------------------------------------------------------
+    # 16. Перемещение курсора вверх на страницу (на 10 строк). 
+    #     Клаваиша `PageUp`.
+    #---------------------------------------------------------------
     def handle_page_up(self):
         self.cursor_y = max(0, self.cursor_y - 10)
         self.scroll_top = max(0, self.scroll_top - 10)
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
 
+
+    #---------------------------------------------------------------
+    # 17. Перемещение курсора вниз на страницу (на 10 строк).
+    #     Клаваиша `PageDown`.
+    #---------------------------------------------------------------
     def handle_page_down(self):
         self.cursor_y = min(len(self.text) - 1, self.cursor_y + 10)
         self.scroll_top = min(len(self.text) - 1, self.scroll_top + 10)
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
 
+
+    #---------------------------------------------------------------
+    # 18. Удаление символа под курсором или объединение текущей 
+    #     строки со следующей. Клаваиша `Delete`.
+    #---------------------------------------------------------------
     def handle_delete(self):
         if self.cursor_x < len(self.text[self.cursor_y]):
             self.text[self.cursor_y] = (
@@ -416,6 +511,11 @@ class SwayEditor:
             del self.text[self.cursor_y + 1]
             self.modified = True
 
+
+    #---------------------------------------------------------------
+    # 19. Удаление символа слева от курсора или объединение текущей 
+    #     строки с предыдущей. Клаваиша `Backspace`.
+    #---------------------------------------------------------------
     def handle_backspace(self):
         if self.cursor_x > 0:
             line = self.text[self.cursor_y]
@@ -430,6 +530,10 @@ class SwayEditor:
             self.cursor_y -= 1
             self.modified = True
 
+
+    #---------------------------------------------------------------
+    # 20. Ввод обычного печатного символа в текущую позицию курсора.
+    #---------------------------------------------------------------
     def handle_char_input(self, key):
         try:
             char = chr(key)
@@ -451,6 +555,11 @@ class SwayEditor:
         except (ValueError, UnicodeEncodeError):
             logging.error(f"Cannot encode character: {key}")
 
+
+    #===============================================================
+    # 21. Преобразование строки с описанием горячих клавиш из 
+    #     конфигурации в соответствующий код клавиши.
+    #---------------------------------------------------------------
     def parse_key(self, key_str):
         if not key_str:
             return -1
@@ -467,6 +576,11 @@ class SwayEditor:
         except TypeError:
             return -1
 
+
+    #---------------------------------------------------------------
+    # 22. Расчёт ширины символа с учётом особенностей UTF-8
+    #     и отображения полушироких и полношироких символов.
+    #---------------------------------------------------------------
     def get_char_width(self, char):
         """Calculate the display width of a character"""
         try:
@@ -484,6 +598,12 @@ class SwayEditor:
         except (UnicodeEncodeError, TypeError):
             return 1
 
+
+    #=================================================================
+    # 23. Открытие указанного пользователем файла с автоматическим
+    #     определением кодировки и загрузкой содержимого в редактор.
+    #     Модуль `сhardet`.
+    #-----------------------------------------------------------------
     def open_file(self):
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
@@ -543,6 +663,11 @@ class SwayEditor:
             self.status_message = f"Error opening file: {e}"
             logging.exception(f"Error opening file: {filename}")
 
+
+    #---------------------------------------------------------------
+    # 24. Сохранение текущего содержимого редактора в файл с 
+    #     проверкой разрешений на запись.
+    #---------------------------------------------------------------
     def save_file(self):
         if self.filename == "noname":
             self.filename = self.prompt("Save as: ")
@@ -567,6 +692,11 @@ class SwayEditor:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {self.filename}")
 
+
+    #---------------------------------------------------------------
+    # 25. Выход из редактора с предварительным запросом на 
+    #     сохранение несохранённых изменений.
+    #---------------------------------------------------------------
     def exit_editor(self):
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
@@ -575,6 +705,11 @@ class SwayEditor:
         curses.endwin()  # Restore terminal state
         sys.exit(0)
 
+
+    #---------------------------------------------------------------
+    # 26. Вывод сообщения пользователю и получение ввода текста
+    #     с клавиатуры.
+    #---------------------------------------------------------------
     def prompt(self, message):
         self.stdscr.nodelay(False)  # Переключаемся в блокирующий режим
         curses.echo()
@@ -592,6 +727,10 @@ class SwayEditor:
             self.stdscr.nodelay(False)  # Оставляем в блокирующем режиме для основного цикла
         return response
 
+    #---------------------------------------------------------------
+    # 27. Поиск заданного текста по всему документу и возврат 
+    #     позиций найденных совпадений.
+    #---------------------------------------------------------------
     def search_text(self, search_term):
         """Add search functionality"""
         matches = []
@@ -600,6 +739,10 @@ class SwayEditor:
                 matches.append((line_num, match.start(), match.end()))
         return matches
 
+
+    #---------------------------------------------------------------
+    # 28. Проверка имени файла на корректность, длину и допустимый путь.
+    #---------------------------------------------------------------
     def validate_filename(self, filename):
         """Add filename validation"""
         if not filename or len(filename) > 255:
@@ -609,6 +752,11 @@ class SwayEditor:
             return os.path.commonpath([base_dir, os.getcwd()]) == os.getcwd()
         return True
 
+
+    #===============================================================
+    # 29. Главный цикл работы редактора: отрисовка интерфейса и 
+    #     ожидание нажатия клавиш от пользователя.
+    #---------------------------------------------------------------
     def run(self):
         # Удаляем sleep для более отзывчивого интерфейса
         while True:
@@ -623,6 +771,12 @@ class SwayEditor:
                 logging.exception("Unhandled exception in main loop")
                 self.status_message = f"Error: {str(e)}"
 
+
+
+####################################################################
+# 30. Инициализация редактора с учётом локали, кодировки вывода
+#     и обработкой аргументов командной строки.        
+#-------------------------------------------------------------------
 def main(stdscr):
     # Setup locale for Unicode
     os.environ['LANG'] = 'en_US.UTF-8'
@@ -640,15 +794,20 @@ def main(stdscr):
             editor.filename = sys.argv[1]
             editor.open_file()
     except Exception as e:
-        logging.exception(f"Error opening file from command line: {e}")
+        logging.exception(f"Error opening file from command line: {e}")         
     
     editor.run()
 
+
+
+# ==================== Main Entry Point ====================
+# 31. :) Точка входа в приложение 
+#---------------------------------------------------------------
 if __name__ == "__main__":
     try:
         curses.wrapper(main)
     except Exception as e:
-        logging.exception("Unhandled exception in main")
+        logging.exception("Unhandled exception in main - Необработанное исключение в главном цикле")
         print(f"An error occurred. See editor.log for details.")
+        print("Произошла ошибка. Подробности в editor.log.")
         sys.exit(1)
-        
