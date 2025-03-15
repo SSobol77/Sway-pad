@@ -2,12 +2,13 @@
 import curses
 import locale
 import toml
-import time
-import traceback
 import os
 import re
 import sys
 import logging
+import chardet
+import unicodedata
+import codecs
 
 
 CONFIG_FILE = "config.toml"  # Имя файла конфигурации редактора в формате TOML
@@ -36,9 +37,40 @@ def load_config():
             "select_all": "ctrl+a",
             "quit": "ctrl+q"
         },
-        "syntax_highlighting": {},
-        "supported_formats": {}
+    "syntax_highlighting": {
+        "python": {
+            "patterns": [
+                {"pattern": r"(def|class|import|from|if|else|elif|while|for|in|return|try|except|finally)\b", "color": "keyword"},
+                {"pattern": r"#.*$", "color": "comment"},
+                {'pattern': r'(""".*?""")|(".*?")|(\'..*?\')', 'color': 'string'},
+                {"pattern": r"\b[A-Z][A-Za-z0-9_]*\b", "color": "type"},
+                {"pattern": r"\b(True|False|None|self)\b", "color": "literal"}
+            ]
+        },
+        "javascript": {
+            "patterns": [
+                {"pattern": r"(function|var|let|const|if|else|for|while|return|try|catch|finally)\b", "color": "keyword"},
+                {"pattern": r"//.*$", "color": "comment"},
+                {"pattern": r"(/\*.*?\*/)", "color": "comment"},
+                {'pattern': r'(\'.*?\')|(".*?")|(`.*?`)', 'color': 'string'},
+                {"pattern": r"\b[A-Z][A-Za-z0-9_]*\b", "color": "type"}
+            ]        
+        
+        }
+
+    },
+    "supported_formats": {
+        "python": [".py",".toml"],
+        "javascript": [".js",".mjs", ".cjs", ".jsx",".json",],
+       # "text" = [".txt", ".md",".log"],
+       # "code" = [".py", ".js"],
+       # "css" = [".css"],
+       # "html" = [".html", ".htm"],
+       # "json" = [".json"],
+       # "yaml" = [".yaml", ".yml"]
     }
+}
+
     
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -166,13 +198,22 @@ class SwayEditor:
         """Cache compiled regex patterns"""
         if not hasattr(self, '_compiled_patterns'):
             self._compiled_patterns = {}
-        
+    
+        # Если строка пустая, возвращаем без подсветки
+        if not line.strip():
+            return [(line, curses.color_pair(0))]
+    
+        # Если язык не поддерживается, возвращаем без подсветки
+        if lang not in self.syntax_highlighting:
+            return [(line, curses.color_pair(0))]
+    
+        # Компилируем паттерны, если еще не сделали
         if lang not in self._compiled_patterns:
             self._compiled_patterns[lang] = [
                 (re.compile(pattern), color)
                 for pattern, color in self.syntax_highlighting.get(lang, [])
             ]
-
+    
         if not line.strip():
             return [(line, curses.color_pair(0))]
 
@@ -326,11 +367,15 @@ class SwayEditor:
     #----------------------------------------------------------------
     def detect_language(self):
         ext = os.path.splitext(self.filename)[1].lower()
+        # Добавим логирование для отладки
+        logging.debug(f"Detecting language for extension: {ext}")
         for lang, exts in self.config.get("supported_formats", {}).items():
+            logging.debug(f"Checking if {ext} is in {exts} for language {lang}")
             if ext in exts:
+                logging.debug(f"Detected language: {lang}")
                 return lang
+        logging.debug("No language detected, using 'text'")
         return "text"
-
 
     #################################################################
     # 9. Обработка нажатых клавиш: 
@@ -353,11 +398,14 @@ class SwayEditor:
             if key == self.keybindings.get("quit"):
                 self.exit_editor()
                 return
-            
-            # TODO: Добавляем остальные горячие клавиши
+            if key == ord('\t'):  # Tab key
+                self.handle_tab()
+                return
             if key == self.keybindings.get("delete"):
                 self.handle_delete()
                 return
+
+            # TODO: Добавляем остальные горячие клавиши
             if key == self.keybindings.get("paste"):
                 # Заглушка для функционала paste
                 self.status_message = "Paste not implemented yet"
@@ -539,6 +587,57 @@ class SwayEditor:
 
 
 
+    # Tab
+    def handle_tab(self):
+        """ Handle Tab key - insert spaces or tab character based on configuration"""
+        
+        # Default to 4 spaces, but this could be configurable
+        tab_size = self.config.get("editor", {}).get("tab_size", 4)
+        use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+        
+        current_line = self.text[self.cursor_y]
+        
+        if use_spaces:
+            # Insert spaces for tab
+            spaces = " " * tab_size
+            self.text[self.cursor_y] = (
+                current_line[:self.cursor_x] +
+                spaces +
+                current_line[self.cursor_x:]
+            )
+            self.cursor_x += tab_size
+        else:
+            # Insert actual tab character
+            self.text[self.cursor_y] = (
+                current_line[:self.cursor_x] +
+                "\t" +
+                current_line[self.cursor_x:]
+            )
+            self.cursor_x += 1
+        
+        self.modified = True
+
+
+    # Smart Tab implement smart indentation that aligns with the indentation of the previous line
+    def handle_smart_tab(self):
+        """Smart tab that respects the indentation of the previous line"""
+        if self.cursor_y > 0:
+            prev_line = self.text[self.cursor_y - 1]
+            # Calculate leading whitespace
+            leading_space_match = re.match(r'^(\s*)', prev_line)
+            if leading_space_match:
+                leading_space = leading_space_match.group(1)
+                # Only apply if we're at the beginning of the line
+                if self.cursor_x == 0:
+                    self.text[self.cursor_y] = leading_space + self.text[self.cursor_y]
+                    self.cursor_x = len(leading_space)
+                    self.modified = True
+                    return
+        
+        # Fall back to regular tab if not at beginning or no previous line
+        self.handle_tab()
+
+
     #---------------------------------------------------------------
     # 19a. Начало и конец выделения текста (для копирования/вырезания).
     #---------------------------------------------------------------
@@ -642,8 +741,7 @@ class SwayEditor:
         try:
             if ord(char) < 128:
                 return 1
-            # Используем east_asian_width для определения ширины символа
-            import unicodedata
+            # Используем east_asian_width для определения ширины символа            
             width = unicodedata.east_asian_width(char)
             if width in ('F', 'W'):  # Full-width characters
                 return 2
@@ -673,7 +771,6 @@ class SwayEditor:
 
         try:
             # Попытка определить кодировку файла
-            import chardet
             with open(filename, 'rb') as f:
                 result = chardet.detect(f.read())
                 self.encoding = result['encoding'] or 'UTF-8'
@@ -837,6 +934,9 @@ class SwayEditor:
         return True
 
 
+    #===================================================================
+    # TODO: Реализовать группу методов интеграции и улучшений редактора:
+
 
     #---------------------------------------------------------------
     # 28a. Выполнение произвольной shell-команды.
@@ -976,7 +1076,6 @@ def main(stdscr):
     locale.setlocale(locale.LC_ALL, '')
     
     # Setup stdout encoding
-    import codecs
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, errors='replace')
     
     # Create editor instance
@@ -990,6 +1089,7 @@ def main(stdscr):
         logging.exception(f"Error opening file from command line: {e}")
     
     editor.run()
+
 
 
 # ==================== Main Entry Point ====================
