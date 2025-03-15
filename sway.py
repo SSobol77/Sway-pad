@@ -10,14 +10,12 @@ import sys
 import logging
 
 
-# 
-CONFIG_FILE = "config.toml"
 
-# Setup logging
+CONFIG_FILE = "config.toml"  # Имя файла конфигурации редактора в формате TOML
+
+# Настройка системы логирования для записи событий и ошибок в файл editor.log
 logging.basicConfig(filename='editor.log', level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)')
-
-
 
 #-----------------------------------------------------------------
 # 1. Загрузка конфигурации из файла конфигурации (`config.toml`)
