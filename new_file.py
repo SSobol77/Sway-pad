@@ -1,11 +1,8 @@
-# moj termnal supersway
-
-class Action:
-
-    def dikson(self, a, b):
-        c = a + b
-        print(c)
-
-action_instance = Action()
-action_instance.dikson(3, 6)
-
+# to jest test
+import sys
+
+class Agorika:
+    def monka(self,a,b,c):
+        d = (a + b) / c
+        print("Result = ", c)
+

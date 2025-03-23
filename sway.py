@@ -5,6 +5,7 @@ import toml
 import os
 import re
 import sys
+import time  # Add this import
 import logging
 import chardet
 import unicodedata
@@ -269,6 +270,11 @@ class SwayEditor:
     """
     def __init__(self, stdscr):
         self.stdscr = stdscr
+        # Enable special keys handling
+        self.stdscr.keypad(True)  # Enable keypad mode
+        curses.raw()              # Raw mode for better key handling
+        curses.nonl()            # Don't translate enter key
+        curses.noecho()          # Don't echo keys
         self.config = load_config()  # Загружаем конфигурацию из файла config.toml
         self.text = [""]
         self.cursor_x = 0
@@ -279,7 +285,6 @@ class SwayEditor:
         #self.filename = "noname"
         self.modified = False
         self.encoding = "UTF-8"
-        self.stdscr.keypad(True)
         self.stdscr.nodelay(False)
         locale.setlocale(locale.LC_ALL, "")
         curses.start_color()
@@ -597,93 +602,57 @@ class SwayEditor:
     #   и ввод текста.
     # ----------------------------------------------------------------
     def handle_input(self, key):
-        if key == -1:
-            return
-
+        """Handle keyboard input."""
+        logging.debug(f"Key pressed: {key}")
         try:
-            # Проверка горячих клавиш
-            if key == self.keybindings.get("open_file"):
-                self.open_file()
-                return
-            if key == self.keybindings.get("save_file"):
-                self.save_file()
-                return
-            if key == self.keybindings.get("quit"):
-                self.exit_editor()
-                return
-            if key == ord("\t"):  # Tab key
-                self.handle_tab()
-                return
-            if key == self.keybindings.get("delete"):
+            # Special keys
+            if key == curses.KEY_ENTER or key == 10 or key == 13:  # Enter
+                self.handle_enter()
+            elif key == curses.KEY_UP or key == 259 or key == 450:  # Up arrow 259, 450
+                self.handle_up()
+            elif key == curses.KEY_DOWN or key == 258 or key == 456:  # Down arrow 258, 456
+                self.handle_down()
+            elif key == curses.KEY_LEFT or key == 260 or key == 452:  # Left arrow 260, 452
+                self.handle_left()
+            elif key == curses.KEY_RIGHT or key == 261 or key == 454:  # Right arrow 261, 454
+                self.handle_right()
+            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:  # Добавьте 8 (PowerShell)
+                self.handle_backspace()
+            elif key == curses.KEY_DC or key == 330 or key == 462:  # Delete   330, 462
                 self.handle_delete()
-                return
-
-            # TODO: Добавляем остальные горячие клавиши
-            if key == self.keybindings.get("paste"):
-                # Заглушка для функционала paste
-                self.status_message = "Paste not implemented yet"
-                return
-            if key == self.keybindings.get("copy"):
-                # Заглушка для функционала copy
-                self.status_message = "Copy not implemented yet"
-                return
-            if key == self.keybindings.get("cut"):
-                # Заглушка для функционала cut
-                self.status_message = "Cut not implemented yet"
-                return
-            if key == self.keybindings.get("undo"):
-                # Заглушка для функционала undo
-                self.status_message = "Undo not implemented yet"
-                return
-            if key == self.keybindings.get("select_all"):
-                # Заглушка для функционала select_all
-                self.status_message = "Select all not implemented yet"
-                return
-
-            # Handle Enter key
-            if key == ord("\n"):
-                current_line = self.text[self.cursor_y]
-                remaining = current_line[self.cursor_x :]
-                self.text[self.cursor_y] = current_line[: self.cursor_x]
-                self.text.insert(self.cursor_y + 1, remaining)
-                self.cursor_y += 1
-                self.cursor_x = 0
-                self.modified = True
-                return
-
-            # Function keys and arrow keys
-            special_keys = {
-                curses.KEY_UP: self.handle_up,
-                curses.KEY_DOWN: self.handle_down,
-                curses.KEY_LEFT: self.handle_left,
-                curses.KEY_RIGHT: self.handle_right,
-                curses.KEY_HOME: self.handle_home,
-                curses.KEY_END: self.handle_end,
-                curses.KEY_PPAGE: self.handle_page_up,
-                curses.KEY_NPAGE: self.handle_page_down,
-                curses.KEY_DC: self.handle_delete,
-                curses.KEY_BACKSPACE: self.handle_backspace,
-                127: self.handle_backspace,  # Additional backspace code
-                ord("\b"): self.handle_backspace,  # Another backspace code
-            }
-
-            if key in special_keys:
-                special_keys[key]()
-                return
-
-                # Regular character input
-            if 32 <= key <= 126 or key > 127:
+            elif key == curses.KEY_HOME or key == 262 or key == 449:  # Home  262, 449
+                self.handle_home()
+            elif key == curses.KEY_END or key == 360 or key == 455:  # End
+                self.handle_end()
+            elif key == curses.KEY_PPAGE or key == 339 or key == 451:  # Page Up
+                self.handle_page_up()
+            elif key == curses.KEY_NPAGE or key == 338 or key == 457:  # Page Down
+                self.handle_page_down()
+            elif key == 9:  # Tab
+                self.handle_tab()
+            elif key == 27:  # Escape
+                self.handle_escape()
+            # Function keys and other special keys
+            elif key == self.keybindings["quit"] or key == 17 or key == 3:  # Quit
+                self.exit_editor()
+            elif key == self.keybindings["save_file"] or key == 19:   # Save
+                self.save_file()
+            elif key == self.keybindings["open_file"] or key == 15:  # Open
+                self.open_file()
+            # Regular character input
+            elif 32 <= key <= 126:  # Printable ASCII characters
                 self.handle_char_input(key)
-
+                
         except Exception as e:
-            logging.exception("Error handling input")
             self.status_message = f"Input error: {str(e)}"
+            logging.exception("Error handling input")
 
     # ---------------------------------------------------------------
     # 10. Перемещение курсора вверх по строкам.
     #     Клаваиша `Arr Up`.
     # ---------------------------------------------------------------
     def handle_up(self):
+        """Handle up arrow key."""
         if self.cursor_y > 0:
             self.cursor_y -= 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
@@ -693,6 +662,7 @@ class SwayEditor:
     #     Клаваиша `Arr Down`.
     # --------------------------------------------------------------
     def handle_down(self):
+        """Handle down arrow key."""
         if self.cursor_y < len(self.text) - 1:
             self.cursor_y += 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
@@ -702,6 +672,7 @@ class SwayEditor:
     #     строку. Клаваиша `<-`.
     # ---------------------------------------------------------------
     def handle_left(self):
+        """Handle left arrow key."""
         if self.cursor_x > 0:
             self.cursor_x -= 1
         elif self.cursor_y > 0:
@@ -713,6 +684,7 @@ class SwayEditor:
     #     строку. Клаваиша `->`.
     # ---------------------------------------------------------------
     def handle_right(self):
+        """Handle right arrow key."""
         if self.cursor_x < len(self.text[self.cursor_y]):
             self.cursor_x += 1
         elif self.cursor_y < len(self.text) - 1:
@@ -724,6 +696,7 @@ class SwayEditor:
     #     Клаваиша `Home`.
     # ---------------------------------------------------------------
     def handle_home(self):
+        """Handle Home key."""
         self.cursor_x = 0
 
     # ---------------------------------------------------------------
@@ -731,6 +704,7 @@ class SwayEditor:
     #     Клаваиша `End`.
     # ---------------------------------------------------------------
     def handle_end(self):
+        """Handle End key."""
         self.cursor_x = len(self.text[self.cursor_y])
 
     # ---------------------------------------------------------------
@@ -738,35 +712,38 @@ class SwayEditor:
     #     Клаваиша `PageUp`.
     # ---------------------------------------------------------------
     def handle_page_up(self):
-        self.cursor_y = max(0, self.cursor_y - 10)
-        self.scroll_top = max(0, self.scroll_top - 10)
+        """Handle Page Up key."""
+        height = self.stdscr.getmaxyx()[0]
+        self.cursor_y = max(0, self.cursor_y - height)
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+        self.scroll_top = max(0, self.scroll_top - height)
 
     # ---------------------------------------------------------------
     # 17. Перемещение курсора вниз на страницу (на 10 строк).
     #     Клаваиша `PageDown`.
     # ---------------------------------------------------------------
     def handle_page_down(self):
-        self.cursor_y = min(len(self.text) - 1, self.cursor_y + 10)
-        self.scroll_top = min(len(self.text) - 1, self.scroll_top + 10)
+        """Handle Page Down key."""
+        height = self.stdscr.getmaxyx()[0]
+        self.cursor_y = min(len(self.text) - 1, self.cursor_y + height)
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+        if self.cursor_y >= self.scroll_top + height:
+            self.scroll_top = max(0, min(len(self.text) - height, self.scroll_top + height))
 
     # ---------------------------------------------------------------
     # 18. Удаление символа под курсором или объединение текущей
     #     строки со следующей. Клаваиша `Delete`.
     # ---------------------------------------------------------------
     def handle_delete(self):
+        """Handle delete key."""
         if self.cursor_x < len(self.text[self.cursor_y]):
-            self.text[self.cursor_y] = (
-                self.text[self.cursor_y][: self.cursor_x]
-                + self.text[self.cursor_y][self.cursor_x + 1 :]
-            )
+            # Delete character at cursor
+            line = self.text[self.cursor_y]
+            self.text[self.cursor_y] = line[:self.cursor_x] + line[self.cursor_x+1:]
             self.modified = True
         elif self.cursor_y < len(self.text) - 1:
-            # Если курсор в конце строки и есть следующая строка,
-            # объединяем текущую строку со следующей
-            self.text[self.cursor_y] += self.text[self.cursor_y + 1]
-            del self.text[self.cursor_y + 1]
+            # Join with next line
+            self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
             self.modified = True
 
     # ---------------------------------------------------------------
@@ -774,17 +751,18 @@ class SwayEditor:
     #     строки с предыдущей. Клаваиша `Backspace`.
     # ---------------------------------------------------------------
     def handle_backspace(self):
+        """Handle backspace key."""
         if self.cursor_x > 0:
+            # Delete character before cursor
             line = self.text[self.cursor_y]
-            self.text[self.cursor_y] = line[: self.cursor_x - 1] + line[self.cursor_x :]
+            self.text[self.cursor_y] = line[:self.cursor_x-1] + line[self.cursor_x:]
             self.cursor_x -= 1
             self.modified = True
         elif self.cursor_y > 0:
-            prev_line = self.text[self.cursor_y - 1]
-            self.cursor_x = len(prev_line)
-            self.text[self.cursor_y - 1] += self.text[self.cursor_y]
-            del self.text[self.cursor_y]
+            # Join with previous line
             self.cursor_y -= 1
+            self.cursor_x = len(self.text[self.cursor_y])
+            self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
             self.modified = True
 
     # Tab
@@ -845,6 +823,7 @@ class SwayEditor:
 
     # ---------------------------------------------------------------
     # 19b. Копирование выделенного текста в буфер обмена.
+    # TODO:
     # ---------------------------------------------------------------
     def copy_selection(self):
         """TODO: Копирование выделенного фрагмента текста."""
@@ -852,6 +831,7 @@ class SwayEditor:
 
     # ---------------------------------------------------------------
     # 19c. Вырезание выделенного текста в буфер обмена.
+    # TODO:
     # ---------------------------------------------------------------
     def cut_selection(self):
         """TODO: Вырезание выделенного текста."""
@@ -859,6 +839,7 @@ class SwayEditor:
 
     # ---------------------------------------------------------------
     # 19d. Вставка текста из буфера обмена.
+    # TODO:
     # ---------------------------------------------------------------
     def paste_from_clipboard(self):
         """TODO: Вставка текста из буфера обмена."""
@@ -866,11 +847,13 @@ class SwayEditor:
 
     # ---------------------------------------------------------------
     # 19e. Отмена и повтор последних действий.
+    # TODO:
     # ---------------------------------------------------------------
     def undo(self):
         """TODO: Отмена последнего действия."""
         pass
-
+    
+    # TODO:
     def redo(self):
         """TODO: Повтор последнего отменённого действия."""
         pass
@@ -902,18 +885,31 @@ class SwayEditor:
             logging.error(f"Cannot encode character: {key}")
 
 
+    def handle_enter(self):
+        """Handle enter key press."""
+        self.text.insert(self.cursor_y + 1, "")  # Insert new empty line
+        content = self.text[self.cursor_y][self.cursor_x:]  # Get content after cursor
+        self.text[self.cursor_y] = self.text[self.cursor_y][:self.cursor_x]  # Keep content before cursor
+        self.text[self.cursor_y + 1] = content  # Move content after cursor to new line
+        self.cursor_y += 1  # Move cursor to next line
+        self.cursor_x = 0  # Move cursor to start of line
+        self.modified = True
+
 
     # ===============================================================
     # 21. Преобразование строки с описанием горячих клавиш из
     #     конфигурации в соответствующий код клавиши.
     # ---------------------------------------------------------------
     def parse_key(self, key_str):
+        """
+        Преобразование строки с описанием горячих клавиш в код клавиши.
+        """
         if not key_str:
             return -1
 
         parts = key_str.split("+")
-        if len(parts) == 2 and parts[0].lower() == "ctrl":
-            return ord(parts[1].lower()) - ord("a") + 1
+        if len(parts) == 2 and parts[0].lower() == "ctrl":  # Changed & to and
+            return ord(parts[1].lower()) - ord('a') + 1
         elif key_str.lower() == "del":
             return curses.KEY_DC
         elif key_str.lower() == "insert":
@@ -1107,6 +1103,14 @@ class SwayEditor:
         curses.endwin()  # Restore terminal state
         sys.exit(0)
 
+    def handle_escape(self):
+        """Handle escape key press"""
+        if self.modified:
+            choice = self.prompt("Save changes before exit? (y/n): ")
+            if choice and choice.lower().startswith('y'):
+                self.save_file()
+        self.exit_editor()
+
     # ---------------------------------------------------------------
     # 26. Вывод сообщения пользователю и получение ввода текста
     #     с клавиатуры.
@@ -1163,43 +1167,141 @@ class SwayEditor:
 
     # ---------------------------------------------------------------
     # 28a. Выполнение произвольной shell-команды.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def execute_shell_command(self):
         """Выполнение shell-команды из редактора."""
-        pass
+        command = self.prompt("Enter command: ")
+        if not command:
+            self.status_message = "Command cancelled"
+            return
+        
+        try:
+            # Save screen state
+            curses.def_prog_mode()
+            curses.endwin()
+            
+            # Execute command
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            output, error = process.communicate(timeout=30)
+            
+            # Restore screen
+            curses.reset_prog_mode()
+            self.stdscr.refresh()
+            
+            if error:
+                self.status_message = f"Error: {error[:50]}..."
+            else:
+                self.status_message = f"Command executed: {output[:50]}..."
+                
+        except subprocess.TimeoutExpired:
+            self.status_message = "Command timed out"
+        except Exception as e:
+            self.status_message = f"Error executing command: {str(e)}"
 
     # ---------------------------------------------------------------
     # 28b. Простая интеграция с Git (commit, push, pull, diff).
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def integrate_git(self):
         """Интеграция основных команд Git."""
-        pass
+        commands = {
+            '1': ('status', 'git status'),
+            '2': ('commit', 'git commit -a'),
+            '3': ('push', 'git push'),
+            '4': ('pull', 'git pull'),
+            '5': ('diff', 'git diff')
+        }
+        
+        menu = "\n".join([f"{k}: {v[0]}" for k, v in commands.items()])
+        choice = self.prompt(f"Select Git command:\n{menu}\nChoice: ")
+        
+        if choice in commands:
+            try:
+                curses.def_prog_mode()
+                curses.endwin()
+                
+                process = subprocess.run(
+                    commands[choice][1],
+                    shell=True,
+                    text=True,
+                    capture_output=True
+                )
+                
+                curses.reset_prog_mode()
+                self.stdscr.refresh()
+                
+                if process.returncode == 0:
+                    self.status_message = f"Git {commands[choice][0]} successful"
+                else:
+                    self.status_message = f"Git error: {process.stderr[:50]}..."
+                    
+            except Exception as e:
+                self.status_message = f"Git error: {str(e)}"
+        else:
+            self.status_message = "Invalid choice"
 
     # ---------------------------------------------------------------
     # 28с. Переход к конкретной строке документа.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def goto_line(self):
         """Переход к указанной строке."""
-        pass
+        line_num = self.prompt("Go to line: ")
+        try:
+            line_num = int(line_num)
+            if 1 <= line_num <= len(self.text):
+                self.cursor_y = line_num - 1
+                self.cursor_x = 0
+                # Ensure the line is visible
+                height = self.stdscr.getmaxyx()[0]
+                if self.cursor_y < self.scroll_top:
+                    self.scroll_top = max(0, self.cursor_y - height//2)
+                elif self.cursor_y >= self.scroll_top + height - 2:
+                    self.scroll_top = min(len(self.text) - height + 2, self.cursor_y - height//2)
+            else:
+                self.status_message = f"Line number out of range (1-{len(self.text)})"
+        except ValueError:
+            self.status_message = "Invalid line number"
 
     # ---------------------------------------------------------------
     # 28d. Поиск и замена текста с поддержкой регулярных выражений.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def find_and_replace(self):
-        """Поиск и замена текста."""
-        pass
+        """Поиск и замена текста с поддержкой regex."""
+        search_term = self.prompt("Search for: ")
+        if not search_term:
+            return
+            
+        replace_term = self.prompt("Replace with: ")
+        if replace_term is None:  # User cancelled
+            return
+            
+        try:
+            count = 0
+            for i in range(len(self.text)):
+                new_line = re.sub(search_term, replace_term, self.text[i])
+                if new_line != self.text[i]:
+                    count += len(re.findall(search_term, self.text[i]))
+                    self.text[i] = new_line
+                    self.modified = True
+                    
+            self.status_message = f"Replaced {count} occurrences"
+        except re.error as e:
+            self.status_message = f"Invalid regex pattern: {str(e)}"
+        except Exception as e:
+            self.status_message = f"Error during replace: {str(e)}"
 
     # ---------------------------------------------------------------
     # 28e. Переключение режима вставки/замены.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def toggle_insert_mode(self):
         """Переключение между Insert и Replace режимами."""
-        pass
+        self.insert_mode = not self.insert_mode
+        self.status_message = f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
 
     # ---------------------------------------------------------------
     # 28f. Подсветка парных скобок в редакторе.
@@ -1231,11 +1333,23 @@ class SwayEditor:
 
     # ---------------------------------------------------------------
     # 28k. Включение и отключение автосохранения.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def toggle_auto_save(self):
         """Включение/отключение функции автосохранения."""
-        pass
+        self.auto_save = getattr(self, 'auto_save', False)
+        self.auto_save = not self.auto_save
+        
+        if self.auto_save:
+            def auto_save_thread():
+                while self.auto_save:
+                    time.sleep(60)  # Auto-save every minute
+                    if self.modified:
+                        self.save_file()
+            
+            threading.Thread(target=auto_save_thread, daemon=True).start()
+            self.status_message = "Auto-save enabled"
+        else:
+            self.status_message = "Auto-save disabled"
 
     # ---------------------------------------------------------------
     # 28l. Шифрование и дешифрование текущего файла.
@@ -1266,6 +1380,7 @@ class SwayEditor:
         while True:
             try:
                 self.draw_screen()
+                self.stdscr.keypad(True)
                 key = self.stdscr.getch()
                 self.handle_input(key)
             except KeyboardInterrupt:
