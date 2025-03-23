@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+sway.txt
+new_file.txt
+new_file.py
 
 #technical
 *.log
