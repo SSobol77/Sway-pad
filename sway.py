@@ -578,6 +578,11 @@ class SwayEditor:
                 self.stdscr.move(cursor_screen_y, cursor_screen_x)
             except curses.error:
                 pass
+        
+        # Подсветка парных скобок
+        self.highlight_matching_brackets()
+
+        # Обновление экрана
         self.stdscr.refresh()
 
     # ----------------------------------------------------------------
@@ -1125,9 +1130,9 @@ class SwayEditor:
             self.status_message = f"Unexpected error: {e}"
             logging.exception(f"Unexpected error reverting file: {self.filename}")
 
+
     # ---------------------------------------------------------------
     # 24c. Создание нового пустого файла.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def new_file(self):
         """
@@ -1153,7 +1158,6 @@ class SwayEditor:
             # Обрабатываем возможные ошибки
             self.status_message = f"Error creating new file: {e}"
             logging.exception("Error creating new file")
-
 
 
     # ---------------------------------------------------------------
@@ -1368,21 +1372,139 @@ class SwayEditor:
         self.insert_mode = not self.insert_mode
         self.status_message = f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
 
+
     # ---------------------------------------------------------------
-    # 28f. Подсветка парных скобок в редакторе.
-    # TODO: реализовать
+    # 28 f. Вспомогательный метод для поиска парной скобки
+    # Сначала добавим метод, который будет искать парную скобку для той, на которой находится курсор.    
+    # ---------------------------------------------------------------
+    def find_matching_bracket(self, line, col, bracket):
+        """
+        Ищет парную скобку для скобки под курсором.
+        Аргументы:
+            line (str): текущая строка текста
+            col (int): позиция курсора в строке
+            bracket (str): символ скобки под курсором
+        Возвращает:
+            tuple (int, int): (строка, столбец) парной скобки или None, если не найдено
+        """
+        brackets = {'(': ')', '{': '}', '[': ']', ')': '(', '}': '{', ']': '['}
+        stack = []
+        direction = 1 if bracket in '({[' else -1  # Вперед для открывающих, назад для закрывающих
+        start = col + direction
+
+        if direction == 1:  # Ищем закрывающую скобку
+            for i in range(start, len(line)):
+                char = line[i]
+                if char in '({[':
+                    stack.append(char)
+                elif char in ')}]':
+                    if not stack:
+                        return None
+                    top = stack.pop()
+                    if brackets[top] != char:
+                        return None
+                    if not stack:  # Стек пуст — найдена пара
+                        return (self.cursor_y, i)
+        else:  # Ищем открывающую скобку
+            for i in range(start, -1, -1):
+                char = line[i]
+                if char in ')}]':
+                    stack.append(char)
+                elif char in '({[':
+                    if not stack:
+                        return None
+                    top = stack.pop()
+                    if brackets[char] != top:
+                        return None
+                    if not stack:  # Стек пуст — найдена пара
+                        return (self.cursor_y, i)
+        return None
+
+
+    # ---------------------------------------------------------------
+    # 28ff. Подсветка парных скобок в редакторе.
+    # Основной метод - Он будет проверять символ под курсором и подсвечивать 
+    # как текущую скобку, так и её пару, если она найдена.
     # ---------------------------------------------------------------
     def highlight_matching_brackets(self):
         """Подсветка парных скобок."""
-        pass
+        # Проверяем, что курсор находится в пределах текста
+        if not (0 <= self.cursor_y < len(self.text) and 0 <= self.cursor_x < len(self.text[self.cursor_y])):
+            return
+
+        line = self.text[self.cursor_y]
+        char = line[self.cursor_x]
+
+        # Если символ под курсором — скобка
+        if char in '(){}[]':
+            match_pos = self.find_matching_bracket(line, self.cursor_x, char)
+            if match_pos:
+                height, width = self.stdscr.getmaxyx()
+                # Подсвечиваем текущую скобку
+                if (0 <= self.cursor_y - self.scroll_top < height and 
+                    0 <= self.cursor_x - self.scroll_left < width):
+                    self.stdscr.addch(self.cursor_y - self.scroll_top, 
+                                    self.cursor_x - self.scroll_left, 
+                                    char, 
+                                    curses.A_REVERSE)
+
+                # Подсвечиваем парную скобку, если она видима
+                match_y, match_x = match_pos
+                if (0 <= match_y - self.scroll_top < height and 
+                    0 <= match_x - self.scroll_left < width):
+                    self.stdscr.addch(match_y - self.scroll_top, 
+                                    match_x - self.scroll_left, 
+                                    line[match_x], 
+                                    curses.A_REVERSE)
+
+
+
 
     # ---------------------------------------------------------------
     # 28i. Поиск и замена текста с поддержкой регулярных выражений.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def search_and_replace(self):
-        """Поиск и замена текста с поддержкой regex."""
-        pass
+        """
+        Поиск и замена текста с поддержкой regex.
+        Запрашивает у пользователя шаблон для поиска и строку для замены,
+        выполняет замену во всем документе и сообщает о количестве замен.
+        """
+        # Запрашиваем у пользователя шаблон для поиска (regex)
+        search_pattern = self.prompt("Enter search pattern (regex): ")
+        if not search_pattern:
+            self.status_message = "Search cancelled"
+            return
+
+        # Запрашиваем у пользователя строку для замены
+        replace_with = self.prompt("Enter replacement string: ")
+        if replace_with is None:  # Предполагаем, что prompt возвращает None при отмене
+            self.status_message = "Replacement cancelled"
+            return
+
+        try:
+            # Компилируем регулярное выражение
+            compiled_pattern = re.compile(search_pattern)
+            new_text = []
+            replacements = 0
+
+            # Проходим по каждой строке в документе
+            for line in self.text:
+                # Выполняем замену и получаем новую строку и количество замен
+                new_line, count = compiled_pattern.subn(replace_with, line)
+                new_text.append(new_line)
+                replacements += count
+
+            # Обновляем текст документа
+            self.text = new_text
+            self.modified = True  # Устанавливаем флаг изменения
+            self.status_message = f"Replaced {replacements} occurrence(s)"
+
+        except re.error as e:
+            # Обрабатываем ошибку недопустимого регулярного выражения
+            self.status_message = f"Invalid regex pattern: {e}"
+        except Exception as e:
+            # Обрабатываем другие возможные ошибки
+            self.status_message = f"Error during search and replace: {e}"
 
     # ---------------------------------------------------------------
     # 28j. Сохранение и восстановление сессии.
