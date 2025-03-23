@@ -1018,6 +1018,11 @@ class SwayEditor:
                 self.status_message = "Сохранение отменено"
                 return
 
+        # Проверка, является ли self.filename директорией
+        if os.path.isdir(self.filename):
+            self.status_message = f"Cannot save: {self.filename} is a directory"
+            return
+
         if os.path.exists(self.filename):
             if not os.access(self.filename, os.W_OK):
                 self.status_message = f"Нет прав на запись: {self.filename}"
@@ -1028,7 +1033,7 @@ class SwayEditor:
             self.modified = False
             self.status_message = f"Сохранено в {self.filename}"
             
-            # Запускаем pylint в отдельном потоке, чтобы не блокировать UI
+            # Запускаем pylint в отдельном потоке
             code = os.linesep.join(self.text)
             threading.Thread(target=self.run_pylint_async, args=(code,), daemon=True).start()
         except OSError as e:
@@ -1037,6 +1042,7 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Ошибка при сохранении файла: {e}"
             logging.exception(f"Ошибка при сохранении файла: {self.filename}")
+
 
     # ---------------------------------------------------------------
     # 24a. Сохранение текущего файла под новым именем.
@@ -1050,7 +1056,11 @@ class SwayEditor:
         """
         new_filename = self.prompt("Save file as: ")
         if not new_filename:
-            self.status_message = "Сохранение отменено"
+            self.status_message = "Сохранение отменено: имя файла не указано"
+            return
+
+        if os.path.isdir(new_filename):
+            self.status_message = f"Cannot save: {new_filename} is a directory"
             return
 
         if os.path.exists(new_filename):
@@ -1067,29 +1077,84 @@ class SwayEditor:
             
             code = os.linesep.join(self.text)
             threading.Thread(target=self.run_pylint_async, args=(code,), daemon=True).start()
-        except OSError as e:
+        except (OSError, Exception) as e:
             self.status_message = f"Ошибка при сохранении файла: {e}"
             logging.exception(f"Ошибка при сохранении файла: {new_filename}")
-        except Exception as e:
-            self.status_message = f"Ошибка при сохранении файла: {e}"
-            logging.exception(f"Ошибка при сохранении файла: {new_filename}")
-            
+                
 
     # ---------------------------------------------------------------
     # 24b. Откат изменений к последнему сохранённому состоянию файла.
-    # TODO: реализовать
     # ---------------------------------------------------------------
     def revert_changes(self):
-        """Откат изменений в текущем файле до последнего сохранения."""
-        pass
+        """
+        Откат изменений в текущем файле до последнего сохранения.
+        Перезагружает содержимое файла из сохранённой версии, если файл существует.
+        """
+        # Проверка: был ли файл сохранён ранее
+        if self.filename == "noname":
+            self.status_message = "Cannot revert: file has not been saved yet"
+            return
+
+        # Проверка: существует ли файл
+        if not os.path.exists(self.filename):
+            self.status_message = f"Cannot revert: file {self.filename} does not exist"
+            return
+
+        # Запрос подтверждения у пользователя
+        confirmation = self.prompt("Revert to last saved version? All unsaved changes will be lost. (y/n): ")
+        if not confirmation or confirmation.lower() != 'y':
+            self.status_message = "Revert cancelled"
+            return
+
+        try:
+            # Перезагрузка содержимого файла с текущей кодировкой
+            with open(self.filename, "r", encoding=self.encoding, errors="replace") as f:
+                self.text = f.read().splitlines()
+                if not self.text:
+                    self.text = [""]  # Если файл пустой, добавляем пустую строку
+
+            # Сброс состояния редактора
+            self.modified = False
+            self.set_initial_cursor_position()
+            self.status_message = f"Reverted to last saved version of {self.filename}"
+
+        except OSError as e:
+            self.status_message = f"Error reverting file: {e}"
+            logging.exception(f"Error reverting file: {self.filename}")
+        except Exception as e:
+            self.status_message = f"Unexpected error: {e}"
+            logging.exception(f"Unexpected error reverting file: {self.filename}")
 
     # ---------------------------------------------------------------
     # 24c. Создание нового пустого файла.
     # TODO: реализовать
     # ---------------------------------------------------------------
     def new_file(self):
-        """Создание нового пустого документа с предварительным запросом на сохранение текущих изменений."""
-        pass
+        """
+        Создание нового пустого документа с предварительным запросом на сохранение текущих изменений.
+        """
+        # Проверяем, есть ли несохраненные изменения
+        if self.modified:
+            # Запрашиваем у пользователя, хочет ли он сохранить изменения
+            choice = self.prompt("Save changes? (y/n): ")
+            if choice and choice.lower().startswith("y"):
+                # Если пользователь выбрал "y", сохраняем текущий файл
+                self.save_file()
+            # Если выбрано "n" или что-то другое, продолжаем без сохранения
+
+        try:
+            # Создаем новый пустой документ
+            self.text = [""]  # Одна пустая строка
+            self.filename = "noname"  # Имя по умолчанию для нового файла
+            self.modified = False  # Новый файл не имеет изменений
+            self.set_initial_cursor_position()  # Устанавливаем курсор в начало
+            self.status_message = "New file created"  # Сообщаем пользователю о создании файла
+        except Exception as e:
+            # Обрабатываем возможные ошибки
+            self.status_message = f"Error creating new file: {e}"
+            logging.exception("Error creating new file")
+
+
 
     # ---------------------------------------------------------------
     # 25. Выход из редактора с предварительным запросом на

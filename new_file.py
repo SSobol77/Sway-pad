@@ -1,8 +1,8 @@
-# to jest test
-import sys
+# nowy file
+ class Abissinia:
+    def voyage(a,b):
+        a = "Warsaw"
+        b = "Abessinia"
+        print(a," -> ", b)
 
-class Agorika:
-    def monka(self,a,b,c):
-        d = (a + b) / c
-        print("Result = ", c)
-
+voyage()
