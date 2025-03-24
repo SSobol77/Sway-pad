@@ -14,19 +14,19 @@ property = "cyan"
 punctuation = "white"
 background = "#1E1E1E"
 foreground = "#D4D4D4"
-error = "red"           # Для ошибок и предупреждений
-status = "bright_white" # Статусная строка
-variable = "white"      # Переменные
-tag = "blue"            # Теги (HTML/XML)
-attribute = "cyan"      # Атрибуты (HTML/XML)
-magic = "magenta"       # Магические методы Python (__init__)
-builtin = "yellow"      # Встроенные функции (print, len)
-exception = "red"       # Исключения (try, except)
-function = "blue"       # Функции (def)
-class = "yellow"        # Классы (class)
-number = "magenta"      # Числовые литералы
-operator = "white"      # Операторы (+, -, *)
-escape = "cyan"         # Экранированные символы (\n, \t)
+error = "red"           # For errors and warnings
+status = "bright_white" # Status bar
+variable = "white"      # Variables
+tag = "blue"            # Tags (HTML/XML)
+attribute = "cyan"      # Attributes (HTML/XML)
+magic = "magenta"       # Python magic methods (__init__)
+builtin = "yellow"      # Built-in functions (print, len)
+exception = "red"       # Exceptions (try, except)
+function = "blue"       # Functions (def)
+class = "yellow"        # Classes (class)
+number = "magenta"      # Numeric literals
+operator = "white"      # Operators (+, -, *)
+escape = "cyan"         # Escaped characters (\n, \t)
 
 [fonts]
 font_family = "monospace"
@@ -76,44 +76,44 @@ folder_open = "📂"
 
 [syntax_highlighting.python]
 patterns = [
-    # 1. Ключевые слова
+    # 1. Keywords
     { pattern = "\\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|exec|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|print|raise|return|try|while|with|yield)\\b", color = "keyword" },
 
-    # 2. Декораторы с аргументами
+    # 2. Decorators with arguments
     { pattern = "@\\w+(?:\\([^)]*?\\))?", color = "decorator" },
 
-    # 3. Строки (включая f-строки и тройные кавычки)
+    # 3. Strings (including f-strings and triple quotes)
     { pattern = "(?s)(f|r|rf|fr)?('''(\\\\.|[^'])*?'''|\"\"\"(\\\\.|[^\"])*?\"\"\")", color = "string" },
     { pattern = "(?s)(b|rb|br)?('''(\\\\.|[^'])*?'''|\"\"\"(\\\\.|[^\"])*?\"\"\")", color = "string" },
     { pattern = "(f|r|rf|fr|b|br|rb)?(['\"])(?:\\\\\\2|.)*?\\2", color = "string" },
 
-    # 4. Числа (целые, с плавающей точкой, комплексные, двоичные, восьмеричные, шестнадцатеричные)
+    # 4. Numbers (integers, floats, complex, binary, octal, hexadecimal)
     { pattern = "\\b(?:\\d+\\.\\d+|\\.\\d+|\\d+)(?:e[+-]?\\d+)?j?\\b", color = "literal" },
     { pattern = "\\b0[bB][01_]+\\b", color = "literal" },
     { pattern = "\\b0[oO][0-7_]+\\b", color = "literal" },
     { pattern = "\\b0[xX][0-9a-fA-F_]+\\b", color = "literal" },
 
-    # 5. Комментарии и строки документации
+    # 5. Comments and docstrings
     { pattern = "#.*$", color = "comment" },
     { pattern = "\"\"\".*?\"\"\"", color = "comment" },  # Docstrings
     { pattern = "'''(.*?)'''", color = "comment" },
 
-    # 6. Встроенные функции и исключения
+    # 6. Built-in functions and exceptions
     { pattern = "\\b(ArithmeticError|AssertionError|AttributeError|BaseException|BlockingIOError|BrokenPipeError|BufferError|BytesWarning|ChildProcessError|ConnectionAbortedError|ConnectionError|ConnectionRefusedError|ConnectionResetError|DeprecationWarning|EOFError|Ellipsis|EncodingWarning|EnvironmentError|Exception|FileExistsError|FileNotFoundError|FloatingPointError|FutureWarning|GeneratorExit|IOError|ImportError|ImportWarning|IndentationError|IndexError|InterruptedError|IsADirectoryError|KeyError|KeyboardInterrupt|LookupError|MemoryError|ModuleNotFoundError|NameError|NotADirectoryError|NotImplemented|NotImplementedError|OSError|OverflowError|PendingDeprecationWarning|PermissionError|ProcessLookupError|RecursionError|ReferenceError|ResourceWarning|RuntimeError|RuntimeWarning|StopAsyncIteration|StopIteration|SyntaxError|SyntaxWarning|SystemError|SystemExit|TabError|TimeoutError|TypeError|UnboundLocalError|UnicodeDecodeError|UnicodeEncodeError|UnicodeError|UnicodeTranslateError|UnicodeWarning|UserWarning|ValueError|Warning|ZeroDivisionError|__import__|abs|all|any|ascii|bin|bool|breakpoint|bytearray|bytes|callable|chr|classmethod|compile|complex|copyright|credits|delattr|dict|dir|divmod|enumerate|eval|exec|exit|filter|float|format|frozenset|getattr|globals|hasattr|hash|help|hex|id|input|int|isinstance|issubclass|iter|len|license|list|locals|map|max|memoryview|min|next|object|oct|open|ord|pow|print|property|range|repr|reversed|round|set|setattr|slice|sorted|staticmethod|str|sum|super|tuple|type|vars|zip)\\b", color = "builtins" },
 
-    # 7. Аннотации типов (из typing и стандартных)
+    # 7. Type annotations (from typing and standard)
     { pattern = "\\b(List|Dict|Tuple|Set|Optional|Union|Any|Callable|TypeVar|Generic|Iterable|Iterator|Sequence|Mapping|MutableMapping|Awaitable|Coroutine|AsyncIterable|NamedTuple|TypedDict|Final|Literal|Annotated|TypeGuard|Self|Protocol|dataclass|field|classmethod|staticmethod)\\b", color = "type" },
 
-    # 8. Регулярные выражения
+    # 8. Regular expressions
     { pattern = "r[\"'].*?[\"']", color = "regexp" },
 
-    # 9. Константы
+    # 9. Constants
     { pattern = "\\b(True|False|None|Ellipsis|NotImplemented)\\b", color = "literal" },
 
-    # 10. Специальные методы
+    # 10. Special methods
     { pattern = "__(?:init|new|str|repr|enter|exit|getattr|setattr|delattr|getitem|setitem|delitem|iter|next|call|len|contains|add|sub|mul|truediv|floordiv|mod|pow|lshift|rshift|and|or|xor|invert|eq|ne|lt|le|gt|ge|bool|bytes|format|hash|dir|sizeof|getstate|setstate|reduce|reduce_ex|subclasshook|del|doc|name|qualname|module|defaults|kwdefaults|annotations|dict|weakref|slots|class|self|cls)__(?=\\()", color = "magic" },
 
-    # 11. Импорты
+    # 11. Imports
     { pattern = "\\bimport\\s+\\w+(?:\\.\\w+)*\\b", color = "import" },
     { pattern = "\\bfrom\\s+\\w+(?:\\.\\w+)*\\s+import\\b", color = "import" }
 ]

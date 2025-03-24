@@ -12,35 +12,35 @@ A lightweight, terminal-based text editor for Linux written in Python with TOML 
 
 <br>
 
-# 🌊Sway-pad
+# 🌊 Sway-pad
 
-### **Описание проекта Sway-pad**
+### **Project Description**
 
-**Sway Notepad** — это **консольный текстовый редактор для Linux**, написанный на Python с использованием библиотеки **curses**. Он поддерживает **подсветку синтаксиса, настраиваемые горячие клавиши и цветовые схемы**, загружаемые из файла **config.toml**.
-
----
-
-## 🔹 **Основные функции**:
-- **Редактирование текста** с поддержкой номеров строк и курсора.
-- **Подсветка синтаксиса** для Python и JavaScript (можно расширять).
-- **Настраиваемые горячие клавиши** (Ctrl+S — сохранить, Ctrl+Q — выход и т. д.).
-- **Цветовые схемы** из TOML-конфига (фон, текст, цвета синтаксиса).
-- **Базовые операции с файлами**: открытие, сохранение, копирование, вставка.
-- **Вертикальная и горизонтальная прокрутка**.
-- **Обработка клавиатурного ввода** с поддержкой навигации.
+**Sway Notepad** is a **console-based text editor for Linux**, written in Python using the **curses** library. It supports **syntax highlighting, customizable hotkeys, and color schemes**, all loaded from a **config.toml** file.
 
 ---
 
-## ⚙ **Технические особенности**
-- Использует **curses** для отрисовки интерфейса.
-- Загружает конфигурацию из **config.toml**.
-- Работает с **разными кодировками** и форматами.
-- Позволяет легко **добавлять новые языки** для подсветки синтаксиса.
-- Минимальные системные требования — работает даже в **терминале на слабых машинах**.
+## 🔹 **Key Features**:
+- **Text editing** with line numbers and cursor support.
+- **Syntax highlighting** for Python and JavaScript (extensible).
+- **Customizable hotkeys** (Ctrl+S — save, Ctrl+Q — quit, etc.).
+- **Color schemes** from a TOML config (background, text, syntax colors).
+- **Basic file operations**: open, save, copy, paste.
+- **Vertical and horizontal scrolling**.
+- **Keyboard input handling** with navigation support.
 
 ---
 
-## 🔧 **Пример конфигурации (config.toml)**
+## ⚙ **Technical Details**
+- Uses **curses** for rendering the interface.
+- Loads configuration from **config.toml**.
+- Supports **various encodings** and formats.
+- Easily allows adding **new languages** for syntax highlighting.
+- Minimal system requirements — works even in **low-resource terminal environments**.
+
+---
+
+## 🔧 **Sample Configuration (config.toml)**
 ```toml
 [keybindings]
 save_file = "ctrl+s"
@@ -63,23 +63,23 @@ python = [
 
 ---
 
-## 🛠 **Как запустить?**
+## 🛠 **How to Run?**
 ```bash
 python3 sway.py
 ```
 
-Если необходимо изменить настройки, отредактируйте **config.toml**.
+If you need to change settings, edit the **config.toml** file.
 
 ---
 
-## 🌟 **Почему стоит попробовать Sway-pad?**
+## 🌟 **Why Try Sway-pad?**
 
-✅ Легковесный и быстрый  
+✅ Lightweight and fast  
 
-✅ Работает в любом **терминале Linux**  
+✅ Works in any **Linux terminal**  
 
-✅ Прост в настройке  
+✅ Easy to configure  
 
-✅ Полностью **Open Source**  
+✅ Fully **Open Source**  
 
-Всех, для кого это интересно, приглашаю к сотрудничеству 🚀
+Everyone interested is welcome to collaborate 🚀
