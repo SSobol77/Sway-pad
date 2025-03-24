@@ -1,33 +1,34 @@
-# Структура класса должна быть такой:
+# The class structure should be as follows:
 
 ```sh
 
 class SwayEditor:
 
     def __init__(self, ...):
-        # Инициализация
+        # Initialization
 
     def init_colors(self):
-        # Настройка цветов
+        # Color setup
 
     def parse_key(self, ...):
-        # Парсинг горячих клавиш
+        # Parsing hotkeys
 
     def load_syntax_highlighting(self):
-        # Загрузка правил подсветки
+        # Loading syntax highlighting rules
 
     def apply_syntax_highlighting(self, ...):
-        # Применение подсветки
+        # Applying syntax highlighting
 
     def get_color_code(self, ...):
-        # Преобразование цвета
+        # Color conversion
 
     def draw_screen(self):
-        # Отрисовка интерфейса
+        # Rendering the interface
 
     def handle_input(self, ...):
-        # Обработка ввода
+        # Handling input
 
-    # Остальные методы
+    # Other methods
 
 ```
+
