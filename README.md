@@ -1,4 +1,4 @@
-# 🌊 Sway-notepad
+# 🌊 Sway-pad
 
 A lightweight, terminal-based text editor for Linux written in Python with TOML configuration. Fast, customizable, and optimized for Sway/i3wm environments.
 
@@ -12,9 +12,9 @@ A lightweight, terminal-based text editor for Linux written in Python with TOML 
 
 <br>
 
-# 🌊Sway Notepad
+# 🌊Sway-pad
 
-### **Описание проекта Sway Notepad**
+### **Описание проекта Sway-pad**
 
 **Sway Notepad** — это **консольный текстовый редактор для Linux**, написанный на Python с использованием библиотеки **curses**. Он поддерживает **подсветку синтаксиса, настраиваемые горячие клавиши и цветовые схемы**, загружаемые из файла **config.toml**.
 
@@ -72,7 +72,7 @@ python3 sway.py
 
 ---
 
-## 🌟 **Почему стоит попробовать Sway Notepad?**
+## 🌟 **Почему стоит попробовать Sway-pad?**
 
 ✅ Легковесный и быстрый  
 
