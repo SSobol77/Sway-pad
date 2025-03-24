@@ -129,6 +129,9 @@ def load_config():
             "python": [".py"],
             "toml": [".toml"],
             "javascript": [".js", ".mjs", ".cjs", ".jsx"],
+            "typescript": [".ts", ".tsx"],  
+            "php": [".php", ".phtml", ".php3", ".php4", ".php5"],  
+            "ruby": [".rb", ".erb", ".rake"], 
             "css": [".css"],
             "html": [".html", ".htm"],
             "json": [".json"],
@@ -139,11 +142,15 @@ def load_config():
             "shell": [".sh", ".bash", ".zsh"],
             "dart": [".dart"],
             "go": [".go"],
-            "c_cpp": [".c", ".cpp", ".h", ".hpp"],
+            "c": [".c", ".h"],
+            "cpp": [".cpp", ".hpp"],
             "java": [".java"],
             "julia": [".jl"],
             "rust": [".rs"],
             "csharp": [".cs"],
+            "scala": [".scala"], 
+            "r": [".r", ".R"],    
+            "swift": [".swift"],  
             "dockerfile": ["Dockerfile"],
             "terraform": [".tf"],
             "jenkins": ["Jenkinsfile"],
@@ -151,6 +158,16 @@ def load_config():
             "saltstack": [".sls"],
             "git": [".gitignore", ".gitconfig", "config"],
             "notebook": [".ipynb"],
+            "diff": [".diff", ".patch"],
+            "makefile": ["Makefile"],
+            "ini": [".ini"],
+            "csv": [".csv"],
+            "sql": [".sql"],
+            "graphql": [".graphql"],
+            "kotlin": [".kt", ".kts"],
+            "lua": [".lua"],
+            "perl": [".pl", ".pm"],
+            "powershell": [".ps1"],
         },
         "theme": {
             "name": "dark",
@@ -163,13 +180,51 @@ def load_config():
                 "cursor": "#AEAFAD",
             },
         },
-        "file_icons": {
-            "text": "📄",
-            "code": "📝",
+        "file_icons": {     
+            "text": "📝",
+            "code": "💻",
+            "python": " 🐍",
+            "toml": "⚙️",
+            "javascript": "💫",
+            "typescript": "📑",  
+            "php": "📑",  
+            "ruby": "🪀", 
             "css": "🎨",
             "html": "🌐",
             "json": "📊",
             "yaml": "⚙️",
+            "xml": ["📑"],
+            "markdown": "📋",
+            "plaintext": "📄",
+            "shell" : "📜",
+            "dart": "📱",
+            "go": "📑",
+            "c": "📃",
+            "cpp": "📃",
+            "java": "☕",
+            "julia": "🧮",
+            "rust": "✴️",
+            "csharp": "🪟",
+            "scala": "💎", 
+            "r": "📉",    
+            "swift": "💎",  
+            "dockerfile": "🐳",
+            "terraform": "⚙️",
+            "jenkins": "⚙️",
+            "puppet": "⚙️",
+            "saltstack": "🧊",
+            "git": "🔖",
+            "notebook": "📒",
+            "diff": "📼",
+            "makefile": "⚙️",
+            "ini": "⚙️",
+            "csv": "🎴",
+            "sql": "📊",
+            "graphql": "📈",
+            "kotlin": "📱",
+            "lua": "🔮",
+            "perl": "⚒",
+            "powershell": "⚒",
             "folder": "📁",
             "folder_open": "📂",
         },
@@ -258,17 +313,21 @@ def load_config():
         logging.warning("Config file 'config.toml' not found. Using defaults.")
         return default_config
 
-
-"""    
+   
 def get_file_icon(filename, config):
-   #"
-   # Returns the icon for a file based on its extension.
-   #
-    for key, value in config["file_icons"].items():
-        if filename.endswith(tuple(config["supported_formats"].get(key, []))):
-            return value
-    return config["file_icons"]["text"]
-"""
+    """
+    Returns the icon for a file based on its extension.
+    """
+    file_lower = filename.lower()
+
+    for key, icon in config["file_icons"].items():
+        extensions = config["supported_formats"].get(key, [])
+
+        if file_lower.endswith(tuple(ext.lower() for ext in extensions)):
+            return icon
+
+    return config["file_icons"].get("text", "📝") 
+
 
 
 class SwayEditor:
