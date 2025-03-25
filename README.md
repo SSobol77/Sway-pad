@@ -22,6 +22,8 @@ See [LICENSE](LICENSE) for details.
 
 ```bash
 pip install sway-pad
+```
+
 ---
 
 <br>
