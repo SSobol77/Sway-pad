@@ -6,6 +6,22 @@ A lightweight, terminal-based text editor for Linux written in Python with TOML 
 
 <br>
 
+Advanced text editor with syntax highlighting and multithreading support.
+
+## License
+This program is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.  
+See [LICENSE](LICENSE) for details.
+
+<br>
+
+## Installation
+
+<br>
+
+### Linux/FreeBSD
+
+```bash
+pip install sway-pad
 ---
 
 <br>
