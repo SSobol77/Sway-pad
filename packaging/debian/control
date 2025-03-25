@@ -3,6 +3,7 @@ Version: 0.1.0
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>=3.11), python3-pygments, pylint
+Depends: python3 (>=3.11), python3-pygments, pylint, python3-curses
 Maintainer: Siergej Sobolewski <s.sobolewski@hotmail.com>
 Description: Advanced text editor with syntax highlighting
+ This package is licensed under the GNU General Public License version 3 (GPLv3).
