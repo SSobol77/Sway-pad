@@ -1,0 +1,8 @@
+Package: sway-pad
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3 (>=3.11), python3-pygments, pylint
+Maintainer: Siergej Sobolewski <s.sobolewski@hotmail.com>
+Description: Advanced text editor with syntax highlighting
