@@ -18,10 +18,18 @@ See [LICENSE](LICENSE) for details.
 
 <br>
 
-### Linux/FreeBSD
+### Linux
 
 ```bash
 pip install sway-pad
+```
+
+<br>
+
+###FreeBSD
+
+```sh
+pkg install sway-pad
 ```
 
 ---
