@@ -1,0 +1,53 @@
+#!/usr/bin/make -f
+# debian/rules file for Sway-Pad package
+%:
+    dh $@ --with=python3
+
+# Override install step to handle Python packaging
+override_dh_install:
+    dh_install
+    # Install Python package
+    python3 setup.py install --root=$(CURDIR)/debian/sway-pad --optimize=1
+    # Install config file
+    install -m 644 sway_pad/config.toml debian/sway-pad/etc/sway-pad/config.toml
+    # Create app directory
+    install -d debian/sway-pad/usr/share/doc/sway-pad
+    # Copy license and docs
+    install -m 644 LICENSE debian/sway-pad/usr/share/doc/sway-pad/copyright
+    install -m 644 README.md debian/sway-pad/usr/share/doc/sway-pad/readme
+
+# Add dependency handling
+override_dh_missing:
+    dh_missing -p$(PN) --fail-missing
+
+# Clean up build artifacts
+override_dh_clean:
+    dh_clean
+    rm -rf build/ dist/ *.egg-info
+
+# Set permissions
+override_dh_installinit:
+    # No init script needed
+
+# Ensure proper file ownership
+override_dh_installchangelogs:
+    dh_installchangelogs CHANGELOG.md
+
+# Set package description
+PACKAGE = sway-pad
+VERSION ?= $(shell python3 setup.py --version)
+
+# Build system dependencies
+BUILD_DEPENDS = python3-setuptools, python3-stdeb, python3-curses
+
+# Permissions
+find debian/$(PACKAGE)/usr -type f -exec chmod 644 {} \;
+find debian/$(PACKAGE)/usr/bin -type f -exec chmod 755 {} \;
+
+# Final checks
+override_dh_installman:
+    # No manual pages yet
+
+# Include standard debhelper rules
+include /usr/share/cdbs/1/class/python3.mk
+include /usr/share/dh-python/rules.dhpython3
