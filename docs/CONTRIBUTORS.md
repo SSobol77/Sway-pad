@@ -8,7 +8,7 @@ Thank you to everyone who has contributed to **Sway-Pad**! Your support and cont
 
 | Name              | GitHub Profile          | Contributions                                                                 |
 |-------------------|-------------------------|------------------------------------------------------------------------------|
-| Siergej Sobolewski | [GitHub](https://github.com/yourusername) | Initial development, architecture design, core features, and documentation |
+| Siergej Sobolewski | [GitHub](https://github.com/SSobol77) | Initial development, architecture design, core features, and documentation |
 
 ---
 
@@ -25,7 +25,7 @@ This section lists contributors who have submitted pull requests, reported bugs,
 ## How to Contribute
 
 1. **Fork the Repository**:  
-   Create a fork of the [Sway-Pad GitHub repository](https://github.com/yourusername/sway-pad).
+   Create a fork of the [Sway-Pad GitHub repository](https://github.com/SSobol77/sway-pad).
 
 2. **Make Your Changes**:  
    Work on a new branch for your feature/fix. Follow the [contributing guidelines](CONTRIBUTING.md).
