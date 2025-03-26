@@ -1,0 +1,99 @@
+# Example configuration file for Sway-Pad (GPL-3.0 licensed)
+# Modify values as needed
+
+[colors]
+line_number = "yellow"    # Color of line numbers
+cursor = "yellow"         # Cursor color
+keyword = "blue"          # Color for keywords (if, for, etc.)
+string = "green"          # Color for strings
+comment = "white"         # Color for comments
+literal = "magenta"       # Color for literals (numbers, None, True)
+decorator = "cyan"        # Color for decorators (@decorator)
+type = "yellow"           # Color for types (int, list, etc.)
+selector = "magenta"      # Color for CSS/HTML selectors
+property = "cyan"         # Color for properties (CSS/JSON)
+punctuation = "white"     # Color for punctuation symbols
+background = "#1E1E1E"    # Editor background color
+foreground = "#D4D4D4"    # Default text color
+error = "red"             # Color for errors and warnings
+status = "bright_white"   # Color for status bar
+variable = "white"        # Color for variables
+tag = "blue"              # Color for HTML/XML tags
+attribute = "cyan"        # Color for HTML/XML attributes
+magic = "magenta"         # Color for magic methods (__init__)
+builtin = "yellow"        # Color for built-in functions (print, len)
+exception = "red"         # Color for exception names (try/except)
+function = "light_blue"   # Color for functions (def)
+class = "yellow"          # Color for classes (class)
+number = "magenta"        # Color for numeric literals
+operator = "white"        # Color for operators (+, -, *)
+escape = "cyan"           # Color for escape characters (\n, \t)
+
+[fonts]
+font_family = "monospace" # Default font family
+font_size = 12            # Text font size
+
+[keybindings]
+delete = "del"            # Delete character
+paste = "ctrl+v"          # Paste text
+copy = "ctrl+c"           # Copy selection
+cut = "ctrl+x"            # Cut selection
+undo = "ctrl+z"           # Undo action
+open_file = "ctrl+o"      # Open file
+save_file = "ctrl+s"      # Save file
+select_all = "ctrl+a"     # Select all text
+quit = "ctrl+q"           # Exit editor
+
+[editor]
+show_line_numbers = true  # Show line number gutter
+tab_size = 4              # Number of spaces per tab
+use_spaces = true         # Use spaces instead of tabs
+word_wrap = false         # Enable text wrapping
+auto_indent = true        # Automatic indentation
+auto_brackets = true      # Auto-close brackets
+
+[theme.ui]
+background = "#252526"    # Interface background color
+foreground = "#CCCCCC"    # Default interface text color
+accent = "#007ACC"        # Accent color (e.g., highlights)
+selection = "#264F78"     # Color for selected text
+inactive_selection = "#3A3D41" # Color for inactive selections
+cursor = "#AEAFAD"        # Cursor color in UI elements
+
+[file_icons]
+text = "📄"               # Default text file icon
+code = "💻"                # Generic code file icon
+python = "🐍"             # Python file icon
+toml = "📝"               # TOML file icon
+javascript = "💼"         # JavaScript file icon
+typescript = "💼"         # TypeScript file icon
+php = "🐘"               # PHP file icon
+ruby = "💎"              # Ruby file icon
+css = "🎨"               # CSS file icon
+html = "🌐"              # HTML file icon
+json = "📦"              # JSON file icon
+yaml = "📝"              # YAML file icon
+xml = "📦"               # XML file icon
+markdown = "📝"          # Markdown file icon
+shell = "쉘"            # Shell script icon
+dart = "🎯"              # Dart file icon
+go = "🐹"               # Go file icon
+c = "🇨"                # C file icon
+cpp = "🇨++"            # C++ file icon
+java = "☕"             # Java file icon
+julia = "ஃ"            # Julia file icon
+rust = "🦀"             # Rust file icon
+csharp = "(Cs)"         # C# file icon
+dockerfile = "🐳"        # Dockerfile icon
+git = "⎇"               # Git configuration files
+folder = "📁"            # Folder icon
+folder_open = "📂"       # Open folder icon
+
+# Example syntax highlighting patterns for Python (simplified)
+[syntax_highlighting.python]
+patterns = [
+  { pattern = "\\b(def|class)\\b", color = "keyword" },
+  { pattern = "\"\"\".*?\"\"\"", color = "string" },
+  { pattern = "#.*$", color = "comment" },
+  { pattern = "\\b(True|False|None)\\b", color = "literal" },
+]
