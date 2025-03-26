@@ -1,0 +1,4 @@
+pygments>=2.13.0
+toml>=0.10.2
+pylint>=3.0.0
+curses>=2.2.1
