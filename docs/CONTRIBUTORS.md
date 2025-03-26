@@ -1,4 +1,4 @@
-# 
+# Contributors
 
 Thank you to everyone who has contributed to **Sway-Pad**! Your support and contributions make this project better.
 
@@ -8,7 +8,7 @@ Thank you to everyone who has contributed to **Sway-Pad**! Your support and cont
 
 | Name              | GitHub Profile          | Contributions                                                                 |
 |-------------------|-------------------------|------------------------------------------------------------------------------|
-| Siergej Sobolewski | [GitHub](https://github.com/ssobol77) | Initial development, architecture design, core features, and documentation |
+| Siergej Sobolewski | [GitHub](https://github.com/yourusername) | Initial development, architecture design, core features, and documentation |
 
 ---
 
@@ -54,3 +54,4 @@ This section lists contributors who have submitted pull requests, reported bugs,
 All contributions are licensed under the **GPL-3.0 License**. By contributing, you agree to release your work under this license.
 
 Thank you for being part of the Sway-Pad community! 🚀
+
