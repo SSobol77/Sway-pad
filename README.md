@@ -30,7 +30,7 @@ pip install sway-pad
 
 <br>
 
-###FreeBSD
+### FreeBSD
 
 ```sh
 pkg install sway-pad
