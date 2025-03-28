@@ -1,3 +1,7 @@
+![ChatGPT Image 28 mar 2025, 09_53_30](https://github.com/user-attachments/assets/8febc9ed-775b-4099-a2dc-b7c29732c22d)
+
+<br>
+
 # 🌊 Sway-pad
 
 A lightweight, terminal-based text editor for Linux written in Python with TOML configuration. Fast, customizable, and optimized for Sway/i3wm environments.
