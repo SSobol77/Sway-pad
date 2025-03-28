@@ -1,4 +1,4 @@
-![ChatGPT Image 28 mar 2025, 09_53_30](https://github.com/user-attachments/assets/8febc9ed-775b-4099-a2dc-b7c29732c22d)
+![swaypadm2](https://github.com/user-attachments/assets/01bdf424-7dce-4a99-9631-de3b7e87313b)
 
 <br>
 
