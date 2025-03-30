@@ -3,6 +3,7 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
+
 import curses
 import locale
 import toml
@@ -10,6 +11,7 @@ import os
 import re
 import sys
 import time
+import pyperclip
 import logging
 import chardet
 import unicodedata
@@ -63,52 +65,31 @@ logging.basicConfig(
 )
 
 
-def deep_merge(base, override):
+def deep_merge(base: dict, override: dict) -> dict:
     """
-    Recursively merges two dictionaries.
+    Recursively merges 'override' dict into 'base' dict, returning a new dict.
     """
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge(result[key], value)
+    result = dict(base)  # create a copy so as not to modify the original
+    for k, v in override.items():
+        if (
+            k in result
+            and isinstance(result[k], dict)
+            and isinstance(v, dict)
+        ):
+            # Recursively merge nested dictionaries
+            result[k] = deep_merge(result[k], v)
         else:
-            result[key] = value
+            # If the key is not a dictionary or does not exist, replace/add it
+            result[k] = v
     return result
 
 
-def load_config():
+def load_config() -> dict:
     """
-    Loads configuration from config.toml, falling back to defaults if not found or invalid.
+    Loads configuration from 'config.toml', falling back to minimal defaults if not found or invalid.
     """
-    default_config = {
-        "colors": {
-            "line_number": "yellow",
-            "cursor": "yellow",
-            "keyword": "blue",
-            "string": "green",
-            "comment": "white",
-            "literal": "magenta",
-            "decorator": "cyan",
-            "type": "yellow",
-            "selector": "magenta",
-            "property": "cyan",
-            "punctuation": "white",
-            "background": "#1E1E1E",
-            "foreground": "#D4D4D4",
-            "error": "red",
-            "status": "bright_white",
-            "variable": "white",
-            "tag": "blue",
-            "attribute": "cyan",
-            "magic": "magenta",
-            "builtin": "yellow",
-            "exception": "red",
-            "function": "light_blue",
-            "class": "yellow",
-            "number": "magenta",
-            "operator": "white",
-            "escape": "cyan",
-        },
+    minimal_default = {
+        "colors": {"error": "red", "status": "bright_white"},
         "fonts": {"font_family": "monospace", "font_size": 12},
         "keybindings": {
             "delete": "del",
@@ -120,231 +101,57 @@ def load_config():
             "save_file": "ctrl+s",
             "select_all": "ctrl+a",
             "quit": "ctrl+q",
-        },
-        "editor": {
-            "show_line_numbers": True,
-            "tab_size": 4,
-            "use_spaces": True,
-            "word_wrap": False,
-            "auto_indent": True,
-            "auto_brackets": True,
-        },
-        "supported_formats": {
-            "python": [".py"],
-            "toml": [".toml"],
-            "javascript": [".js", ".mjs", ".cjs", ".jsx"],
-            "typescript": [".ts", ".tsx"],  
-            "php": [".php", ".phtml", ".php3", ".php4", ".php5"],  
-            "ruby": [".rb", ".erb", ".rake"], 
-            "css": [".css"],
-            "html": [".html", ".htm"],
-            "json": [".json"],
-            "yaml": [".yaml", ".yml"],
-            "xml": [".xml"],
-            "markdown": [".md"],
-            "plaintext": [".txt"],
-            "shell": [".sh", ".bash", ".zsh"],
-            "dart": [".dart"],
-            "go": [".go"],
-            "c": [".c", ".h"],
-            "cpp": [".cpp", ".hpp"],
-            "java": [".java"],
-            "julia": [".jl"],
-            "rust": [".rs"],
-            "csharp": [".cs"],
-            "scala": [".scala"], 
-            "r": [".r", ".R"],    
-            "swift": [".swift"],  
-            "dockerfile": ["Dockerfile"],
-            "terraform": [".tf"],
-            "jenkins": ["Jenkinsfile"],
-            "puppet": [".pp"],
-            "saltstack": [".sls"],
-            "git": [".gitignore", ".gitconfig", "config"],
-            "notebook": [".ipynb"],
-            "diff": [".diff", ".patch"],
-            "makefile": ["Makefile"],
-            "ini": [".ini"],
-            "csv": [".csv"],
-            "sql": [".sql"],
-            "graphql": [".graphql"],
-            "kotlin": [".kt", ".kts"],
-            "lua": [".lua"],
-            "perl": [".pl", ".pm"],
-            "powershell": [".ps1"],
-        },
-        "theme": {
-            "name": "dark",
-            "ui": {
-                "background": "#252526",
-                "foreground": "#CCCCCC",
-                "accent": "#007ACC",
-                "selection": "#264F78",
-                "inactive_selection": "#3A3D41",
-                "cursor": "#AEAFAD",
-            },
-        },
-        "file_icons": {     
-            "text": "📝",
-            "code": "💻",
-            "python": " 🐍",
-            "toml": "⚙️",
-            "javascript": "💫",
-            "typescript": "📑",  
-            "php": "📑",  
-            "ruby": "🪀", 
-            "css": "🎨",
-            "html": "🌐",
-            "json": "📊",
-            "yaml": "⚙️",
-            "xml": ["📑"],
-            "markdown": "📋",
-            "plaintext": "📄",
-            "shell" : "📜",
-            "dart": "📱",
-            "go": "📑",
-            "c": "📃",
-            "cpp": "📃",
-            "java": "☕",
-            "julia": "🧮",
-            "rust": "✴️",
-            "csharp": "🪟",
-            "scala": "💎", 
-            "r": "📉",    
-            "swift": "💎",  
-            "dockerfile": "🐳",
-            "terraform": "⚙️",
-            "jenkins": "⚙️",
-            "puppet": "⚙️",
-            "saltstack": "🧊",
-            "git": "🔖",
-            "notebook": "📒",
-            "diff": "📼",
-            "makefile": "⚙️",
-            "ini": "⚙️",
-            "csv": "🎴",
-            "sql": "📊",
-            "graphql": "📈",
-            "kotlin": "📱",
-            "lua": "🔮",
-            "perl": "⚒",
-            "powershell": "⚒",
-            "folder": "📁",
-            "folder_open": "📂",
-        },
-        "syntax_highlighting": {
-            "python": {
-                "patterns": [
-                    {
-                        "pattern": r"\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|exec|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|print|raise|return|try|while|with|yield)\b",
-                        "color": "keyword",
-                    },
-                    {"pattern": r"@\w+(?:\([^)]*?\))?", "color": "decorator"},
-                    {
-                        "pattern": r"(?s)(f|r|rf|fr)?('''(.|\n)*?'''|\"\"\"(.|\n)*?\"\"\")",
-                        "color": "string",
-                    },
-                    {
-                        "pattern": r"(f|r|rf|fr|b|br|rb)?(['\"])(?:\\.|(?!\2).)*\2",
-                        "color": "string",
-                    },
-                    {
-                        "pattern": r"\b(?:\d+\.\d+|\.\d+|\d+)(?:e[+-]?\d+)?j?\b",
-                        "color": "literal",
-                    },
-                    {"pattern": r"\b0[bB][01_]+\b", "color": "literal"},
-                    {"pattern": r"\b0[oO][0-7_]+\b", "color": "literal"},
-                    {"pattern": r"\b0[xX][0-9a-fA-F_]+\b", "color": "literal"},
-                    {"pattern": r"#.*$", "color": "comment"},
-                    {"pattern": r'"""(.|\n)*?"""', "color": "comment"},
-                    {"pattern": r"'''(.|\n)*?'''", "color": "comment"},
-                    {
-                        "pattern": r"\b(ArithmeticError|AssertionError|AttributeError|BaseException|BlockingIOError|BrokenPipeError|BufferError|BytesWarning|ChildProcessError|ConnectionAbortedError|ConnectionError|ConnectionRefusedError|ConnectionResetError|DeprecationWarning|EOFError|Ellipsis|EncodingWarning|EnvironmentError|Exception|FileExistsError|FileNotFoundError|FloatingPointError|FutureWarning|GeneratorExit|IOError|ImportError|ImportWarning|IndentationError|IndexError|InterruptedError|IsADirectoryError|KeyError|KeyboardInterrupt|LookupError|MemoryError|ModuleNotFoundError|NameError|NotADirectoryError|NotImplemented|NotImplementedError|OSError|OverflowError|PendingDeprecationWarning|PermissionError|ProcessLookupError|RecursionError|ReferenceError|ResourceWarning|RuntimeError|RuntimeWarning|StopAsyncIteration|StopIteration|SyntaxError|SyntaxWarning|SystemError|SystemExit|TabError|TimeoutError|TypeError|UnboundLocalError|UnicodeDecodeError|UnicodeEncodeError|UnicodeError|UnicodeTranslateError|UnicodeWarning|UserWarning|ValueError|Warning|ZeroDivisionError|__import__|abs|all|any|ascii|bin|bool|breakpoint|bytearray|bytes|callable|chr|classmethod|compile|complex|copyright|credits|delattr|dict|dir|divmod|enumerate|eval|exec|exit|filter|float|format|frozenset|getattr|globals|hasattr|hash|help|hex|id|input|int|isinstance|issubclass|iter|len|license|list|locals|map|max|memoryview|min|next|object|oct|open|ord|pow|print|property|range|repr|reversed|round|set|setattr|slice|sorted|staticmethod|str|sum|super|tuple|type|vars|zip)\b",
-                        "color": "builtin",
-                    },
-                    {
-                        "pattern": r"\b(List|Dict|Tuple|Set|Optional|Union|Any|Callable|TypeVar|Generic|Iterable|Iterator|Sequence|Mapping|MutableMapping|Awaitable|Coroutine|AsyncIterable|NamedTuple|TypedDict|Final|Literal|Annotated|TypeGuard|Self|Protocol|dataclass|field|classmethod|staticmethod)\b",
-                        "color": "type",
-                    },
-                    {"pattern": r"r[\"'].*?[\"']", "color": "regexp"},
-                    {
-                        "pattern": r"\b(True|False|None|Ellipsis|NotImplemented)\b",
-                        "color": "literal",
-                    },
-                    {
-                        "pattern": r"__(?:init|new|str|repr|enter|exit|getattr|setattr|delattr|getitem|setitem|delitem|iter|next|call|len|contains|add|sub|mul|truediv|floordiv|mod|pow|lshift|rshift|and|or|xor|invert|eq|ne|lt|le|gt|ge|bool|bytes|format|hash|dir|sizeof|getstate|setstate|reduce|reduce_ex|subclasshook|del|doc|name|qualname|module|defaults|kwdefaults|annotations|dict|weakref|slots|class|self|cls)__(?=\()",
-                        "color": "magic",
-                    },
-                    {"pattern": r"\bimport\s+\w+(?:\.\w+)*\b", "color": "import"},
-                    {
-                        "pattern": r"\bfrom\s+\w+(?:\.\w+)*\s+import\b",
-                        "color": "import",
-                    },
-                ]
-            },
-            "javascript": {
-                "patterns": [
-                    {"pattern": r"//.*$", "color": "comment"},
-                    {"pattern": r"/\*[\s\S]*?\*/", "color": "comment"},
-                    {
-                        "pattern": r"\b(let|const|var|function|return|if|else|for|while|do|switch|case|break|continue|try|catch|finally|new|delete|typeof|instanceof|this|class|extends|super|import|export|from|as|async|await|yield)\b",
-                        "color": "keyword",
-                    },
-                    {"pattern": r"`[^`]*`", "color": "string"},
-                    {"pattern": r"\"[^\"]*\"", "color": "string"},
-                    {
-                        "pattern": r"\b(\d+(\.\d+)?|true|false|null|undefined|NaN|Infinity)\b",
-                        "color": "literal",
-                    },
-                    {"pattern": r"console\.log", "color": "keyword"},
-                    {"pattern": r"\$\{[^}]*\}", "color": "literal"},
-                ]
-            },
-        },
+            "redo": "ctrl+shift+z",
+        }
     }
+
     try:
+        # Read config.toml
         with open("config.toml", "r", encoding="utf-8") as f:
-            config_content = f.read()
-            try:
-                user_config = toml.loads(config_content)
-                merged_config = deep_merge(default_config, user_config)
-                return merged_config
-            except toml.TomlDecodeError as e:
-                logging.error(f"TOML parse error: {str(e)}")
-                logging.error(f"Config content:\n{config_content}")
-                return default_config
+            file_content = f.read()
+            # Parse TOML
+            user_config = toml.loads(file_content)
+            # Merge with minimal default (if necessary)
+            final_config = deep_merge(minimal_default, user_config)
+            return final_config
     except FileNotFoundError:
-        logging.warning("Config file 'config.toml' not found. Using defaults.")
-        return default_config
+        logging.warning("Config file 'config.toml' not found. Using minimal defaults.")
+        return minimal_default
+    except toml.TomlDecodeError as e:
+        logging.error(f"TOML parse error: {str(e)}")
+        logging.error("Falling back to minimal defaults.")
+        return minimal_default
 
    
-def get_file_icon(filename, config):
+def get_file_icon(filename: str, config: dict) -> str:
     """
     Returns the icon for a file based on its extension.
     """
     file_lower = filename.lower()
 
+    # It is assumed that your TOML file has sections "file_icons" and "supported_formats".
+    # If not, specify them in config.toml.
+    if "file_icons" not in config or "supported_formats" not in config:
+        return "📝"  # fallback
+
     for key, icon in config["file_icons"].items():
         extensions = config["supported_formats"].get(key, [])
-
+        # Check if the file ends with one of the extensions
         if file_lower.endswith(tuple(ext.lower() for ext in extensions)):
             return icon
 
-    return config["file_icons"].get("text", "📝") 
-
-
+    return config["file_icons"].get("text", "📝")
 
 class SwayEditor:
     """
     Main class for the Sway editor.
     """
-
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.stdscr.keypad(True)  # Enable keypad mode
-        curses.raw()  # Raw mode for better key handling
-        curses.nonl()  # Do not translate the Enter key
-        curses.noecho()  # Do not echo user input
+        curses.raw()  # Raw mode for better key processing
+        curses.nonl()  # Do not translate Enter
+        curses.noecho()  # Do not display user input
         self.config = load_config()  # Load configuration from config.toml
         self.text = [""]
         self.cursor_x = 0
@@ -355,6 +162,9 @@ class SwayEditor:
         self.modified = False
         self.encoding = "UTF-8"
         self.stdscr.nodelay(False)
+        self.selection_start = None
+        self.selection_end = None
+        self.is_selecting = False
         locale.setlocale(locale.LC_ALL, "")
         curses.start_color()
         curses.use_default_colors()
@@ -362,27 +172,263 @@ class SwayEditor:
         self.insert_mode = True
         self.syntax_highlighting = {}
         self.status_message = ""
+        self.action_history = []
+        self.undone_actions = []
+        
+        # Define key codes for Shift + Arrow keys and Ctrl + Shift + Z
+        shift_right_key_code = 261  # Example for Shift + Right Arrow
+        shift_left_key_code = 260   # Example for Shift + Left Arrow
+        shift_home_key_code = 262   # Example for Shift + Home
+        shift_end_key_code = 263    # Example for Shift + End
+        ctrl_shift_z_key_code = 1234  # Example for Ctrl + Shift + Z
 
-        self.init_colors()
+        # Update keybindings
         self.keybindings = {
             "delete": self.parse_key(self.config["keybindings"].get("delete", "del")),
             "paste": self.parse_key(self.config["keybindings"].get("paste", "ctrl+v")),
             "copy": self.parse_key(self.config["keybindings"].get("copy", "ctrl+c")),
             "cut": self.parse_key(self.config["keybindings"].get("cut", "ctrl+x")),
             "undo": self.parse_key(self.config["keybindings"].get("undo", "ctrl+z")),
-            "open_file": self.parse_key(
-                self.config["keybindings"].get("open_file", "ctrl+o")
-            ),
-            "save_file": self.parse_key(
-                self.config["keybindings"].get("save_file", "ctrl+s")
-            ),
-            "select_all": self.parse_key(
-                self.config["keybindings"].get("select_all", "ctrl+a")
-            ),
-            "quit": self.parse_key(self.config["keybindings"].get("quit", "ctrl+q")),
+            "open_file": self.parse_key(self.config["keybindings"].get("open_file", "ctrl+o")),
+            "save_file": self.parse_key(self.config["keybindings"].get("save_file", "ctrl+s")),
+            "select_all": self.parse_key(self.config["keybindings"].get("select_all", "ctrl+a")),
+            "quit": self.parse_key(self.config["keybindings"].get("quit", "ctrl+q")),      
+            "redo": self.parse_key(self.config["keybindings"].get("redo", "ctrl+shift+z")),          
+            "extend_selection_right": curses.KEY_SRIGHT,
+            "extend_selection_left": curses.KEY_SLEFT,
+            "select_to_home": curses.KEY_SHOME,
+            "select_to_end": curses.KEY_SEND, 
+            
         }
+
+        # Configure action map
+        self.action_map = {
+            "copy": self.copy,
+            "paste": self.paste,
+            "cut": self.cut,
+            "undo": self.undo,
+            "extend_selection_right": self.extend_selection_right,
+            "extend_selection_left": self.extend_selection_left,
+            "select_to_home": self.select_to_home,
+            "select_to_end": self.select_to_end,
+            "select_all": self.select_all,
+            "open_file": lambda: print("Open file"),  # Stub
+            "save_file": lambda: print("Save file"),  # Stub
+            "quit": lambda: print("Quit"),            # Stub
+            "redo": self.redo,
+        }
+
+        # Other initializations
+        self.init_colors()
         self.load_syntax_highlighting()
         self.set_initial_cursor_position()
+
+
+    def get_selected_text(self):
+        if not self.is_selecting or self.selection_start is None or self.selection_end is None:
+            return ""
+        start_row, start_col = self.selection_start
+        end_row, end_col = self.selection_end
+        if start_row == end_row:
+            return self.text[start_row][min(start_col, end_col):max(start_col, end_col)]
+        else:
+            selected_lines = []
+            selected_lines.append(self.text[start_row][start_col:])
+            for row in range(start_row + 1, end_row):
+                selected_lines.append(self.text[row])
+            selected_lines.append(self.text[end_row][:end_col])
+            return "\n".join(selected_lines)
+
+
+    def delete_selected_text(self):
+        if not self.is_selecting or self.selection_start is None or self.selection_end is None:
+            return
+        start_row, start_col = self.selection_start
+        end_row, end_col = self.selection_end
+        
+        # Swap if start is after end
+        if start_row > end_row or (start_row == end_row and start_col > end_col):
+            start_row, end_row = end_row, start_row
+            start_col, end_col = end_col, start_col
+        
+        # Save deleted text for undo
+        deleted_text = self.get_selected_text()
+        self.action_history.append({
+            "type": "delete",
+            "text": deleted_text,
+            "start": start_row,
+            "start_col": start_col,
+            "end": end_row,
+            "end_col": end_col
+        })
+        
+        if start_row == end_row:
+            text = self.text[start_row]
+            self.text[start_row] = text[:start_col] + text[end_col:]
+            self.cursor_x = start_col
+        else:
+            # Delete multiline text
+            self.text[start_row] = self.text[start_row][:start_col] + self.text[end_row][end_col:]
+            del self.text[start_row + 1:end_row + 1]
+            self.cursor_y = start_row
+            self.cursor_x = start_col
+        
+        self.selection_start = None
+        self.selection_end = None
+        self.is_selecting = False
+        self.modified = True
+
+    def copy(self):
+        selected_text = self.get_selected_text()
+        pyperclip.copy(selected_text)
+        self.status_message = "Copied to clipboard"
+
+    def cut(self):
+        selected_text = self.get_selected_text()
+        pyperclip.copy(selected_text)
+        self.delete_selected_text()
+        self.status_message = "Cut to clipboard"
+
+    def paste(self):
+        text = pyperclip.paste()
+        if self.is_selecting:
+            self.delete_selected_text()
+        self.insert_text(text)
+        self.status_message = "Pasted from clipboard"
+
+    def extend_selection_right(self):
+        if not self.is_selecting:
+            self.selection_start = (self.cursor_y, self.cursor_x)
+            self.is_selecting = True
+        if self.cursor_x < len(self.text[self.cursor_y]):
+            self.cursor_x += 1
+        self.selection_end = (self.cursor_y, self.cursor_x)
+
+    def extend_selection_left(self):
+        if not self.is_selecting:
+            self.selection_start = (self.cursor_y, self.cursor_x)
+            self.is_selecting = True
+        if self.cursor_x > 0:
+            self.cursor_x -= 1
+        self.selection_end = (self.cursor_y, self.cursor_x)
+
+    def select_to_home(self):
+        if not self.is_selecting:
+            self.selection_start = (self.cursor_y, self.cursor_x)
+            self.is_selecting = True
+        self.cursor_x = 0
+        self.selection_end = (self.cursor_y, self.cursor_x)
+
+    def select_to_end(self):
+        if not self.is_selecting:
+            self.selection_start = (self.cursor_y, self.cursor_x)
+            self.is_selecting = True
+        self.cursor_x = len(self.text[self.cursor_y])
+        self.selection_end = (self.cursor_y, self.cursor_x)
+
+    def select_all(self):
+        self.selection_start = (0, 0)
+        self.selection_end = (len(self.text) - 1, len(self.text[-1]))
+        self.is_selecting = True
+
+    def undo(self):
+        if not self.action_history:
+            return
+        last_action = self.action_history.pop()
+        if last_action["type"] == "insert":
+            text = last_action["text"]
+            row, col = last_action["position"]
+            # Delete the inserted text
+            self.delete_text(row, col, col + len(text))
+        elif last_action["type"] == "delete":
+            text = last_action["text"]
+            start_row = last_action["start"]
+            start_col = last_action["start_col"]
+            end_row = last_action["end"]
+            end_col = last_action["end_col"]
+            # Insert the deleted text back
+            if start_row == end_row:
+                self.insert_text_at_position(text, start_row, start_col)
+            else:
+                # TODO: Handle multi-line insertions for copy/insert/delete/edit block
+                pass
+        self.undone_actions.append(last_action)
+
+    def redo(self):
+        if not self.undone_actions:
+            return
+        last_undone = self.undone_actions.pop()
+        if last_undone["type"] == "insert":
+            text = last_undone["text"]
+            row, col = last_undone["position"]
+            # Insert the text again
+            self.insert_text_at_position(text, row, col)
+        elif last_undone["type"] == "delete":
+            start_row = last_undone["start"]
+            start_col = last_undone["start_col"]
+            end_row = last_undone["end"]
+            end_col = last_undone["end_col"]
+            # Delete the text again
+            self.delete_text(start_row, start_col, end_row, end_col)
+        self.action_history.append(last_undone)
+
+    def insert_text_at_position(self, text, row, col):
+        lines = text.split('\n')
+        if row < len(self.text):
+            self.text[row] = self.text[row][:col] + lines[0] + self.text[row][col:]
+        else:
+            while len(self.text) <= row:
+                self.text.append("")
+            self.text[row] = lines[0]
+        for i in range(1, len(lines)):
+            new_row = row + i
+            if new_row < len(self.text):
+                self.text[new_row] = lines[i]
+            else:
+                self.text.append(lines[i])
+        if lines:
+            last_row = row + len(lines) - 1
+            if len(lines) == 1:
+                self.cursor_y = row
+                self.cursor_x = col + len(lines[0])
+            else:
+                self.cursor_y = last_row
+                self.cursor_x = len(lines[-1])
+        else:
+            self.cursor_y = row
+            self.cursor_x = col
+
+    def delete_text(self, start_row, start_col, end_row, end_col):
+        if start_row == end_row:
+            line = self.text[start_row]
+            self.text[start_row] = line[:start_col] + line[end_col:]
+        else:
+            self.text[start_row] = self.text[start_row][:start_col]
+            self.text[start_row] += self.text[end_row][end_col:]
+            del self.text[start_row + 1:end_row + 1]
+
+#======================================================================================
+
+    def insert_text(self, text):
+        if self.is_selecting:
+            self.delete_selected_text()
+        lines = text.split('\n')
+        current_line = self.text[self.cursor_y]
+        self.text[self.cursor_y] = current_line[:self.cursor_x] + lines[0] + current_line[self.cursor_x:]
+        self.cursor_x += len(lines[0])
+        for i in range(1, len(lines)):
+            self.cursor_y += 1
+            self.text.insert(self.cursor_y, lines[i])
+            self.cursor_x = len(lines[i])
+        self.modified = True
+        self.action_history.append({
+            "type": "insert",
+            "text": text,
+            "position": (self.cursor_y - len(lines) + 1, self.cursor_x - len(lines[0]))
+        })
+
+
+#===============================================================================
 
     def apply_syntax_highlighting_with_pygments(self, line):
         """
@@ -396,15 +442,19 @@ class SwayEditor:
             list of tuples: Each tuple contains a substring and its associated curses color.
         """
         try:
+            # Use the detected language based on the filename if available; otherwise, guess the lexer from the line
             if self.filename and self.filename != "noname":
                 lexer = get_lexer_by_name(self.detect_language())
             else:
                 lexer = guess_lexer(line)
         except Exception:
+            # Fallback to a basic text lexer if detection fails
             lexer = TextLexer()
 
+        # Tokenize the line using the chosen lexer
         tokens = list(lex(line, lexer))
 
+        # Mapping of Pygments token types to curses color pairs
         token_color_map = {
             Token.Keyword: curses.color_pair(2),
             Token.Keyword.Constant: curses.color_pair(2),
@@ -454,6 +504,7 @@ class SwayEditor:
         default_color = curses.color_pair(0)
         highlighted = []
 
+        # Assign colors to each token based on the mapping
         for token, text_val in tokens:
             color = default_color
             for token_type, curses_color in token_color_map.items():
@@ -482,7 +533,7 @@ class SwayEditor:
 
     def init_colors(self):
         """Initializes curses color pairs for syntax highlighting."""
-        bg_color = -1
+        bg_color = -1  # Use default background color
         curses.init_pair(1, curses.COLOR_BLUE, bg_color)
         curses.init_pair(2, curses.COLOR_GREEN, bg_color)
         curses.init_pair(3, curses.COLOR_MAGENTA, bg_color)
@@ -491,6 +542,7 @@ class SwayEditor:
         curses.init_pair(6, curses.COLOR_WHITE, bg_color)
         curses.init_pair(7, curses.COLOR_YELLOW, bg_color)
         curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+        # Set up a dictionary mapping element names to their respective curses color pairs
         self.colors = {
             "error": curses.color_pair(8),
             "line_number": curses.color_pair(7),
@@ -624,6 +676,43 @@ class SwayEditor:
                 self.stdscr.move(cursor_screen_y, cursor_screen_x)
             except curses.error:
                 pass
+    
+        # After drawing the main text, add the selection highlighting:
+        if self.is_selecting and self.selection_start and self.selection_end:
+            start_y, start_x = self.selection_start
+            end_y, end_x = self.selection_end
+            
+            # Swap positions if the start is after the end
+            if start_y > end_y or (start_y == end_y and start_x > end_x):
+                start_y, end_y = end_y, start_y
+                start_x, end_x = end_x, start_x
+            
+            for y in range(start_y, end_y+1):
+                line = self.text[y]
+                if y < self.scroll_top or y >= self.scroll_top + visible_lines:
+                    continue
+                screen_y = y - self.scroll_top
+                if y == start_y and y == end_y:
+                    # Single line selection
+                    for x in range(start_x, end_x):
+                        if x >= self.scroll_left and x < self.scroll_left + text_width:
+                            self.stdscr.chgat(screen_y, x - self.scroll_left + line_num_width, 
+                                            1, curses.A_REVERSE)
+                else:
+                    # Multi-line selection
+                    if y == start_y:
+                        for x in range(start_x, len(line)):
+                            if x >= self.scroll_left and x < self.scroll_left + text_width:
+                                self.stdscr.chgat(screen_y, x - self.scroll_left + line_num_width, 
+                                                1, curses.A_REVERSE)
+                    elif y == end_y:
+                        for x in range(0, end_x):
+                            if x >= self.scroll_left and x < self.scroll_left + text_width:
+                                self.stdscr.chgat(screen_y, x - self.scroll_left + line_num_width, 
+                                                1, curses.A_REVERSE)
+                    else:
+                        # Fully highlighted line
+                        self.stdscr.chgat(screen_y, 0, len(line), curses.A_REVERSE)
 
         self.highlight_matching_brackets()
         self.stdscr.refresh()
@@ -642,21 +731,21 @@ class SwayEditor:
 
     def handle_input(self, key):
         """
-        Handles keyboard input, including special commands (open, save, etc.)
-        and text entry.
+        Handles keyboard input, including navigation keys, editing commands,
+        and special actions like save, open, and quit.
         """
         logging.debug(f"Key pressed: {key}")
         try:
-            # Special keys
-            if key == curses.KEY_ENTER or key == 10 or key == 13:  # Enter
+            # Navigation and control keys
+            if key == curses.KEY_ENTER or key == 10 or key == 13:  # Enter key
                 self.handle_enter()
-            elif key == curses.KEY_UP or key == 259 or key == 450:  # Up
+            elif key == curses.KEY_UP or key == 259 or key == 450:  # Arrow Up
                 self.handle_up()
-            elif key == curses.KEY_DOWN or key == 258 or key == 456:  # Down
+            elif key == curses.KEY_DOWN or key == 258 or key == 456:  # Arrow Down
                 self.handle_down()
-            elif key == curses.KEY_LEFT or key == 260 or key == 452:  # Left
+            elif key == curses.KEY_LEFT or key == 260 or key == 452:  # Arrow Left
                 self.handle_left()
-            elif key == curses.KEY_RIGHT or key == 261 or key == 454:  # Right
+            elif key == curses.KEY_RIGHT or key == 261 or key == 454:  # Arrow Right
                 self.handle_right()
             elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:  # Backspace
                 self.handle_backspace()
@@ -674,83 +763,96 @@ class SwayEditor:
                 self.handle_tab()
             elif key == 27:  # Escape
                 self.handle_escape()
-            # Function keys and other special keys
-            elif key == self.keybindings["quit"] or key == 17 or key == 3:  # Quit
+            # Function keys and command shortcuts
+            elif key == self.keybindings["quit"]:  # Quit editor (Ctrl+Q)
                 self.exit_editor()
-            elif key == self.keybindings["save_file"] or key == 19:  # Save
+            elif key == self.keybindings["save_file"]:  # Save file (Ctrl+S)
                 self.save_file()
-            elif key == self.keybindings["open_file"] or key == 15:  # Open
+            elif key == self.keybindings["open_file"]:  # Open file (Ctrl+O)
                 self.open_file()
-            # Regular character input
-            elif 32 <= key <= 126:  # Printable ASCII
+            elif key == self.keybindings["copy"]:  # Copy selected text (Ctrl+C)
+                self.copy()
+            elif key == self.keybindings["cut"]:  # Cut selected text (Ctrl+X)
+                self.cut()
+            elif key == self.keybindings["paste"]:  # Paste text (Ctrl+V)
+                self.paste()
+            elif key == self.keybindings["undo"]:  # Undo last change (Ctrl+Z)
+                self.undo()
+            elif key == self.keybindings["redo"]:  # Redo change (Ctrl+Shift+Z)
+                self.redo()
+            elif 32 <= key <= 126:  # Printable ASCII characters
                 self.handle_char_input(key)
-
+            elif key == curses.KEY_SRIGHT:  # Shift + Right arrow
+                self.extend_selection_right()
+            elif key == curses.KEY_SLEFT:   # Shift + Left arrow
+                self.extend_selection_left()
+            elif key == curses.KEY_SHOME:   # Shift + Home
+                self.select_to_home()
+            elif key == curses.KEY_SEND:    # Shift + End
+                self.select_to_end()
         except Exception as e:
             self.status_message = f"Input error: {str(e)}"
             logging.exception("Error handling input")
 
 
     def handle_up(self):
-        """Moves the cursor up by one line."""
+        """Moves the cursor up by one line. Clears selection if active."""
+        self.is_selecting = False  # Clear selection during normal navigation
         if self.cursor_y > 0:
             self.cursor_y -= 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
 
-
     def handle_down(self):
-        """Moves the cursor down by one line."""
+        """Moves the cursor down by one line. Clears selection if active."""
+        self.is_selecting = False  # Clear selection during normal navigation
         if self.cursor_y < len(self.text) - 1:
             self.cursor_y += 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
 
-
     def handle_left(self):
-        """Moves the cursor left by one character or to the previous line end."""
+        """Moves the cursor left by one character, or to the end of the previous line if at start."""
         if self.cursor_x > 0:
             self.cursor_x -= 1
         elif self.cursor_y > 0:
             self.cursor_y -= 1
             self.cursor_x = len(self.text[self.cursor_y])
 
-
     def handle_right(self):
-        """Moves the cursor right by one character or to the beginning of the next line."""
+        """Moves the cursor right by one character, or to the beginning of the next line if at end."""
         if self.cursor_x < len(self.text[self.cursor_y]):
             self.cursor_x += 1
         elif self.cursor_y < len(self.text) - 1:
             self.cursor_y += 1
             self.cursor_x = 0
 
-
     def handle_home(self):
         """Moves the cursor to the beginning of the current line."""
         self.cursor_x = 0
-
 
     def handle_end(self):
         """Moves the cursor to the end of the current line."""
         self.cursor_x = len(self.text[self.cursor_y])
 
-
     def handle_page_up(self):
-        """Moves the cursor up by one screen height."""
+        """Moves the cursor up by one screen height and adjusts the scroll position."""
         height = self.stdscr.getmaxyx()[0]
         self.cursor_y = max(0, self.cursor_y - height)
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
         self.scroll_top = max(0, self.scroll_top - height)
 
-
     def handle_page_down(self):
-        """Moves the cursor down by one screen height."""
+        """Moves the cursor down by one screen height and adjusts the scroll position."""
         height = self.stdscr.getmaxyx()[0]
         self.cursor_y = min(len(self.text) - 1, self.cursor_y + height)
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
         if self.cursor_y >= self.scroll_top + height:
             self.scroll_top = max(0, min(len(self.text) - height, self.scroll_top + height))
 
-
     def handle_delete(self):
-        """Deletes the character under the cursor or joins with the next line if at end."""
+        """
+        Deletes the character under the cursor.
+        If at end of line, merges current line with the next.
+        """
         if self.cursor_x < len(self.text[self.cursor_y]):
             line = self.text[self.cursor_y]
             self.text[self.cursor_y] = line[: self.cursor_x] + line[self.cursor_x + 1 :]
@@ -759,9 +861,11 @@ class SwayEditor:
             self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
             self.modified = True
 
-
     def handle_backspace(self):
-        """Deletes the character to the left of the cursor or joins with the previous line."""
+        """
+        Deletes the character to the left of the cursor.
+        If at the start of a line, merges it with the previous one.
+        """
         if self.cursor_x > 0:
             line = self.text[self.cursor_y]
             self.text[self.cursor_y] = line[: self.cursor_x - 1] + line[self.cursor_x :]
@@ -773,9 +877,10 @@ class SwayEditor:
             self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
             self.modified = True
 
-
     def handle_tab(self):
-        """Inserts spaces or a tab character depending on configuration."""
+        """
+        Inserts a tab character or a set of spaces, depending on editor configuration.
+        """
         tab_size = self.config.get("editor", {}).get("tab_size", 4)
         use_spaces = self.config.get("editor", {}).get("use_spaces", True)
         current_line = self.text[self.cursor_y]
@@ -794,10 +899,9 @@ class SwayEditor:
 
         self.modified = True
 
-
     def handle_smart_tab(self):
         """
-        Inserts indentation matching the previous line if the cursor is at the start.
+        Inserts indentation that matches the previous line if the cursor is at line start.
         Otherwise falls back to normal tab insertion.
         """
         if self.cursor_y > 0:
@@ -813,52 +917,18 @@ class SwayEditor:
 
         self.handle_tab()
 
-
-    def start_selection(self):
-        """TODO: Start text selection."""
-        pass
-
-
-    def end_selection(self):
-        """TODO: End text selection."""
-        pass
-
-
-    def copy_selection(self):
-        """TODO: Copy selected text to clipboard."""
-        pass
-
-
-    def cut_selection(self):
-        """TODO: Cut selected text."""
-        pass
-
-
-    def paste_from_clipboard(self):
-        """TODO: Paste text from clipboard."""
-        pass
-
-
-    def undo(self):
-        """TODO: Undo the last action."""
-        pass
-
-
-    def redo(self):
-        """TODO: Redo the last undone action."""
-        pass
-
-
     def handle_char_input(self, key):
-        """Handles regular character input."""
+        """Handles regular printable character input (ASCII or Unicode)."""
         try:
             char = chr(key)
             current_line = self.text[self.cursor_y]
             if self.insert_mode:
+                # Insert character at the current cursor position
                 self.text[self.cursor_y] = (
                     current_line[: self.cursor_x] + char + current_line[self.cursor_x :]
                 )
             else:
+                # Overwrite character at the cursor position
                 self.text[self.cursor_y] = (
                     current_line[: self.cursor_x]
                     + char
@@ -875,7 +945,7 @@ class SwayEditor:
 
 
     def handle_enter(self):
-        """Handles the Enter key, creating a new line at the cursor position."""
+        """Handles the Enter key, splitting the current line and creating a new one."""
         self.text.insert(self.cursor_y + 1, "")
         content = self.text[self.cursor_y][self.cursor_x :]
         self.text[self.cursor_y] = self.text[self.cursor_y][: self.cursor_x]
@@ -887,18 +957,21 @@ class SwayEditor:
 
     def parse_key(self, key_str):
         """
-        Converts a hotkey description string into the corresponding key code.
+        Converts a hotkey string like 'ctrl+s' or 'ctrl+shift+z' into a key code.
+        Simplified implementation for now, extended as needed.
         """
         if not key_str:
             return -1
-
-        parts = key_str.split("+")
-        if len(parts) == 2 and parts[0].lower() == "ctrl":
-            return ord(parts[1].lower()) - ord("a") + 1
-        elif key_str.lower() == "del":
+        parts = key_str.lower().split("+")
+        if len(parts) == 2 and parts[0] == "ctrl":
+            # Convert Ctrl+<letter> to control code (e.g., Ctrl+A = 1)
+            return ord(parts[1]) - ord('a') + 1
+        elif len(parts) == 3 and parts[0] == "ctrl" and parts[1] == "shift":
+            # Temporary handling for Ctrl+Shift+Z
+            if parts[2] == "z":
+                return 26 | curses.SHIFT_MASK if hasattr(curses, 'SHIFT_MASK') else 26
+        elif key_str == "del":
             return curses.KEY_DC
-        elif key_str.lower() == "insert":
-            return curses.KEY_IC
         try:
             return ord(key_str)
         except TypeError:
@@ -907,16 +980,17 @@ class SwayEditor:
 
     def get_char_width(self, char):
         """
-        Calculates the display width of a character, accounting for full-width and half-width characters.
+        Determines the width of a character when displayed in the terminal.
+        Full-width and ambiguous-width characters count as 2.
         """
         try:
             if ord(char) < 128:
                 return 1
             width = unicodedata.east_asian_width(char)
             if width in ("F", "W"):
-                return 2
+                return 2  # Full-width or wide character
             elif width == "A":
-                return 2
+                return 2  # Ambiguous width, assume wide for safety
             else:
                 return 1
         except (UnicodeEncodeError, TypeError):
@@ -925,8 +999,8 @@ class SwayEditor:
 
     def open_file(self):
         """
-        Opens a file with automatic encoding detection using chardet,
-        or UTF-8 fallback if chardet is not available.
+        Opens a file with encoding auto-detection using `chardet`, or falls back to UTF-8.
+        Prompts the user if unsaved changes are present.
         """
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
@@ -939,6 +1013,7 @@ class SwayEditor:
             return
 
         try:
+            # Attempt to detect file encoding
             with open(filename, "rb") as f:
                 result = chardet.detect(f.read())
                 self.encoding = result["encoding"] or "UTF-8"
@@ -953,6 +1028,7 @@ class SwayEditor:
             self.status_message = f"Opened {filename} with encoding {self.encoding}"
             curses.flushinp()
         except ImportError:
+            # Fallback in case chardet is unavailable
             try:
                 with open(filename, "r", encoding="utf-8", errors="replace") as f:
                     self.text = f.read().splitlines()
@@ -983,11 +1059,11 @@ class SwayEditor:
             self.status_message = f"Error opening file: {e}"
             logging.exception(f"Error opening file: {filename}")
 
-
     def save_file(self):
         """
-        Saves the file. If no filename is set, prompts for one.
-        After saving, runs pylint in a separate thread.
+        Saves the current file to disk.
+        If the file has not been named yet, prompts the user for a filename.
+        After saving, runs pylint asynchronously in a background thread.
         """
         if self.filename == "noname":
             self.filename = self.prompt("Save as: ")
@@ -1003,6 +1079,7 @@ class SwayEditor:
             if not os.access(self.filename, os.W_OK):
                 self.status_message = f"No write permissions: {self.filename}"
                 return
+
         try:
             with open(self.filename, "w", encoding=self.encoding, errors="replace") as f:
                 f.write(os.linesep.join(self.text))
@@ -1022,8 +1099,8 @@ class SwayEditor:
 
     def save_file_as(self):
         """
-        Saves the file under a new name, updates self.filename,
-        resets modification flag, and runs pylint asynchronously.
+        Prompts the user to enter a new filename and saves the file under that name.
+        Updates the editor state accordingly and triggers a pylint analysis.
         """
         new_filename = self.prompt("Save file as: ")
         if not new_filename:
@@ -1056,7 +1133,8 @@ class SwayEditor:
 
     def revert_changes(self):
         """
-        Reverts unsaved changes by reloading from the last saved version.
+        Reverts the document to the last saved state on disk.
+        Prompts for confirmation before discarding unsaved changes.
         """
         if self.filename == "noname":
             self.status_message = "Cannot revert: file has not been saved yet"
@@ -1076,7 +1154,6 @@ class SwayEditor:
                 self.text = f.read().splitlines()
                 if not self.text:
                     self.text = [""]
-
             self.modified = False
             self.set_initial_cursor_position()
             self.status_message = f"Reverted to last saved version of {self.filename}"
@@ -1090,7 +1167,8 @@ class SwayEditor:
 
     def new_file(self):
         """
-        Creates a new empty document, prompting the user to save changes if any.
+        Clears the editor and initializes a new unnamed document.
+        Prompts to save any unsaved changes before proceeding.
         """
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
@@ -1110,7 +1188,8 @@ class SwayEditor:
 
     def exit_editor(self):
         """
-        Exits the editor with a prompt to save any unsaved changes.
+        Exits the text editor gracefully.
+        Prompts the user to save unsaved changes before exiting.
         """
         if self.modified:
             choice = self.prompt("Save changes? (y/n): ")
@@ -1121,7 +1200,9 @@ class SwayEditor:
 
 
     def handle_escape(self):
-        """Handles the Escape key."""
+        """
+        Handles the Escape key by prompting to save and then exiting the editor.
+        """
         if self.modified:
             choice = self.prompt("Save changes before exit? (y/n): ")
             if choice and choice.lower().startswith("y"):
@@ -1131,8 +1212,8 @@ class SwayEditor:
 
     def prompt(self, message):
         """
-        Displays a message to the user, captures text input from the keyboard,
-        and returns the string entered.
+        Displays a prompt message on the last line of the screen,
+        accepts user input, and returns the input string.
         """
         self.stdscr.nodelay(False)
         curses.echo()
@@ -1156,8 +1237,8 @@ class SwayEditor:
 
     def search_text(self, search_term):
         """
-        Searches for all occurrences of the specified term across all lines
-        of the document and returns a list of matches.
+        Searches for all occurrences of a string within the document text.
+        Returns a list of (line number, start index, end index) for each match.
         """
         matches = []
         for line_num, line in enumerate(self.text):
@@ -1168,7 +1249,8 @@ class SwayEditor:
 
     def validate_filename(self, filename):
         """
-        Validates the filename for length, correctness, and path.
+        Validates a filename to ensure it is within length limits and resides within the working directory.
+        Returns True if valid, otherwise False.
         """
         if not filename or len(filename) > 255:
             return False
@@ -1180,8 +1262,8 @@ class SwayEditor:
 
     def execute_shell_command(self):
         """
-        Executes a shell command entered by the user, displaying
-        partial output or error in the status bar.
+        Prompts the user to enter a shell command and executes it.
+        Displays a partial output or error message in the status bar.
         """
         command = self.prompt("Enter command: ")
         if not command:
@@ -1189,8 +1271,8 @@ class SwayEditor:
             return
 
         try:
-            curses.def_prog_mode()
-            curses.endwin()
+            curses.def_prog_mode()  # Save current terminal mode
+            curses.endwin()         # End curses window before command execution
             process = subprocess.Popen(
                 command,
                 shell=True,
@@ -1199,7 +1281,7 @@ class SwayEditor:
                 text=True,
             )
             output, error = process.communicate(timeout=30)
-            curses.reset_prog_mode()
+            curses.reset_prog_mode()  # Restore terminal mode
             self.stdscr.refresh()
 
             if error:
@@ -1214,8 +1296,8 @@ class SwayEditor:
 
     def integrate_git(self):
         """
-        Provides simple integration with Git, allowing the user
-        to select various commands.
+        Displays a menu of Git commands and allows the user to run one.
+        Outputs command result or error message in the status bar.
         """
         commands = {
             "1": ("status", "git status"),
@@ -1250,7 +1332,8 @@ class SwayEditor:
 
     def goto_line(self):
         """
-        Moves the cursor to the specified line number within the document.
+        Prompts the user for a line number and moves the cursor to that line,
+        adjusting scrolling as needed to make the line visible.
         """
         line_num = self.prompt("Go to line: ")
         try:
@@ -1273,7 +1356,8 @@ class SwayEditor:
 
     def find_and_replace(self):
         """
-        Performs find and replace with optional regex support.
+        Prompts the user for search and replacement terms, and replaces
+        all matches in the text. Supports regular expressions.
         """
         search_term = self.prompt("Search for: ")
         if not search_term:
@@ -1299,15 +1383,18 @@ class SwayEditor:
 
 
     def toggle_insert_mode(self):
-        """Toggles between Insert and Replace modes."""
+        """
+        Toggles between Insert mode and Replace (overwrite) mode.
+        Displays the current mode in the status bar.
+        """
         self.insert_mode = not self.insert_mode
         self.status_message = f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
 
 
     def find_matching_bracket(self, line, col, bracket):
         """
-        Searches for the matching bracket for the one under the cursor.
-        Returns (row, col) of the matching bracket or None if not found.
+        Searches for the matching bracket starting from the given position.
+        Supports (), {}, and [] pairs. Returns (row, col) of match or None.
         """
         brackets = {"(": ")", "{": "}", "[": "]", ")": "(", "}": "{", "]": "["}
         stack = []
@@ -1345,7 +1432,8 @@ class SwayEditor:
 
     def highlight_matching_brackets(self):
         """
-        Highlights matching brackets if the cursor is currently on a bracket.
+        Highlights the matching bracket pair on screen using reverse video.
+        Works only if the cursor is on a bracket and its pair exists.
         """
         if not (
             0 <= self.cursor_y < len(self.text)
@@ -1360,6 +1448,7 @@ class SwayEditor:
             match_pos = self.find_matching_bracket(line, self.cursor_x, char)
             if match_pos:
                 height, width = self.stdscr.getmaxyx()
+                # Highlight the current bracket
                 if (
                     0 <= self.cursor_y - self.scroll_top < height
                     and 0 <= self.cursor_x - self.scroll_left < width
@@ -1371,6 +1460,7 @@ class SwayEditor:
                         curses.A_REVERSE,
                     )
                 match_y, match_x = match_pos
+                # Highlight the matching bracket
                 if (
                     0 <= match_y - self.scroll_top < height
                     and 0 <= match_x - self.scroll_left < width
@@ -1385,9 +1475,9 @@ class SwayEditor:
 
     def search_and_replace(self):
         """
-        Searches and replaces text throughout the document using regex.
-        Prompts for a search pattern and replacement text, performs the replacement,
-        and reports the number of occurrences replaced.
+        Searches and replaces all matches of a regex pattern throughout the document.
+        Prompts the user for a regex search pattern and a replacement string.
+        Reports the number of replacements performed.
         """
         search_pattern = self.prompt("Enter search pattern (regex): ")
         if not search_pattern:
@@ -1418,18 +1508,11 @@ class SwayEditor:
             self.status_message = f"Error during search and replace: {e}"
 
 
-    def session_save(self):
-        """Saves the current editor session. (Not implemented)"""
-        pass
-
-
-    def session_restore(self):
-        """Restores the editor session. (Not implemented)"""
-        pass
-
-
     def toggle_auto_save(self):
-        """Enables or disables auto-save functionality."""
+        """
+        Toggles auto-save mode on or off.
+        When enabled, saves the file automatically every 60 seconds if modified.
+        """
         self.auto_save = getattr(self, "auto_save", False)
         self.auto_save = not self.auto_save
 
@@ -1447,25 +1530,54 @@ class SwayEditor:
             self.status_message = "Auto-save disabled"
 
 
+    # ---TODO:  Future feature stubs (to be implemented) -----------------------
+
+    def session_save(self):
+        """
+        Saves the current session state, including cursor position,
+        scroll offset, filename, and any temporary state.
+        """
+        pass
+
+
+    def session_restore(self):
+        """
+        Restores the last session if a previous save is available.
+        This includes re-opening the last file and restoring position.
+        """
+        pass
+
+
     def encrypt_file(self):
-        """Encrypts the current file. (Not implemented)"""
+        """
+        Encrypts the current file contents using a selected encryption method.
+        Will require password entry and encryption library integration.
+        """
         pass
 
 
     def decrypt_file(self):
-        """Decrypts the current file. (Not implemented)"""
+        """
+        Decrypts an encrypted file after prompting for a password.
+        Intended for opening secure file formats.
+        """
         pass
 
 
     def validate_configuration(self):
-        """Validates YAML/TOML/JSON config files before saving. (Not implemented)"""
+        """
+        Validates configuration files (YAML, TOML, JSON).
+        Ensures syntax correctness before saving them to disk.
+        """
         pass
+
+    # -------------------------------------------------------------------
 
 
     def run(self):
         """
-        Main editor loop: draws the screen, handles input,
-        and refreshes the display continuously.
+        Main editor loop: handles drawing the UI, receiving keyboard input,
+        and updating the internal state in real time.
         """
         while True:
             try:
@@ -1482,8 +1594,9 @@ class SwayEditor:
 
 def main(stdscr):
     """
-    Initializes locale, stdout encoding, and handles command-line
-    arguments before starting the main editor loop.
+    Initializes the editor: sets encoding and locale,
+    opens a file if specified in command-line arguments,
+    and starts the main run loop.
     """
     os.environ["LANG"] = "en_US.UTF-8"
     locale.setlocale(locale.LC_ALL, "")
