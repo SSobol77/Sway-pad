@@ -89,18 +89,49 @@ git_diff = { enabled = true, hotkey = "f5" }
 
 <br>
 
-## 📚 Supported Formats
+## 📚 Supported Formats 40+
 
-| Language       | Extensions                          | Icon |
-|----------------|-------------------------------------|------|
-| Python         | `.py`                              | 🐍   |
-| JavaScript/TS  | `.js .mjs .cjs .jsx .ts .tsx`      | 🌐   |
-| Rust           | `.rs`                              | 🦀   |
-| Go             | `.go`                              | 🐹   |
-| C/C++          | `.c .h .cpp .hpp`                  | 🖥️  |
-| Java           | `.java`                            | ☕   |
-| SQL            | `.sql`                             | 🗃️  |
-| **Full List**  | [See All 40+ Formats](#supported-file-types) | 📜 |
+| Language       | Extensions                                | Icon |
+|----------------|-------------------------------------------|------|
+| Python         | `.py`                                    | 🐍   |
+| JavaScript     | `.js .mjs .cjs .jsx`                     | 🌐   |
+| TypeScript     | `.ts .tsx`                               | 📘   |
+| Java           | `.java`                                  | ☕   |
+| C/C++          | `.c .h .cpp .hpp`                        | 🖥️  |
+| Rust           | `.rs`                                    | 🦀   |
+| Go             | `.go`                                    | 🐹   |
+| Ruby           | `.rb .erb .rake`                         | 💎   |
+| PHP            | `.php .phtml .php3 .php4 .php5`          | 🐘   |
+| Swift          | `.swift`                                 | 🕊️  |
+| Kotlin         | `.kt .kts`                               | 🔶   |
+| SQL            | `.sql`                                   | 🗃️  |
+| YAML           | `.yaml .yml`                             | ⚙️  |
+| TOML           | `.toml .tml`                             | 🛠️  |
+| JSON           | `.json`                                  | 📦  |
+| XML            | `.xml`                                   | 📄  |
+| HTML           | `.html .htm`                             | 🌍  |
+| CSS            | `.css`                                   | 🎨  |
+| Markdown       | `.md`                                    | 📝  |
+| Shell          | `.sh .bash .zsh`                         | 🐚  |
+| PowerShell     | `.ps1`                                   | ⚡  |
+| Docker         | `Dockerfile`                             | 🐳  |
+| Terraform      | `.tf`                                    | ☁️  |
+| Git            | `.gitignore .gitconfig`                  | 🔀  |
+| Lua            | `.lua`                                   | 🌙  |
+| Perl           | `.pl .pm`                                | 🐪  |
+| R              | `.r .R`                                  | 📊  |
+| Julia          | `.jl`                                    | ◰   |
+| Dart           | `.dart`                                  | 🎯  |
+| Scala          | `.scala`                                 | 🌀  |
+| Fortran        | `.f .F .f90 .F90 .for`                   | 🧮  |
+| Makefile       | `Makefile`                               | 🛠️  |
+| INI            | `.ini`                                   | ⚙️  |
+| CSV            | `.csv`                                   | 📊  |
+| Diff           | `.diff .patch`                           | 🔄  |
+| GraphQL        | `.graphql`                               | 📡  |
+| Jupyter        | `.ipynb`                                 | 📓  |
+
+<br>
 
 ---
 
