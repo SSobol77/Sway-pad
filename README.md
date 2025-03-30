@@ -218,6 +218,6 @@ Full text available in [LICENSE](LICENSE).
 
 [![Website](https://img.shields.io/badge/Website-Cartesian_School-orange?logo=internet-explorer)](https://cartesianschool.com)
 
-[![Discussions](https://img.shields.io/badge/Community-Discussions-blue?logo=github)](https://github.com/SSobol77/Sway-pad/discussions)
+[![Discussions](https://img.shields.io/badge/Community-Discussions-blue?logo=github)](https://github.com/SSobol77/sway-pad/discussions)
 
 [![Issues](https://img.shields.io/badge/Report-Bugs-red?logo=github)](https://github.com/SSobol77/Sway-pad/issues)
