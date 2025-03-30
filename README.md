@@ -16,6 +16,8 @@
 
 ---
 
+<br>
+
 ## 🚀 Features
 
 | **Category**         | **Details**                                                                 |
@@ -27,6 +29,8 @@
 | **Performance**      | 🚀 <0.1s Startup • 📈 100k LOC Handling • 🔄 Auto-Reload Changed Files       |
 
 ---
+
+<br>
 
 ## ⚡ Quick Start
 
@@ -57,6 +61,8 @@ sway-pad --config ~/.config/swaypad/keybinds.toml
 
 ---
 
+<br>
+
 ## 🛠 Configuration
 
 ### `~/.config/swaypad/config.toml`
@@ -81,6 +87,8 @@ git_diff = { enabled = true, hotkey = "f5" }
 
 ---
 
+<br>
+
 ## 📚 Supported Formats
 
 | Language       | Extensions                          | Icon |
@@ -95,6 +103,8 @@ git_diff = { enabled = true, hotkey = "f5" }
 | **Full List**  | [See All 40+ Formats](#supported-file-types) | 📜 |
 
 ---
+
+<br>
 
 ## 🏗 Architecture
 
@@ -113,6 +123,8 @@ Sway-pad/
 ```
 
 ---
+
+<br>
 
 ## 🧪 Development
 
@@ -136,6 +148,8 @@ flake8 . --count --max-complexity=10 --statistics
 
 ---
 
+<br>
+
 ## 🤝 Contributing
 
 1. Fork & Clone Repository
@@ -151,6 +165,8 @@ flake8 . --count --max-complexity=10 --statistics
 
 ---
 
+<br>
+
 ## 📜 License
 
 **GNU General Public License v3.0**  
@@ -158,6 +174,8 @@ Commercial use requires explicit permission.
 Full text available in [LICENSE](LICENSE).
 
 ---
+
+<br>
 
 ## 📬 Contact
 
