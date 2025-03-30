@@ -210,7 +210,7 @@ Full text available in [LICENSE](LICENSE).
 
 ## 📬 Contact
 
-**Sergey Sobolewski**  
+**Siergej Sobolewski**  
 
 [![Email](https://img.shields.io/badge/Email-s.sobolewski@hotmail.com-blue?logo=protonmail)](mailto:s.sobolewski@hotmail.com)  
 
