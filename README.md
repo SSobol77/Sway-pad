@@ -158,9 +158,13 @@ Full text available in [LICENSE](LICENSE).
 ## 📬 Contact
 
 **Sergey Sobolewski**  
-[![Email](https://img.shields.io/badge/Email-s.sobolewski@hotmail.com-blue?logo=protonmail)](mailto:s.sobolewski@hotmail.com)  
+
+[![Email]](https://img.shields.io/badge/Email-s.sobolewski@hotmail.com-blue?logo=protonmail)](mailto:s.sobolewski@hotmail.com)  
+
 [![GitHub](https://img.shields.io/badge/GitHub-SSobol77-black?logo=github)](https://github.com/SSobol77)  
+
 [![Website](https://img.shields.io/badge/Website-Cartesian_School-orange?logo=internet-explorer)](https://cartesianschool.com)
 
 [![Discussions](https://img.shields.io/badge/Community-Discussions-blue?logo=github)](https://github.com/SSobol77/Sway-pad/discussions)
+
 [![Issues](https://img.shields.io/badge/Report-Bugs-red?logo=github)](https://github.com/SSobol77/Sway-pad/issues)
