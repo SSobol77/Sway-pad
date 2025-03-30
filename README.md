@@ -7,10 +7,11 @@
 ![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/SSobol77/sway-pad/pulls)
 
+<br>
 
 <div align="center">
   <h1>🌊 Sway-pad</h1>
-  <h3>Modern Terminal Editor for Sway/i3wm Environments</h3>
+  <h3>Cross-Platform Terminal Text Editor</h3>
 </div>
 
 ---
