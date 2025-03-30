@@ -73,7 +73,7 @@ lsp_enabled = true
 git_diff = { enabled = true, hotkey = "f5" }
 ```
 
-![Theme Preview](https://github.com/user-attachments/assets/01bdf424-7dce-4a99-9631-de3b7e87313b)
+<br>
 
 ---
 
