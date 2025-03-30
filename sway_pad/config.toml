@@ -18,34 +18,39 @@ property = "cyan"
 punctuation = "white"
 background = "#1E1E1E"
 foreground = "#D4D4D4"
-error = "red"           # For errors and warnings
-status = "bright_white" # Status bar
-variable = "white"      # Variables
-tag = "blue"            # Tags (HTML/XML)
-attribute = "cyan"      # Attributes (HTML/XML)
-magic = "magenta"       # Python magic methods (__init__)
-builtin = "yellow"      # Built-in functions (print, len)
-exception = "red"       # Exceptions (try, except)
-function = "blue"       # Functions (def)
-class = "yellow"        # Classes (class)
-number = "magenta"      # Numeric literals
-operator = "white"      # Operators (+, -, *)
-escape = "cyan"         # Escaped characters (\n, \t)
+error = "red"           
+status = "bright_white"
+variable = "white"    
+tag = "blue"          
+attribute = "cyan"    
+magic = "magenta"      
+builtin = "yellow"     
+exception = "red"      
+function = "blue"     
+class = "yellow"       
+number = "magenta"      
+operator = "white"     
+escape = "cyan"       
 
 [fonts]
 font_family = "monospace"
 font_size = 12
 
 [keybindings]
-delete = "del"
-paste = "ctrl+v"
 copy = "ctrl+c"
 cut = "ctrl+x"
+paste = "ctrl+v"
 undo = "ctrl+z"
-open_file = "ctrl+o"
-save_file = "ctrl+s"
-select_all = "ctrl+a"
+redo = "ctrl+shift+z"
 quit = "ctrl+q"
+save_file = "ctrl+s"
+open_file = "ctrl+o"
+select_all = "ctrl+a"
+delete = "del"
+extend_selection_right = "shift+right"
+extend_selection_left = "shift+left"
+select_to_home = "shift+home"
+select_to_end = "shift+end"
 
 [editor]
 show_line_numbers = true
@@ -67,12 +72,50 @@ inactive_selection = "#3A3D41"
 cursor = "#AEAFAD"
 
 [file_icons]
-text = "📄"
-code = "📝"
+text = "📝"
+code = "💻"
+python = "🐍"
+toml = "⚙️"
+javascript = "💫"
+typescript = "📑"  
+php = "📑"  
+ruby = "🪀" 
 css = "🎨"
 html = "🌐"
 json = "📊"
 yaml = "⚙️"
+xml = "📑"
+markdown = "📋"
+plaintext = "📄"
+shell = "📜"
+dart = "📱"
+go = "📑"
+c = "📃"
+cpp = "📃"
+java = "☕"
+julia = "🧮"
+rust = "✴️"
+csharp = "🪟"
+scala = "💎" 
+r = "📉"    
+swift = "💎"  
+dockerfile = "🐳"
+terraform = "⚙️"
+jenkins = "⚙️"
+puppet = "⚙️"
+saltstack = "🧊"
+git = "🔖"
+notebook = "📒"
+diff = "📼"
+makefile = "⚙️"
+ini = "⚙️"
+csv = "🎴"
+sql = "📊"
+graphql = "📈"
+kotlin = "📱"
+lua = "🔮"
+perl = "⚒"
+powershell = "⚒"
 folder = "📁"
 folder_open = "📂"
 
@@ -99,7 +142,7 @@ patterns = [
 
     # 5. Comments and docstrings
     { pattern = "#.*$", color = "comment" },
-    { pattern = "\"\"\".*?\"\"\"", color = "comment" },  # Docstrings
+    { pattern = "\"\"\".*?\"\"\"", color = "comment" },
     { pattern = "'''(.*?)'''", color = "comment" },
 
     # 6. Built-in functions and exceptions
@@ -124,16 +167,16 @@ patterns = [
 
 [syntax_highlighting.toml]
 patterns = [
-    { pattern = "^\\s*\\[\\[.*?\\]\\]", color = "keyword" },  # [[table.array]]
-    { pattern = "^\\s*\\[.*?\\]", color = "keyword" },       # [table]
-    { pattern = "^\\s*([\\w-]+)\\s*=\\s*", color = "property" },  # key =
-    { pattern = "\"(?:\\\\\"|.)*?\"", color = "string" },    # "string"
-    { pattern = "'(?:\\\\'|.)*?'", color = "string" },       # 'string'
-    { pattern = "\\b(true|false)\\b", color = "literal" },   # true/false
-    { pattern = "\\b(\\d+\\.?\\d*|0x[0-9a-fA-F]+)\\b", color = "literal" },  # 42, 3.14, 0xDEADBEEF
-    { pattern = "#.*", color = "comment" },                  # # Comment
-    { pattern = "\\b(\\w+)\\s*=\\s*(\\[.*?\\])", color = "type" },  # array = [1, 2, 3]
-    { pattern = "\\b(\\w+)\\s*=\\s*\\{.*?\\}", color = "type" }     # table = { key = "value" }
+    { pattern = "^\\s*\\[\\[.*?\\]\\]", color = "keyword" },
+    { pattern = "^\\s*\\[.*?\\]", color = "keyword" },
+    { pattern = "^\\s*([\\w-]+)\\s*=\\s*", color = "property" },
+    { pattern = "\"(?:\\\\\"|.)*?\"", color = "string" }, 
+    { pattern = "'(?:\\\\'|.)*?'", color = "string" },
+    { pattern = "\\b(true|false)\\b", color = "literal" },   
+    { pattern = "\\b(\\d+\\.?\\d*|0x[0-9a-fA-F]+)\\b", color = "literal" },
+    { pattern = "#.*", color = "comment" },
+    { pattern = "\\b(\\w+)\\s*=\\s*(\\[.*?\\])", color = "type" },
+    { pattern = "\\b(\\w+)\\s*=\\s*\\{.*?\\}", color = "type" }
 ]
 
 [syntax_highlighting.javascript]
@@ -228,7 +271,7 @@ patterns = [
     { pattern = "\\b(\\d+(\\.\\d+)?|true|false|nil)\\b", color = "literal" }
 ]
 
-[syntax_highlighting.c_cpp]
+[syntax_highlighting.c]
 patterns = [
     { pattern = "//.*$", color = "comment" },
     { pattern = "/\\*[\\s\\S]*?\\*/", color = "comment" },
@@ -236,7 +279,19 @@ patterns = [
     { pattern = "\"(?:\\\\\"|.)*?\"", color = "string" },
     { pattern = "'(?:\\\\'|.)*?'", color = "string" },
     { pattern = "\\b(\\d+(\\.\\d+)?|NULL)\\b", color = "literal" },
-    { pattern = "#include\\s*[<\"].*?[>\"]", color = "decorator" },
+    { pattern = '#include\\s*[<"].*?[>"]', color = "decorator" },
+    { pattern = "#\\w+", color = "decorator" }
+]
+
+[syntax_highlighting.cpp]
+patterns = [
+    { pattern = "//.*$", color = "comment" },
+    { pattern = "/\\*[\\s\\S]*?\\*/", color = "comment" },
+    { pattern = "\\b(auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|int|long|register|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while|namespace|using|template|class|private|protected|public|virtual|friend|inline|new|delete|try|catch|throw|operator|explicit|export|bool|true|false|nullptr)\\b", color = "keyword" },
+    { pattern = "\"(?:\\\\\"|.)*?\"", color = "string" },
+    { pattern = "'(?:\\\\'|.)*?'", color = "string" },
+    { pattern = "\\b(\\d+(\\.\\d+)?|NULL)\\b", color = "literal" },
+    { pattern = '#include\\s*[<"].*?[>"]', color = "decorator" },
     { pattern = "#\\w+", color = "decorator" }
 ]
 
@@ -351,8 +406,8 @@ patterns = [
 
 [supported_formats]
 python = [".py"]
-toml = [".toml"]
-javascript = [".js", ".mjs", ".cjs", ".jsx", ".json"]
+toml = [".toml",".tml"]
+javascript = [".js", ".mjs", ".cjs", ".jsx"]
 code = [".jl", ".dart"]
 css = [".css"]
 html = [".html", ".htm"]
@@ -364,7 +419,8 @@ plaintext = [".txt"]
 shell = [".sh", ".bash", ".zsh"]
 dart = [".dart"]
 go = [".go"]
-c_cpp = [".c", ".cpp", ".h", ".hpp"]
+c = [".c", ".h"]
+cpp = [".cpp", ".hpp"]
 java = [".java"]
 julia = [".jl"]
 rust = [".rs"]
@@ -376,3 +432,20 @@ puppet = [".pp"]
 saltstack = [".sls"]
 git = [".gitignore", ".gitconfig", "config"]
 notebook = [".ipynb"]
+typescript = [".ts", ".tsx"]  
+php = [".php", ".phtml", ".php3", ".php4", ".php5"]  
+ruby = [".rb", ".erb", ".rake"]                   
+scala = [".scala"] 
+r = [".r", ".R"]    
+swift = [".swift"]     
+diff = [".diff", ".patch"]
+makefile = ["Makefile"]
+ini = [".ini"]
+csv = [".csv"]
+sql = [".sql"]
+graphql = [".graphql"]
+kotlin = [".kt", ".kts"]
+lua = [".lua"]
+perl = [".pl", ".pm"]
+powershell = [".ps1"]
+fortran = [".f", ".F", ".f90", ".F90", ".for"]
