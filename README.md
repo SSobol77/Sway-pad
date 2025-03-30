@@ -1,9 +1,12 @@
 ![swaypadm2](https://github.com/user-attachments/assets/01bdf424-7dce-4a99-9631-de3b7e87313b)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux|FreeBSD-lightgrey?logo=linux)](https://swaywm.org/)
-[![Supported Formats](https://img.shields.io/badge/Formats-40%2B-brightgreen)](https://github.com/SSobol77/Sway-pad)
+[![Python Versions](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13-blue.svg)](https://www.python.org/)
+
+[![Platform](https://img.shields.io/badge/Platform-Linux|FreeBSD-lightgrey?logo=linux)]
+
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/SSobol77/sway-pad/pulls)
+
 
 <div align="center">
   <h1>🌊 Sway-pad</h1>
