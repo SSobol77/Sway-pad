@@ -28,15 +28,18 @@
 | **Customization**    | 🔧 TOML Configuration • ⌨️ Keybind Profiles • 🌓 Dark/Light Themes           |
 | **Performance**      | 🚀 <0.1s Startup • 📈 100k LOC Handling • 🔄 Auto-Reload Changed Files       |
 
+<br>
+
 ---
 
 <br>
 
 ## ⚡ Quick Start
 
-### Installation
+### Installation  
 ```bash
-# Linux (PyPI)
+# Linux (PyPI) - Required First Step:
+sudo apt-get install xclip || sudo apt-get install xsel  # Must choose one
 pip install sway-pad --user
 
 # FreeBSD
@@ -47,13 +50,19 @@ git clone https://github.com/SSobol77/Sway-pad.git && cd Sway-pad
 python3 -m pip install -e .
 ```
 
-### Basic Usage
+### Basic Usage  
 ```bash
 # Open single file
 sway-pad example.py
 
 # Project mode (multi-tab)
 sway-pad src/ tests/ config.toml
+```
+
+**Critical for Linux Systems:**  
+⚠️ The editor **will not function properly** without either `xclip` or `xsel` installed.  
+• You **must install at least one** clipboard utility before first use (commands above)  
+• Restart your terminal session after installing dependencies  
 
 # Custom keybindings
 sway-pad --config ~/.config/swaypad/keybinds.toml
