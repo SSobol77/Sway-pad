@@ -201,6 +201,8 @@ class SwayEditor:
             "extend_selection_left": curses.KEY_SLEFT,
             "select_to_home": curses.KEY_SHOME,
             "select_to_end": curses.KEY_SEND, 
+            "extend_selection_up": 337,    # Shift + Arrow Up
+            "extend_selection_down": 336, # Shift + Arrow Down
             
         }
 
@@ -215,10 +217,12 @@ class SwayEditor:
             "select_to_home": self.select_to_home,
             "select_to_end": self.select_to_end,
             "select_all": self.select_all,
-            "open_file": lambda: print("Open file"),  # Заглушка
-            "save_file": lambda: print("Save file"),  # Заглушка
-            "quit": lambda: print("Quit"),          # Заглушка
+            "open_file": lambda: print("Open file"),  
+            "save_file": lambda: print("Save file"),  
+            "quit": lambda: print("Quit"),          
             "redo": self.redo,
+            "extend_selection_up": self.extend_selection_up,    
+            "extend_selection_down": self.extend_selection_down,
         }
 
 
@@ -366,6 +370,9 @@ class SwayEditor:
         self.selection_end = (len(self.text) - 1, len(self.text[-1]))
         self.is_selecting = True
 
+
+    #-------------old
+    """
     def undo(self):
         if not self.action_history:
             return
@@ -388,7 +395,41 @@ class SwayEditor:
                 # TODO: Обработка многострочных вставок
                 pass
         self.undone_actions.append(last_action)
+        """
+        #---------- end old
 
+    def undo(self):
+        if not self.action_history:
+            self.status_message = "Nothing to undo"
+            return
+        last_action = self.action_history.pop()
+        
+        if last_action["type"] == "insert":
+            text = last_action["text"]
+            row, col = last_action["position"]
+            lines = text.split('\n')
+            end_row = row + len(lines) - 1
+            end_col = col + len(lines[-1]) if len(lines) == 1 else len(lines[-1])
+            self.delete_text(row, col, end_row, end_col)
+            self.cursor_y = row
+            self.cursor_x = col
+        elif last_action["type"] == "delete":
+            text = last_action["text"]
+            start_row = last_action["start"]
+            start_col = last_action["start_col"]
+            self.insert_text_at_position(text, start_row, start_col)
+            self.cursor_y = start_row
+            self.cursor_x = start_col
+        
+        self.undone_actions.append(last_action)
+        self.modified = True
+        self.is_selecting = False  # Сбрасываем выделение
+        self.selection_start = None
+        self.selection_end = None
+        self.status_message = "Undo performed"
+
+
+    """ old
     def redo(self):
         if not self.undone_actions:
             return
@@ -406,7 +447,29 @@ class SwayEditor:
             # Удалить текст снова
             self.delete_text(start_row, start_col, end_row, end_col)
         self.action_history.append(last_undone)
-
+    """
+    
+    def redo(self):
+        if not self.undone_actions:
+            self.status_message = "Nothing to redo"
+            return
+        last_undone = self.undone_actions.pop()
+        
+        if last_undone["type"] == "insert":
+            text = last_undone["text"]
+            row, col = last_undone["position"]
+            self.insert_text_at_position(text, row, col)
+        elif last_undone["type"] == "delete":
+            start_row = last_undone["start"]
+            start_col = last_undone["start_col"]
+            end_row = last_undone["end"]
+            end_col = last_undone["end_col"]
+            self.delete_text(start_row, start_col, end_row, end_col)
+        
+        self.action_history.append(last_undone)
+        self.modified = True
+        self.status_message = "Redo performed"
+    
 
     def insert_text_at_position(self, text, row, col):
         lines = text.split('\n')
@@ -434,9 +497,8 @@ class SwayEditor:
             self.cursor_y = row
             self.cursor_x = col
 
-
+    """ old
     def delete_text(self, start_row, start_col, end_row, end_col):
-         # Предполагается, что delete_text определён и принимает row, start_col, end_col
         if start_row == end_row:
             line = self.text[start_row]
             self.text[start_row] = line[:start_col] + line[end_col:]
@@ -444,10 +506,20 @@ class SwayEditor:
             self.text[start_row] = self.text[start_row][:start_col]
             self.text[start_row] += self.text[end_row][end_col:]
             del self.text[start_row + 1:end_row + 1]
+        
+    """
+    def delete_text(self, start_row, start_col, end_row, end_col):
+        if start_row == end_row:
+            line = self.text[start_row]
+            self.text[start_row] = line[:start_col] + line[end_col:]
+        else:
+            self.text[start_row] = self.text[start_row][:start_col] + self.text[end_row][end_col:]
+            del self.text[start_row + 1:end_row + 1]
+        self.modified = True
 
 
 #======================================================================================
-
+    """ old
     def insert_text(self, text):
         if self.is_selecting:
             self.delete_selected_text()
@@ -465,23 +537,28 @@ class SwayEditor:
             "text": text,
             "position": (self.cursor_y - len(lines) + 1, self.cursor_x - len(lines[0]))
         })
-        
-
     """
+            
     def insert_text(self, text):
         if self.is_selecting:
             self.delete_selected_text()
         lines = text.split('\n')
         current_line = self.text[self.cursor_y]
+        start_x = self.cursor_x  # Сохраняем начальную позицию
+        start_y = self.cursor_y
         self.text[self.cursor_y] = current_line[:self.cursor_x] + lines[0] + current_line[self.cursor_x:]
         self.cursor_x += len(lines[0])
         for i in range(1, len(lines)):
             self.cursor_y += 1
             self.text.insert(self.cursor_y, lines[i])
             self.cursor_x = len(lines[i])
-        if not lines:
-            self.cursor_x = len(self.text[self.cursor_y])
-    """
+        self.modified = True
+        self.action_history.append({
+            "type": "insert",
+            "text": text,
+            "position": (start_y, start_x)  # Используем начальную позицию
+        })
+        self.status_message = "Text inserted"    
 
 
 #===============================================================================
@@ -835,6 +912,10 @@ class SwayEditor:
                 self.undo()
             elif key == self.keybindings["redo"]:  # Redo (Ctrl+Shift+Z)
                 self.redo()
+            elif key == 337:    # Shift + Arrow Up
+                self.extend_selection_up()
+            elif key ==336:   # Shift + Arrow Down
+                self.extend_selection_down()
 
            # elif key == self.keybindings["quit"] or key == 17 or key == 3:  # Quit
            #     self.exit_editor()
@@ -920,39 +1001,40 @@ class SwayEditor:
         self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
         if self.cursor_y >= self.scroll_top + height:
             self.scroll_top = max(0, min(len(self.text) - height, self.scroll_top + height))
-            
+
+#=======================  start new =====================
 
     def handle_delete(self):
-        """Deletes the selected text, if any, otherwise deletes the character under the cursor or combines it with the next line."""
+        """Удаляет выделенный текст, если он есть, иначе удаляет символ под курсором или объединяет со следующей строкой."""
         if hasattr(self, 'is_selecting') and self.is_selecting and hasattr(self, 'selection_start') and hasattr(self, 'selection_end'):
             start_row, start_col = self.selection_start
             end_row, end_col = self.selection_end
             
-            # Normalization: make sure that the beginning is before the end
+            # Нормализация: убедимся, что начало перед концом
             if start_row > end_row or (start_row == end_row and start_col > end_col):
                 start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
             
-            if start_row == end_row:  # One line
+            if start_row == end_row:  # Одна строка
                 line = self.text[start_row]
                 self.text[start_row] = line[:start_col] + line[end_col:]
-                self.cursor_x = start_col  #  Move the cursor to the beginning deletedного диапазона
-            else:  # Multiline case
-                # First line: leave it up to start_col
+                self.cursor_x = start_col  # Перемещаем курсор в начало удаленного диапазона
+            else:  # Многострочный случай
+                # Первая строка: оставляем до start_col
                 self.text[start_row] = self.text[start_row][:start_col]
-                # Last line: add from end_col
+                # Последняя строка: добавляем от end_col
                 self.text[start_row] += self.text[end_row][end_col:]
-                # Removing the middle lines
+                # Удаляем средние строки
                 for i in range(start_row + 1, end_row + 1):
                     self.text.pop(start_row + 1)
                 self.cursor_y = start_row
                 self.cursor_x = start_col
             
-            # Resetting the selection state
+            # Сбрасываем состояние выделения
             self.is_selecting = False
             self.selection_start = self.selection_end = None
             self.modified = True
         else:
-            # Initial behavior
+            # Исходное поведение
             if self.cursor_x < len(self.text[self.cursor_y]):
                 line = self.text[self.cursor_y]
                 self.text[self.cursor_y] = line[:self.cursor_x] + line[self.cursor_x + 1:]
@@ -962,37 +1044,38 @@ class SwayEditor:
                 self.modified = True
 
 
+
     def handle_backspace(self):
-        """Deletes the selected text, if any, otherwise deletes the character to the left of the cursor or combines it with the previous line."""
+        """Удаляет выделенный текст, если он есть, иначе удаляет символ слева от курсора или объединяет со предыдущей строкой."""
         if hasattr(self, 'is_selecting') and self.is_selecting and hasattr(self, 'selection_start') and hasattr(self, 'selection_end'):
             start_row, start_col = self.selection_start
             end_row, end_col = self.selection_end
             
-            # Normalization: make sure that the beginning is before the end
+            # Нормализация: убедимся, что начало перед концом
             if start_row > end_row or (start_row == end_row and start_col > end_col):
                 start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
             
-            if start_row == end_row:  # One line
+            if start_row == end_row:  # Одна строка
                 line = self.text[start_row]
                 self.text[start_row] = line[:start_col] + line[end_col:]
-                self.cursor_x = start_col  # Move the cursor to the beginning
-            else:  # Multiline case
-               # First line: leave it up to start_col
+                self.cursor_x = start_col  # Перемещаем курсор в начало
+            else:  # Многострочный случай
+                # Первая строка: оставляем до start_col
                 self.text[start_row] = self.text[start_row][:start_col]
-                # Last line: add from end_col
+                # Последняя строка: добавляем от end_col
                 self.text[start_row] += self.text[end_row][end_col:]
-                # Removing the middle lines
+                # Удаляем средние строки
                 for i in range(start_row + 1, end_row + 1):
                     self.text.pop(start_row + 1)
                 self.cursor_y = start_row
                 self.cursor_x = start_col
             
-            # Resetting the selection state
+            # Сбрасываем состояние выделения
             self.is_selecting = False
             self.selection_start = self.selection_end = None
             self.modified = True
         else:
-            # Initial behavior
+            # Исходное поведение
             if self.cursor_x > 0:
                 line = self.text[self.cursor_y]
                 self.text[self.cursor_y] = line[:self.cursor_x - 1] + line[self.cursor_x:]
@@ -1004,6 +1087,41 @@ class SwayEditor:
                 self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
                 self.modified = True
 
+
+
+# end new ==================================================
+
+
+
+
+
+#-------------------------------------------start -- old
+    """
+    #def handle_delete(self):
+    #Deletes the character under the cursor or joins with the next line if at end.
+       if self.cursor_x < len(self.text[self.cursor_y]):
+            line = self.text[self.cursor_y]
+            self.text[self.cursor_y] = line[: self.cursor_x] + line[self.cursor_x + 1 :]
+            self.modified = True
+        elif self.cursor_y < len(self.text) - 1:
+            self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
+            self.modified = True
+        
+
+    #def handle_backspace(self):
+        Deletes the character to the left of the cursor or joins with the previous line.     
+        if self.cursor_x > 0:
+            line = self.text[self.cursor_y]
+            self.text[self.cursor_y] = line[: self.cursor_x - 1] + line[self.cursor_x :]
+            self.cursor_x -= 1
+            self.modified = True
+        elif self.cursor_y > 0:
+            self.cursor_y -= 1
+            self.cursor_x = len(self.text[self.cursor_y])
+            self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
+            self.modified = True 
+    """
+#-----------------------------------------------end----old----------------------        
 
     def handle_tab(self):
         """Inserts spaces or a tab character depending on configuration."""
@@ -1117,7 +1235,29 @@ class SwayEditor:
         except TypeError:
             return -1
 
-    
+
+#old method
+#    #def parse_key(self, key_str):
+#        
+#    #    Converts a hotkey description string into the corresponding key code.
+#        
+#        if not key_str:
+#            return -1
+#        parts = key_str.lower().split("+")
+#        if len(parts) == 2 and parts[0] == "ctrl":
+#            return ord(parts[1]) - ord('a') + 1  # Ctrl+A = 1, Ctrl+B = 2, ..., Ctrl+Z = 26
+#        elif len(parts) == 3 and parts[0] == "ctrl" and parts[1] == "shift":
+#            # Пока упрощённо, для Ctrl+Shift+Z можно использовать временный код
+#            if parts[2] == "z":
+#                return 26 | curses.SHIFT_MASK if hasattr(curses, 'SHIFT_MASK') else 26
+#        elif key_str == "del":
+#            return curses.KEY_DC
+#        try:
+#            return ord(key_str)
+#        except TypeError:
+#            return -1
+
+
     def get_char_width(self, char):
         """
         Calculates the display width of a character, accounting for full-width and half-width characters.
