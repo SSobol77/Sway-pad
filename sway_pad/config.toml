@@ -32,9 +32,11 @@ number = "magenta"
 operator = "white"     
 escape = "cyan"       
 
+
 [fonts]
 font_family = "monospace"
 font_size = 12
+
 
 [keybindings]
 copy = "ctrl+c"
@@ -52,6 +54,8 @@ extend_selection_left = "shift+left"
 select_to_home = "shift+home"
 select_to_end = "shift+end"
 
+
+
 [editor]
 show_line_numbers = true
 tab_size = 4
@@ -59,6 +63,7 @@ use_spaces = true
 word_wrap = false
 auto_indent = true
 auto_brackets = true
+
 
 [theme]
 name = "dark"
@@ -70,6 +75,7 @@ accent = "#007ACC"
 selection = "#264F78"
 inactive_selection = "#3A3D41"
 cursor = "#AEAFAD"
+
 
 [file_icons]
 text = "📝"
@@ -118,6 +124,7 @@ perl = "⚒"
 powershell = "⚒"
 folder = "📁"
 folder_open = "📂"
+
 
 [syntax_highlighting]
 
@@ -193,7 +200,7 @@ patterns = [
 
 [syntax_highlighting.css]
 patterns = [
-    { pattern = "[\\w-#.]+(?=\\s*\\{)", color = "selector" },
+    { pattern = "[\\w#.-]+(?=\\s*\\{)", color = "selector" }, 
     { pattern = "([\\w-]+)(?=:)" , color = "property" },
     { pattern = ":\\s*(.*?);", color = "string" },
     { pattern = "!important", color = "literal" },
