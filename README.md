@@ -1,18 +1,13 @@
 ![swaypadm2](https://github.com/user-attachments/assets/01bdf424-7dce-4a99-9631-de3b7e87313b)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://www.gnu.org/licenses/gpl-3.0)
 ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)
 ![FreeBSD](https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/SSobol77/sway-pad/pulls)
 
-<br>
 
-<div align="center">
-  <h1>🌊 Sway-pad</h1>
-  <h3>Cross-Platform Terminal Text Editor</h3>
-</div>
 
 ---
 
@@ -33,13 +28,24 @@
 
 <br>
 
+<br>
+
+<div align="center">
+  <h1>🌊 Sway-pad</h1>
+  <h3>Cross-Platform Terminal Text Editor</h3>
+</div>
+
+---
+
+<br>
+
 ## 🚀 Features
 
 | **Category**         | **Details**                                                                 |
 |----------------------|-----------------------------------------------------------------------------|
-| **Core Engine**      | ⚡ Multithreaded Architecture • � Low Latency (<5ms) • 📦 2MB Memory Footprint |
+| **Core Engine**      | ⚡ Multithreaded Architecture • 🕒 Low Latency (<5ms) • 📦 2MB Memory Footprint |
 | **Syntax Support**   | 40+ Languages (Python, Rust, Go, etc.) • 🎨 Theme Engine • 🔍 Regex Parsing |
-| **Workflow**         | 🖱️ i3wm Integration • 📋 X11 Clipboard • 💻 TMux Compatible • 🧩 Plugin System |
+| **Workflow**         | 🖱️ i3wm Integration • 📋 X11 Clipboard (via xclip) • 💻 TMux Compatible • 🧩 Plugin System |
 | **Customization**    | 🔧 TOML Configuration • ⌨️ Keybind Profiles • 🌓 Dark/Light Themes           |
 | **Performance**      | 🚀 <0.1s Startup • 📈 100k LOC Handling • 🔄 Auto-Reload Changed Files       |
 
@@ -58,7 +64,7 @@ sudo apt-get install xclip || sudo apt-get install xsel  # Must choose one
 pip install sway-pad --user
 
 # FreeBSD
-sudo pkg install sway-pad
+sudo pkg install xclip sway-pad
 
 # Development Build
 git clone https://github.com/SSobol77/Sway-pad.git && cd Sway-pad
@@ -74,12 +80,20 @@ sway-pad example.py
 sway-pad src/ tests/ config.toml
 ```
 
-**Critical for Linux Systems:**  
-⚠️ The editor **will not function properly** without either `xclip` or `xsel` installed.  
-• You **must install at least one** clipboard utility before first use (commands above)  
-• Restart your terminal session after installing dependencies  
+> [!Warning]
+> ⚠️ **System Requirements:**  
+> **Linux**  
+> Editor **requires** either `xclip` or `xsel`  
+> 
+> **FreeBSD**  
+> Editor **requires xclip only** (xsel removed from repositories)  
+> 
+> **All Systems:**  
+> • Install required clipboard utility before first use  
+> • Restart terminal after installation  
 
 # Custom keybindings
+```bash
 sway-pad --config ~/.config/swaypad/keybinds.toml
 ```
 
@@ -113,7 +127,7 @@ git_diff = { enabled = true, hotkey = "f5" }
 
 <br>
 
-## 📚 Supported Formats 40+
+## 📚 Supported Formats (40+)
 
 | Language       | Extensions                                | Icon |
 |----------------|-------------------------------------------|------|
@@ -234,7 +248,7 @@ Full text available in [LICENSE](LICENSE).
 
 ## 📬 Contact
 
-**Siergej Sobolewski**  
+**Sergey Sobolewski**  
 
 [![Email](https://img.shields.io/badge/Email-s.sobolewski@hotmail.com-blue?logo=protonmail)](mailto:s.sobolewski@hotmail.com)  
 
@@ -245,3 +259,5 @@ Full text available in [LICENSE](LICENSE).
 [![Discussions](https://img.shields.io/badge/Community-Discussions-blue?logo=github)](https://github.com/SSobol77/sway-pad/discussions)
 
 [![Issues](https://img.shields.io/badge/Report-Bugs-red?logo=github)](https://github.com/SSobol77/Sway-pad/issues)
+
+<br>
