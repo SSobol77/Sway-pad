@@ -80,8 +80,11 @@ sway-pad example.py
 sway-pad src/ tests/ config.toml
 ```
 
+<br>
+
 > [!Warning]
-> ⚠️ **System Requirements:**  
+> **System Requirements:**
+>  
 > **Linux**  
 > Editor **requires** either `xclip` or `xsel`  
 > 
@@ -91,6 +94,8 @@ sway-pad src/ tests/ config.toml
 > **All Systems:**  
 > • Install required clipboard utility before first use  
 > • Restart terminal after installation  
+
+<br>
 
 # Custom keybindings
 ```bash
