@@ -106,13 +106,113 @@ def get_file_icon(filename: str, config: dict) -> str:
 
     return config["file_icons"].get("text", "📝")
 
+
+# Функция для получения информации о Git (ветка, имя пользователя, количество коммитов)
+def get_git_info(file_path: str) -> tuple[str, str, str]:
+    """
+    Returns the current Git branch (with dirty indicator), user.name, and commit count.
+    Uses the directory of file_path to locate the Git repository.
+    Returns ('', '', '0') if not in a Git repository or if an error occurs.
+    """
+    # Получаем директорию файла
+    repo_dir = os.path.dirname(os.path.abspath(file_path)) if file_path else os.getcwd()
+    git_dir = os.path.join(repo_dir, ".git")
+    if not os.path.isdir(git_dir):
+        logging.debug(f"No .git directory found in {repo_dir}")
+        return "", "", "0"
+
+    # Logging for git branch --show-current
+    logging.debug(f"Running git branch --show-current in {repo_dir}")
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=repo_dir
+        )
+        branch = result.stdout.strip()
+        logging.debug(f"git branch --show-current returned: {branch}")
+    except subprocess.CalledProcessError as e:
+        logging.debug(f"git branch --show-current failed: {e}")
+        # Fallback to other methods to determine the branch
+        try:
+            # Use git symbolic-ref --short HEAD for older Git versions or new repositories
+            logging.debug(f"Running git symbolic-ref --short HEAD in {repo_dir}")
+            branch_result = subprocess.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=repo_dir
+            )
+            branch = branch_result.stdout.strip()
+            logging.debug(f"git symbolic-ref --short HEAD returned: {branch}")
+        except subprocess.CalledProcessError as e:
+            logging.debug(f"git symbolic-ref --short HEAD failed: {e}")
+            # If all else fails, assume 'main' for a new repository
+            branch = "main"
+            logging.debug(f"Assuming default branch: {branch}")
+
+    # Проверяем статус репозитория (грязное состояние)
+    try:
+        logging.debug(f"Running git status --short in {repo_dir}")
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=repo_dir
+        )
+        status_output = status.stdout.strip()
+        branch += "*" if status_output else ""
+        logging.debug(f"git status --short returned: {status_output}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.warning(f"Failed to get Git status in {repo_dir}: {str(e)}")
+
+    # Получаем имя пользователя
+    try:
+        logging.debug(f"Running git config user.name in {repo_dir}")
+        user_name = subprocess.run(
+            ["git", "config", "user.name"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=repo_dir
+        ).stdout.strip()
+        logging.debug(f"git config user.name returned: {user_name}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.warning(f"Failed to get Git user.name in {repo_dir}: {str(e)}")
+        user_name = ""
+
+    # Получаем количество коммитов
+    try:
+        logging.debug(f"Running git rev-list --count HEAD in {repo_dir}")
+        commits = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=repo_dir
+        ).stdout.strip()
+        logging.debug(f"git rev-list --count HEAD returned: {commits}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.debug(f"No commits yet in {repo_dir}: {str(e)}")
+        commits = "0"
+
+    return branch, user_name, commits
+
 # Загрузка конфигурации
 def load_config() -> dict:
     """
     Loads configuration from 'config.toml', falling back to minimal defaults if not found or invalid.
     """
     minimal_default = {
-        "colors": {"error": "red", "status": "bright_white"},
+        "colors": {
+            "error": "red",
+            "status": "bright_white",
+            "green": "green"  # Для Git-информации
+        },
         "fonts": {"font_family": "monospace", "font_size": 12},
         "keybindings": {
             "delete": "del",
@@ -144,6 +244,7 @@ def load_config() -> dict:
             "css": ["css"]
         }
     }
+
     try:
         with open("config.toml", "r", encoding="utf-8") as f:
             file_content = f.read()
@@ -186,6 +287,7 @@ else:
 
 class SwayEditor:
     """Main class for the Sway editor."""
+class SwayEditor:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.stdscr.keypad(True)
@@ -217,6 +319,7 @@ class SwayEditor:
         self.internal_clipboard = ""
         self.use_system_clipboard = self.config.get("editor", {}).get("use_system_clipboard", True)
         self.pyclip_available = self._check_pyclip_availability()
+        self.git_info = None  # Кэш для Git-информации
 
         # Обновить привязки клавиш
         self.keybindings = {
@@ -261,6 +364,7 @@ class SwayEditor:
         self.init_colors()
         self.load_syntax_highlighting()
         self.set_initial_cursor_position()
+        self.update_git_info()  # Инициализируем Git-информацию
 
 
     def _check_pyclip_availability(self):
@@ -272,6 +376,10 @@ class SwayEditor:
         except pyperclip.PyperclipException as e:
             logging.warning(f"System clipboard unavailable: {str(e)}")
             return False
+
+    def update_git_info(self):
+        """Обновляет кэшированную Git-информацию для текущего файла."""
+        self.git_info = get_git_info(self.filename)
 
     def get_selected_text(self):
         if not self.is_selecting or self.selection_start is None or self.selection_end is None:
@@ -738,9 +846,7 @@ class SwayEditor:
         except Exception as e:
             logging.exception("Error loading syntax highlighting")
 
-
-
-
+            
     def draw_screen(self):
         """Renders the editor screen, including text lines, line numbers, status bar, and cursor."""
         self.stdscr.clear()
@@ -803,12 +909,16 @@ class SwayEditor:
                 except curses.error:
                     pass
                 x_pos += visible_width
+
         try:
             status_y = height - 1
             file_type = self.detect_language()
-            # Добавляем иконку рядом с типом файла
             file_icon = get_file_icon(self.filename, self.config)
-            status_msg = (
+            # Используем кэшированную Git-информацию
+            git_branch, git_user, git_commits = self.git_info
+
+            # Формируем левую часть статусной строки
+            left_status = (
                 f"File: {self.filename} | "
                 f"Type: {file_icon} {file_type} | "
                 f"Encoding: {self.encoding} | "
@@ -816,8 +926,28 @@ class SwayEditor:
                 f"Column: {self.cursor_x + 1} | "
                 f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
             )
+
+            # Формируем правую часть статусной строки
+            if git_branch or git_user:
+                right_status = f"Git :: branch: {git_branch} | {git_user} | commits: {git_commits}"
+            else:
+                right_status = "Git :: none"
+
+            # Очищаем строку статуса
             self.stdscr.addstr(status_y, 0, " " * (width - 1), self.colors["status"])
-            self.stdscr.addstr(status_y, 0, status_msg[:width - 1], self.colors["status"])
+
+            # Отображаем левую часть
+            max_left_length = width - len(right_status) - 2
+            self.stdscr.addstr(status_y, 0, left_status[:max_left_length], self.colors["status"])
+
+            # Отображаем правую часть (Git-информация) в зелёном цвете
+            if right_status:
+                self.stdscr.addstr(
+                    status_y,
+                    width - len(right_status) - 1,
+                    right_status,
+                    self.colors.get("green", self.colors["status"])
+                )
         except curses.error:
             pass
 
@@ -829,12 +959,10 @@ class SwayEditor:
             except curses.error:
                 pass
 
-        # Отрисовка выделения
         if self.is_selecting and self.selection_start and self.selection_end:
             start_y, start_x = self.selection_start
             end_y, end_x = self.selection_end
             
-            # Обмен местами если начало после конца
             if start_y > end_y or (start_y == end_y and start_x > end_x):
                 start_y, start_x, end_y, end_x = end_y, end_x, start_y, start_x
             
@@ -844,13 +972,11 @@ class SwayEditor:
                     continue
                 screen_y = y - self.scroll_top
                 if y == start_y and y == end_y:
-                    # Одна строка
                     for x in range(start_x, end_x):
                         if x >= self.scroll_left and x < self.scroll_left + text_width:
                             self.stdscr.chgat(screen_y, x - self.scroll_left + line_num_width, 
                                             1, curses.A_REVERSE)
                 else:
-                    # Несколько строк
                     if y == start_y:
                         for x in range(start_x, len(line)):
                             if x >= self.scroll_left and x < self.scroll_left + text_width:
@@ -870,7 +996,6 @@ class SwayEditor:
                                     curses.A_REVERSE
                                 )
                     else:
-                        # Полностью выделенная строка
                         if len(line) == 0:
                             self.stdscr.chgat(screen_y, line_num_width, 1, curses.A_REVERSE)
                         else:
@@ -885,12 +1010,8 @@ class SwayEditor:
                                 curses.A_REVERSE
                             )
 
-        # Вызов highlight_matching_brackets после цикла
         self.highlight_matching_brackets()
-
-        # Окончательная перерисовка экрана
         self.stdscr.refresh()
-
 
     def detect_language(self):
         """Detects the file's language based on its extension."""
@@ -1304,6 +1425,7 @@ class SwayEditor:
             self.modified = False
             self.set_initial_cursor_position()
             self.status_message = f"Opened {filename} with encoding {self.encoding}"
+            self.update_git_info()  # Обновляем Git-информацию при открытии файла
             curses.flushinp()
         except ImportError:
             try:
@@ -1316,6 +1438,7 @@ class SwayEditor:
                 self.modified = False
                 self.set_initial_cursor_position()
                 self.status_message = f"Opened {filename}"
+                self.update_git_info()  # Обновляем Git-информацию при открытии файла
                 curses.flushinp()
             except FileNotFoundError:
                 self.status_message = f"File not found: {filename}"
@@ -1335,12 +1458,11 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Error opening file: {e}"
             logging.exception(f"Error opening file: {filename}")
-
-
+ 
     def save_file(self):
         """
         Saves the file. If no filename is set, prompts for one.
-        After saving, runs pylint in a separate thread.
+        After saving, runs pylint in a separate thread and updates Git information.
         """
         if self.filename == "noname":
             self.filename = self.prompt("Save as: ")
@@ -1365,13 +1487,13 @@ class SwayEditor:
             threading.Thread(
                 target=self.run_lint_async, args=(code,), daemon=True
             ).start()
+            self.update_git_info()  # Обновляем Git-информацию после сохранения
         except OSError as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {self.filename}")
         except Exception as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {self.filename}")
-
 
     def save_file_as(self):
         """
