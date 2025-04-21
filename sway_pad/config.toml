@@ -57,6 +57,7 @@ select_to_end = "shift+end"
 
 
 [editor]
+use_system_clipboard = true  # Использовать системный буфер обмена (pyperclip)
 show_line_numbers = true
 tab_size = 4
 use_spaces = true
