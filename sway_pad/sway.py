@@ -78,19 +78,33 @@ def deep_merge(base: dict, override: dict) -> dict:
     """
     Recursively merges 'override' dict into 'base' dict, returning a new dict.
     """
-    result = dict(base)  # создаём копию, чтобы не портить оригинал
+    result = dict(base)
     for k, v in override.items():
         if (
             k in result
             and isinstance(result[k], dict)
             and isinstance(v, dict)
         ):
-            # Рекурсивно мерджим вложенные словари
             result[k] = deep_merge(result[k], v)
         else:
-            # Если ключ не словарь или отсутствует, заменяем/добавляем
             result[k] = v
     return result
+
+# Функция для получения иконки файла
+def get_file_icon(filename: str, config: dict) -> str:
+    """
+    Returns the icon for a file based on its extension.
+    """
+    file_lower = filename.lower()
+    if "file_icons" not in config or "supported_formats" not in config:
+        return "📝"  # Fallback для отсутствующей конфигурации
+
+    for key, icon in config["file_icons"].items():
+        extensions = config["supported_formats"].get(key, [])
+        if file_lower.endswith(tuple(ext.lower() for ext in extensions)):
+            return icon
+
+    return config["file_icons"].get("text", "📝")
 
 # Загрузка конфигурации
 def load_config() -> dict:
@@ -113,10 +127,23 @@ def load_config() -> dict:
             "redo": "ctrl+shift+z",
         },
         "editor": {
-            "use_system_clipboard": True  # Новая настройка для выбора буфера обмена
+            "use_system_clipboard": True
+        },
+        "file_icons": {
+            "python": "🐍",
+            "javascript": "📜",
+            "text": "📝",
+            "html": "🌐",
+            "css": "🎨"
+        },
+        "supported_formats": {
+            "python": ["py", "pyw"],
+            "javascript": ["js", "jsx"],
+            "text": ["txt", "md"],
+            "html": ["html", "htm"],
+            "css": ["css"]
         }
     }
-
     try:
         with open("config.toml", "r", encoding="utf-8") as f:
             file_content = f.read()
@@ -234,6 +261,7 @@ class SwayEditor:
         self.init_colors()
         self.load_syntax_highlighting()
         self.set_initial_cursor_position()
+
 
     def _check_pyclip_availability(self):
         """Проверяет доступность pyperclip и системных утилит для буфера обмена."""
@@ -371,6 +399,7 @@ class SwayEditor:
             self.delete_selected_text()
         self.insert_text(text)
 
+
     def extend_selection_right(self):
         if not self.is_selecting:
             self.selection_start = (self.cursor_y, self.cursor_x)
@@ -386,6 +415,7 @@ class SwayEditor:
         if self.cursor_x > 0:
             self.cursor_x -= 1
         self.selection_end = (self.cursor_y, self.cursor_x)
+
 
     def select_to_home(self):
         if not self.is_selecting:
@@ -405,6 +435,7 @@ class SwayEditor:
         self.selection_start = (0, 0)
         self.selection_end = (len(self.text) - 1, len(self.text[-1]))
         self.is_selecting = True
+
 
     def undo(self):
         if not self.action_history:
@@ -438,6 +469,7 @@ class SwayEditor:
         self.selection_end = None
         self.status_message = "Undo performed"
 
+
     def extend_selection_up(self):
         """Расширяет выделение вверх на одну строку."""
         if not self.is_selecting:
@@ -457,6 +489,7 @@ class SwayEditor:
             self.cursor_y += 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
         self.selection_end = (self.cursor_y, self.cursor_x)
+
     
     def redo(self):
         if not self.undone_actions:
@@ -477,7 +510,8 @@ class SwayEditor:
         
         self.action_history.append(last_undone)
         self.modified = True
-        self.status_message = "Redo performed"  
+        self.status_message = "Redo performed"
+    
 
     def insert_text_at_position(self, text, row, col):
         lines = text.split('\n')
@@ -514,7 +548,9 @@ class SwayEditor:
             self.text[start_row] = self.text[start_row][:start_col] + self.text[end_row][end_col:]
             del self.text[start_row + 1:end_row + 1]
         self.modified = True
-         
+
+
+            
     def insert_text(self, text):
         if self.is_selecting:
             self.delete_selected_text()
@@ -702,6 +738,9 @@ class SwayEditor:
         except Exception as e:
             logging.exception("Error loading syntax highlighting")
 
+
+
+
     def draw_screen(self):
         """Renders the editor screen, including text lines, line numbers, status bar, and cursor."""
         self.stdscr.clear()
@@ -764,20 +803,21 @@ class SwayEditor:
                 except curses.error:
                     pass
                 x_pos += visible_width
-
         try:
             status_y = height - 1
             file_type = self.detect_language()
+            # Добавляем иконку рядом с типом файла
+            file_icon = get_file_icon(self.filename, self.config)
             status_msg = (
                 f"File: {self.filename} | "
-                f"Type: {file_type} | "
+                f"Type: {file_icon} {file_type} | "
                 f"Encoding: {self.encoding} | "
                 f"Line: {self.cursor_y + 1}/{len(self.text)} | "
                 f"Column: {self.cursor_x + 1} | "
                 f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
             )
             self.stdscr.addstr(status_y, 0, " " * (width - 1), self.colors["status"])
-            self.stdscr.addstr(status_y, 0, status_msg, self.colors["status"])
+            self.stdscr.addstr(status_y, 0, status_msg[:width - 1], self.colors["status"])
         except curses.error:
             pass
 
@@ -1217,6 +1257,7 @@ class SwayEditor:
             logging.debug(f"[parse_key] Exception: {e}")
             return -1
 
+
     def get_char_width(self, char):
         """
         Calculates the display width of a character, accounting for full-width and half-width characters.
@@ -1234,6 +1275,7 @@ class SwayEditor:
         except (UnicodeEncodeError, TypeError):
             return 1
 
+
     def open_file(self):
         """
         Opens a file with automatic encoding detection using chardet,
@@ -1248,6 +1290,7 @@ class SwayEditor:
         if not filename:
             self.status_message = "Open cancelled"
             return
+
         try:
             with open(filename, "rb") as f:
                 result = chardet.detect(f.read())
@@ -1304,9 +1347,11 @@ class SwayEditor:
             if not self.filename:
                 self.status_message = "Save cancelled"
                 return
+
         if os.path.isdir(self.filename):
             self.status_message = f"Cannot save: {self.filename} is a directory"
             return
+
         if os.path.exists(self.filename):
             if not os.access(self.filename, os.W_OK):
                 self.status_message = f"No write permissions: {self.filename}"
@@ -1327,6 +1372,7 @@ class SwayEditor:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {self.filename}")
 
+
     def save_file_as(self):
         """
         Saves the file under a new name, updates self.filename,
@@ -1345,6 +1391,7 @@ class SwayEditor:
             if not os.access(new_filename, os.W_OK):
                 self.status_message = f"No write permissions: {new_filename}"
                 return
+
         try:
             with open(new_filename, "w", encoding=self.encoding, errors="replace") as f:
                 f.write(os.linesep.join(self.text))
@@ -1358,6 +1405,7 @@ class SwayEditor:
         except (OSError, Exception) as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {new_filename}")
+
 
     def revert_changes(self):
         """
@@ -1375,11 +1423,13 @@ class SwayEditor:
         if not confirmation or confirmation.lower() != "y":
             self.status_message = "Revert cancelled"
             return
+
         try:
             with open(self.filename, "r", encoding=self.encoding, errors="replace") as f:
                 self.text = f.read().splitlines()
                 if not self.text:
                     self.text = [""]
+
             self.modified = False
             self.set_initial_cursor_position()
             self.status_message = f"Reverted to last saved version of {self.filename}"
@@ -1389,6 +1439,7 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Unexpected error: {e}"
             logging.exception(f"Unexpected error reverting file: {self.filename}")
+
 
     def new_file(self):
         """
@@ -1421,6 +1472,7 @@ class SwayEditor:
         curses.endwin()
         sys.exit(0)
 
+
     def handle_escape(self):
         """Handles the Escape key."""
         if self.modified:
@@ -1428,6 +1480,7 @@ class SwayEditor:
             if choice and choice.lower().startswith("y"):
                 self.save_file()
         self.exit_editor()
+
 
     def prompt(self, message):
         """
@@ -1453,6 +1506,7 @@ class SwayEditor:
             self.stdscr.nodelay(False)
         return response
 
+
     def search_text(self, search_term):
         """
         Searches for all occurrences of the specified term across all lines
@@ -1463,6 +1517,7 @@ class SwayEditor:
             for match in re.finditer(re.escape(search_term), line):
                 matches.append((line_num, match.start(), match.end()))
         return matches
+
 
     def validate_filename(self, filename):
         """
@@ -1475,6 +1530,7 @@ class SwayEditor:
             return os.path.commonpath([base_dir, os.getcwd()]) == os.getcwd()
         return True
 
+
     def execute_shell_command(self):
         """
         Executes a shell command entered by the user, displaying
@@ -1484,6 +1540,7 @@ class SwayEditor:
         if not command:
             self.status_message = "Command cancelled"
             return
+
         try:
             curses.def_prog_mode()
             curses.endwin()
@@ -1533,6 +1590,7 @@ class SwayEditor:
                 )
                 curses.reset_prog_mode()
                 self.stdscr.refresh()
+
                 if process.returncode == 0:
                     self.status_message = f"Git {commands[choice][0]} successful"
                 else:
@@ -1573,9 +1631,11 @@ class SwayEditor:
         search_term = self.prompt("Search for: ")
         if not search_term:
             return
+
         replace_term = self.prompt("Replace with: ")
         if replace_term is None:
             return
+
         try:
             count = 0
             for i in range(len(self.text)):
@@ -1635,6 +1695,7 @@ class SwayEditor:
                         return (self.cursor_y, i)
         return None
 
+
     def highlight_matching_brackets(self):
         """
         Highlights matching brackets if the cursor is currently on a bracket.
@@ -1673,6 +1734,7 @@ class SwayEditor:
                         line[match_x],
                         curses.A_REVERSE,
                     )
+
 
     def search_and_replace(self):
         """
@@ -1726,6 +1788,7 @@ class SwayEditor:
         else:
             self.status_message = "Auto-save disabled"
 
+
 # TODO: ---------------------------------------------------
 
     def session_save(self):
@@ -1752,6 +1815,9 @@ class SwayEditor:
         """ TODO: Validates YAML/TOML/JSON config files before saving. (Not implemented)"""
         pass
 
+# ------------------------------------
+
+
     def run(self):
         """
         Main editor loop: draws the screen, handles input,
@@ -1768,6 +1834,7 @@ class SwayEditor:
             except Exception as e:
                 logging.exception("Unhandled exception in main loop")
                 self.status_message = f"Error: {str(e)}"
+
 
 def main(stdscr):
     """
@@ -1787,6 +1854,7 @@ def main(stdscr):
         logging.exception(f"Error opening file from command line: {e}")
 
     editor.run()
+
 
 if __name__ == "__main__":
     config = load_config()
