@@ -55,6 +55,13 @@ if sys.platform == "freebsd":
     os.environ["PYTHONLEGACYWINDOWSSTDIO"] = "1"
 
 
+def _set_default_encoding():
+    """ Устанавливает кодировку по умолчанию для Python 3.8 и выше."""
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONLEGACYWINDOWSSTDIO", "1")
+
+_set_default_encoding()
+
 
 def run_flake8_on_code(code_string, filename="<buffer>"):
     """
@@ -94,28 +101,36 @@ def run_flake8_on_code(code_string, filename="<buffer>"):
         # Удаляем временный файл
         os.remove(tmp_name)
 
-
-
 # Обработка ошибок:
-# Если возникла ошибка, выводим сообщение в статус-бар
-# и очищаем историю действий
-# (или выполняем другие действия по вашему усмотрению)
-# Например:
-# Или выводим сообщение в статус-бар
-# self.status_message = f"Error: {str(e)}" 
-# self.action_history.clear()
-# self.undone_actions.clear()  # Сброс отменённых действий
 
-# Или просто логируем
-# logging.error(f"Error handling character input: {str(e)}")
-# logging.error(traceback.format_exc())  # Полный трейсбек ошибки
-# Вывод информации в логи 
+# --- Настройка основного логгера приложения ---
 logging.basicConfig(
     filename="editor.log",
-    level=logging.DEBUG,
+    level=logging.DEBUG,  # при необходимости можно менять на INFO
     format="%(asctime)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)",
-    force=True,  # ВАЖНО!
+    force=True,  # переопределяет настройки предыдущих логгеров
 )
+
+logger = logging.getLogger(__name__)  # основной логгер приложения
+
+
+# --- Логгер для событий клавиатуры ---
+KEY_LOGGER = logging.getLogger("sway2.keyevents")
+KEY_LOGGER.propagate = False
+KEY_LOGGER.setLevel(logging.DEBUG)
+KEY_LOGGER.addHandler(logging.NullHandler())
+
+# Включение трассировки клавиш только при явном указании
+if os.environ.get("SWAY2_KEYTRACE", "").lower() in {"1", "true", "yes"}:
+    from logging.handlers import RotatingFileHandler
+    handler = RotatingFileHandler("keytrace.log", maxBytes=1_000_000, backupCount=3)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    KEY_LOGGER.addHandler(handler)
+    KEY_LOGGER.propagate = True
+else:
+    KEY_LOGGER.disabled = True  # Отключаем логгер клавиш по умолчанию
+
+#--end-----------------------
 
 def deep_merge(base: dict, override: dict) -> dict:
     """
@@ -180,8 +195,7 @@ def get_file_icon(filename: str, config: dict) -> str:
     Returns the icon for a file based on its extension.
     """
     file_lower = filename.lower()
-
-    # Здесь предполагается, что в TOML у вас есть секции "file_icons" и "supported_formats".
+    # Здесь предполагается, что в TOML есть секции "file_icons" и "supported_formats".
     # Если их нет – пропишите в config.toml.
     if "file_icons" not in config or "supported_formats" not in config:
         return "📝"  # fallback
@@ -201,12 +215,8 @@ class SwayEditor:
     """
     def __init__(self, stdscr):
         self.stdscr = stdscr
-        self.stdscr.keypad(True)  # Включить режим клавиш
-        
-        curses.raw()  # Режим raw для лучшей обработки клавиш
-        #curses.cbreak()  # Иногда curses.raw() подавляет некоторые сигналы и искажает ввод. Можно заменить:
-        #curses.cbreak()  # Включить режим cbreak для обработки клавиш
-        
+        self.stdscr.keypad(True)  # Включить режим клавиш       
+        curses.raw()  # Режим raw для лучшей обработки клавиш   
         curses.nonl()  # Не переводить Enter
         curses.noecho()  # Не отображать ввод пользователя
         self.config = load_config()  # Загрузить конфигурацию из config.toml
@@ -232,9 +242,6 @@ class SwayEditor:
         self.action_history = []
         self.undone_actions = []
         self.internal_clipboard = "" # Внутренний буфер обмена внутренний «клипборд» без pyperclip
-        
-
-        # TODO:Разобраться
         # Обновить привязки клавиш
         self.keybindings = {
             "delete": self.parse_key(self.config["keybindings"].get("delete", "del")),
@@ -275,8 +282,6 @@ class SwayEditor:
             "extend_selection_down": self.extend_selection_down,
             "select_all": self.select_all,
         }
-
-
         # Другие инициализации
         self.init_colors()
         self.load_syntax_highlighting()
@@ -288,15 +293,25 @@ class SwayEditor:
             return ""
         start_row, start_col = self.selection_start
         end_row, end_col = self.selection_end
+        
+        # Нормализация: начало должно быть раньше конца
+        if start_row > end_row or (start_row == end_row and start_col > end_col):
+            start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
+        
+        selected_lines = []
         if start_row == end_row:
-            return self.text[start_row][min(start_col, end_col):max(start_col, end_col)]
+            line = self.text[start_row]
+            selected_lines.append(line[start_col:end_col])
         else:
-            selected_lines = []
+            # Первая строка
             selected_lines.append(self.text[start_row][start_col:])
+            # Средние строки
             for row in range(start_row + 1, end_row):
                 selected_lines.append(self.text[row])
+            # Последняя строка
             selected_lines.append(self.text[end_row][:end_col])
-            return "\n".join(selected_lines)
+        
+        return "\n".join(selected_lines)
 
 
     def delete_selected_text(self):
@@ -305,10 +320,9 @@ class SwayEditor:
         start_row, start_col = self.selection_start
         end_row, end_col = self.selection_end
         
-        # Обмен местами, если начало после конца
+        # Нормализация
         if start_row > end_row or (start_row == end_row and start_col > end_col):
-            start_row, end_row = end_row, start_row
-            start_col, end_col = end_col, start_col
+            start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
         
         # Сохраняем удалённый текст для undo
         deleted_text = self.get_selected_text()
@@ -322,12 +336,12 @@ class SwayEditor:
         })
         
         if start_row == end_row:
-            text = self.text[start_row]
-            self.text[start_row] = text[:start_col] + text[end_col:]
+            self.text[start_row] = self.text[start_row][:start_col] + self.text[start_row][end_col:]
             self.cursor_x = start_col
         else:
-            # Удаляем многострочный текст
+            # Объединяем первую и последнюю строки
             self.text[start_row] = self.text[start_row][:start_col] + self.text[end_row][end_col:]
+            # Удаляем промежуточные строки
             del self.text[start_row + 1:end_row + 1]
             self.cursor_y = start_row
             self.cursor_x = start_col
@@ -336,49 +350,28 @@ class SwayEditor:
         self.selection_end = None
         self.is_selecting = False
         self.modified = True
+        self.undone_actions.clear()
 
 
     def copy(self):
         selected_text = self.get_selected_text()
+        self.internal_clipboard = selected_text
         pyperclip.copy(selected_text)
         self.status_message = "Copied to clipboard"
 
-    """ OLD CUT
-    def cut(self):
-        selected_text = self.get_selected_text()
-        logging.debug(f"[CUT] to clipboard => '{selected_text}'")
-        pyperclip.copy(selected_text)
-        self.delete_selected_text()
-        self.status_message = "Cut to clipboard"
-    """
     def cut(self):
         self.internal_clipboard = self.get_selected_text()
         self.delete_selected_text()
-        self.status_message = "Cut to internal clipboard"
+        pyperclip.copy(self.internal_clipboard)
+        self.status_message = "Cut to clipboard"
 
-
-    """ OLD PASTE
-    def paste(self):
-        text = pyperclip.paste()
-        logging.debug(f"[PASTE] from clipboard => '{text}'")
-        if self.is_selecting:
-            self.delete_selected_text()
-        self.insert_text(text)
-        self.status_message = "Pasted from clipboard"
-    """
-    def paste(self):
-        if self.is_selecting:
-            self.delete_selected_text()
-        self.insert_text(self.internal_clipboard or "")
-        self.status_message = "Pasted from internal clipboard"
-
-    
     def paste(self):
         text = self.internal_clipboard
         if self.is_selecting:
             self.delete_selected_text()
         self.insert_text(text)
-        self.status_message = "Pasted from internal clipboard"
+        self.status_message = "Pasted from clipboard"
+
 
     def extend_selection_right(self):
         if not self.is_selecting:
@@ -437,12 +430,14 @@ class SwayEditor:
             start_row = last_action["start"]
             start_col = last_action["start_col"]
             self.insert_text_at_position(text, start_row, start_col)
-            self.cursor_y = start_row
-            self.cursor_x = start_col
+            # Восстанавливаем курсор в конец вставленного текста
+            lines = text.split('\n')
+            self.cursor_y = start_row + len(lines) - 1
+            self.cursor_x = start_col + len(lines[-1]) if len(lines) == 1 else len(lines[-1])
         
         self.undone_actions.append(last_action)
         self.modified = True
-        self.is_selecting = False  # Сбрасываем выделение
+        self.is_selecting = False
         self.selection_start = None
         self.selection_end = None
         self.status_message = "Undo performed"
@@ -527,8 +522,6 @@ class SwayEditor:
             del self.text[start_row + 1:end_row + 1]
         self.modified = True
 
-
-            
     def insert_text(self, text):
         if self.is_selecting:
             self.delete_selected_text()
@@ -825,8 +818,7 @@ class SwayEditor:
                     for x in range(start_x, end_x):
                         if x >= self.scroll_left and x < self.scroll_left + text_width:
                             self.stdscr.chgat(screen_y, x - self.scroll_left + line_num_width, 
-                                            1, curses.A_REVERSE)
-                #######################        
+                                            1, curses.A_REVERSE)             
                 else:
                     # Несколько строк
                     if y == start_y:
@@ -848,9 +840,9 @@ class SwayEditor:
                                     curses.A_REVERSE
                                 )
                     else:
-                        # Полностью выделенная строка
+                        # Полностью выделенная строка                                           
                         # Проверим, пустая ли строка:
-                        if len(line) == 0:
+                        if len(line) == 0 and y > start_y and y < end_y:
                             # Если строка вообще пустая, выделим хотя бы один символ
                             # Обычно можно «выделить» позицию 0 шириной 1 символ
                             # Либо можно пропустить, если хотите «не делать» на пустой строке
@@ -885,90 +877,74 @@ class SwayEditor:
 
 
     def handle_input(self, key):
-        """
-        Handles keyboard input, including special commands (open, save, etc.)
-        and text entry.
-        """
-        logging.debug(f"Key pressed: {key}")
-        logging.debug(f"Char input: key={key}, char={chr(key)}")
-        logging.debug(f"Cursor position: ({self.cursor_y}, {self.cursor_x})")
-        logging.debug(f"Text length: {len(self.text)}")
-        logging.debug(f"Text content: {self.text}")
-        logging.debug(f"Selection start: {self.selection_start}")
-        logging.debug(f"Selection end: {self.selection_end}")
-        logging.debug(f"Is selecting: {self.is_selecting}")
-        logging.debug(f"Action history: {self.action_history}")
-        logging.debug(f"Undone actions: {self.undone_actions}")
-        logging.debug(f"Status message: {self.status_message}")
-        logging.debug(f"Keybindings: {self.keybindings}")
-
         try:
-            # Special keys
-            if key == curses.KEY_ENTER or key == 10 or key == 13:  # Enter
-                self.handle_enter()
-            elif key == curses.KEY_UP or key == 259 or key == 450:  # Up
-                self.handle_up()
-            elif key == curses.KEY_DOWN or key == 258 or key == 456:  # Down
-                self.handle_down()
-            elif key == curses.KEY_LEFT or key == 260 or key == 452:  # Left
-                self.handle_left()
-            elif key == curses.KEY_RIGHT or key == 261 or key == 454:  # Right
-                self.handle_right()
-            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:  # Backspace
-                self.handle_backspace()
-            elif key == curses.KEY_DC or key == 330 or key == 462:  # Delete
-                self.handle_delete()
-            elif key == curses.KEY_HOME or key == 262 or key == 449:  # Home
-                self.handle_home()
-            elif key == curses.KEY_END or key == 360 or key == 455:  # End
-                self.handle_end()
-            elif key == curses.KEY_PPAGE or key == 339 or key == 451:  # Page Up
-                self.handle_page_up()
-            elif key == curses.KEY_NPAGE or key == 338 or key == 457:  # Page Down
-                self.handle_page_down()
-            elif key == 9:  # Tab
-                self.handle_tab()
-            elif key == 27:  # Escape
-                self.handle_escape()
-            # Function keys and other special keys
-            elif key == self.keybindings["quit"]:           # Quit (Ctrl+Q)
-                self.exit_editor()
-            elif key == self.keybindings["save_file"]:      # Save (Ctrl+S)
-                self.save_file()
-            elif key == self.keybindings["open_file"]:      # Open (Ctrl+O)
-                self.open_file()
-            elif key == self.keybindings["copy"]:           # Copy (Ctrl+C)
-                self.copy()
-            elif key == self.keybindings["cut"]:            # Cut (Ctrl+X)
-                self.cut()
-            elif key == self.keybindings["paste"]:          # Paste (Ctrl+V)
-                self.paste()
-            elif key == self.keybindings["undo"]:           # Undo (Ctrl+Z)
-                self.undo()
-            elif key == self.keybindings["redo"]:           # Redo (Ctrl+Shift+Z)
-                self.redo()
+            # Логируем только критические события
+            logging.debug(f"Key pressed: {key}")
 
-            # Regular character input
-            elif key >= 32 and key <= 255:                  # Printable ASCII
-                self.handle_char_input(key)                 
-            elif key == self.keybindings["select_all"]:     # Select All (Ctrl+A)
+            # === Основная логика обработки клавиш ===
+            if key == curses.KEY_ENTER or key == 10 or key == 13:
+                self.handle_enter()
+            elif key == curses.KEY_UP or key == 259 or key == 450:
+                self.handle_up()
+            elif key == curses.KEY_DOWN or key == 258 or key == 456:
+                self.handle_down()
+            elif key == curses.KEY_LEFT or key == 260 or key == 452:
+                self.handle_left()
+            elif key == curses.KEY_RIGHT or key == 261 or key == 454:
+                self.handle_right()
+            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
+                self.handle_backspace()
+            elif key == curses.KEY_DC or key == 330 or key == 462:
+                self.handle_delete()
+            elif key == curses.KEY_HOME or key == 262 or key == 449:
+                self.handle_home()
+            elif key == curses.KEY_END or key == 360 or key == 455:
+                self.handle_end()
+            elif key == curses.KEY_PPAGE or key == 339 or key == 451:
+                self.handle_page_up()
+            elif key == curses.KEY_NPAGE or key == 338 or key == 457:
+                self.handle_page_down()
+            elif key == 9:
+                self.handle_tab()
+            elif key == 27:
+                self.handle_escape()
+            elif key == self.keybindings["quit"]:
+                self.exit_editor()
+            elif key == self.keybindings["save_file"]:
+                self.save_file()
+            elif key == self.keybindings["open_file"]:
+                self.open_file()
+            elif key == self.keybindings["copy"]:
+                self.copy()
+            elif key == self.keybindings["cut"]:
+                self.cut()
+            elif key == self.keybindings["paste"]:
+                self.paste()
+            elif key == self.keybindings["undo"]:
+                self.undo()
+            elif key == self.keybindings["redo"]:
+                self.redo()
+            elif key >= 32 and key <= 255:
+                self.handle_char_input(key)
+            elif key == self.keybindings["select_all"]:
                 self.select_all()
-            elif key == curses.KEY_SRIGHT:                  # Shift + Right
+            elif key == curses.KEY_SRIGHT:
                 self.extend_selection_right()
-            elif key == curses.KEY_SLEFT:                   # Shift + Left
+            elif key == curses.KEY_SLEFT:
                 self.extend_selection_left()
-            elif key == curses.KEY_SHOME:                   # Shift + Home
+            elif key == curses.KEY_SHOME:
                 self.select_to_home()
-            elif key == curses.KEY_SEND:                    # Shift + End
+            elif key == curses.KEY_SEND:
                 self.select_to_end()
-            elif key == 337:                                # Shift + Arrow Up
+            elif key == 337:
                 self.extend_selection_up()
-            elif key ==336:                                 # Shift + Arrow Down
+            elif key == 336:
                 self.extend_selection_down()
 
         except Exception as e:
-            self.status_message = f"Input error: {str(e)}"
-            logging.exception("Error handling input")
+            self.status_message = f"Error: {str(e)}"
+            logging.error(f"Input handling error: {str(e)}")
+            logging.error(traceback.format_exc())
 
 
     def handle_up(self):
@@ -1031,126 +1007,73 @@ class SwayEditor:
         if self.cursor_y >= self.scroll_top + height:
             self.scroll_top = max(0, min(len(self.text) - height, self.scroll_top + height))
 
-#=======================  start new =====================
-
-    def handle_delete(self):
-        """Удаляет выделенный текст, если он есть, иначе удаляет символ под курсором или объединяет со следующей строкой."""
-        if hasattr(self, 'is_selecting') and self.is_selecting and hasattr(self, 'selection_start') and hasattr(self, 'selection_end'):
-            start_row, start_col = self.selection_start
-            end_row, end_col = self.selection_end
-            
-            # Нормализация: убедимся, что начало перед концом
-            if start_row > end_row or (start_row == end_row and start_col > end_col):
-                start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
-            
-            if start_row == end_row:  # Одна строка
-                line = self.text[start_row]
-                self.text[start_row] = line[:start_col] + line[end_col:]
-                self.cursor_x = start_col  # Перемещаем курсор в начало удаленного диапазона
-            else:  # Многострочный случай
-                # Первая строка: оставляем до start_col
-                self.text[start_row] = self.text[start_row][:start_col]
-                # Последняя строка: добавляем от end_col
-                self.text[start_row] += self.text[end_row][end_col:]
-                # Удаляем средние строки
-                for i in range(start_row + 1, end_row + 1):
-                    self.text.pop(start_row + 1)
-                self.cursor_y = start_row
-                self.cursor_x = start_col
-            
-            # Сбрасываем состояние выделения
-            self.is_selecting = False
-            self.selection_start = self.selection_end = None
-            self.modified = True
-        else:
-            # Исходное поведение
-            if self.cursor_x < len(self.text[self.cursor_y]):
-                line = self.text[self.cursor_y]
-                self.text[self.cursor_y] = line[:self.cursor_x] + line[self.cursor_x + 1:]
-                self.modified = True
-            elif self.cursor_y < len(self.text) - 1:
-                self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
-                self.modified = True
-
-
 
     def handle_backspace(self):
-        """Удаляет выделенный текст, если он есть, иначе удаляет символ слева от курсора или объединяет со предыдущей строкой."""
-        if hasattr(self, 'is_selecting') and self.is_selecting and hasattr(self, 'selection_start') and hasattr(self, 'selection_end'):
-            start_row, start_col = self.selection_start
-            end_row, end_col = self.selection_end
-            
-            # Нормализация: убедимся, что начало перед концом
-            if start_row > end_row or (start_row == end_row and start_col > end_col):
-                start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
-            
-            if start_row == end_row:  # Одна строка
-                line = self.text[start_row]
-                self.text[start_row] = line[:start_col] + line[end_col:]
-                self.cursor_x = start_col  # Перемещаем курсор в начало
-            else:  # Многострочный случай
-                # Первая строка: оставляем до start_col
-                self.text[start_row] = self.text[start_row][:start_col]
-                # Последняя строка: добавляем от end_col
-                self.text[start_row] += self.text[end_row][end_col:]
-                # Удаляем средние строки
-                for i in range(start_row + 1, end_row + 1):
-                    self.text.pop(start_row + 1)
-                self.cursor_y = start_row
-                self.cursor_x = start_col
-            
-            # Сбрасываем состояние выделения
-            self.is_selecting = False
-            self.selection_start = self.selection_end = None
-            self.modified = True
+        if self.is_selecting and self.selection_start and self.selection_end:
+            self.delete_selected_text()
         else:
-            # Исходное поведение
             if self.cursor_x > 0:
                 line = self.text[self.cursor_y]
+                deleted_char = line[self.cursor_x - 1]
                 self.text[self.cursor_y] = line[:self.cursor_x - 1] + line[self.cursor_x:]
                 self.cursor_x -= 1
                 self.modified = True
+                self.action_history.append({
+                    "type": "delete",
+                    "text": deleted_char,
+                    "start": self.cursor_y,
+                    "start_col": self.cursor_x,
+                    "end": self.cursor_y,
+                    "end_col": self.cursor_x + 1
+                })
             elif self.cursor_y > 0:
+                deleted_line = self.text.pop(self.cursor_y)
                 self.cursor_y -= 1
                 self.cursor_x = len(self.text[self.cursor_y])
-                self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
+                self.text[self.cursor_y] += deleted_line
                 self.modified = True
+                self.action_history.append({
+                    "type": "delete",
+                    "text": "\n" + deleted_line,
+                    "start": self.cursor_y,
+                    "start_col": self.cursor_x,
+                    "end": self.cursor_y + 1,
+                    "end_col": 0
+                })
+        self.undone_actions.clear()
 
 
+    def handle_delete(self):
+        if self.is_selecting and self.selection_start and self.selection_end:
+            self.delete_selected_text()
+        else:
+            if self.cursor_x < len(self.text[self.cursor_y]):
+                line = self.text[self.cursor_y]
+                deleted_char = line[self.cursor_x]
+                self.text[self.cursor_y] = line[:self.cursor_x] + line[self.cursor_x + 1:]
+                self.modified = True
+                self.action_history.append({
+                    "type": "delete",
+                    "text": deleted_char,
+                    "start": self.cursor_y,
+                    "start_col": self.cursor_x,
+                    "end": self.cursor_y,
+                    "end_col": self.cursor_x + 1
+                })
+            elif self.cursor_y < len(self.text) - 1:
+                deleted_line = self.text.pop(self.cursor_y + 1)
+                self.text[self.cursor_y] += deleted_line
+                self.modified = True
+                self.action_history.append({
+                    "type": "delete",
+                    "text": "\n" + deleted_line,
+                    "start": self.cursor_y,
+                    "start_col": len(self.text[self.cursor_y]) - len(deleted_line),
+                    "end": self.cursor_y + 1,
+                    "end_col": 0
+                })
+        self.undone_actions.clear()
 
-# end new ==================================================
-
-
-
-
-
-#-------------------------------------------start -- old
-    """
-    #def handle_delete(self):
-    #Deletes the character under the cursor or joins with the next line if at end.
-       if self.cursor_x < len(self.text[self.cursor_y]):
-            line = self.text[self.cursor_y]
-            self.text[self.cursor_y] = line[: self.cursor_x] + line[self.cursor_x + 1 :]
-            self.modified = True
-        elif self.cursor_y < len(self.text) - 1:
-            self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
-            self.modified = True
-        
-
-    #def handle_backspace(self):
-        Deletes the character to the left of the cursor or joins with the previous line.     
-        if self.cursor_x > 0:
-            line = self.text[self.cursor_y]
-            self.text[self.cursor_y] = line[: self.cursor_x - 1] + line[self.cursor_x :]
-            self.cursor_x -= 1
-            self.modified = True
-        elif self.cursor_y > 0:
-            self.cursor_y -= 1
-            self.cursor_x = len(self.text[self.cursor_y])
-            self.text[self.cursor_y] += self.text.pop(self.cursor_y + 1)
-            self.modified = True 
-    """
-#-----------------------------------------------end----old----------------------        
 
     def handle_tab(self):
         """Inserts spaces or a tab character depending on configuration."""
@@ -1236,15 +1159,6 @@ class SwayEditor:
             logging.exception(f"Error handling character input: {str(e)}")
             self.status_message = f"Input error: {str(e)}"
 
-
-
-
-#---------------------------------------------------------------------------------
-
-
-
-
-
     def handle_enter(self):
         """Handles the Enter key, creating a new line at the cursor position."""
         self.text.insert(self.cursor_y + 1, "")
@@ -1256,56 +1170,10 @@ class SwayEditor:
         self.modified = True
 
 
-#-----  Parse_key--------------------------------------start -- old
-    """old
-    #def parse_key(self, key_str):
-        
-        #Converts a hotkey description string into the corresponding key code.
-        
-        logging.debug(f"[parse_key] Received: '{key_str}'")
-
-        if not key_str:
-            logging.debug("[parse_key] Empty key_str")
-            return -1
-
-        key_str = key_str.strip().lower()
-        parts = key_str.split("+")
-        logging.debug(f"[parse_key] Parts: {parts}")
-
-                 
-        if len(parts) == 2 and parts[0] == "ctrl":
-            if parts[1].isalpha() and len(parts[1]) == 1:
-                return ord(parts[1]) - ord('a') + 1  # Ctrl+A = 1, ..., Ctrl+Z = 26
-            elif parts[1] == "space":
-                return ord(' ') & 0x1f  # Ctrl+Space, often 0
-            elif parts[1] == "tab":
-                return ord('\t') & 0x1f  # Ctrl+Tab, often 9
-            return -1
-        elif len(parts) == 3 and parts[0] == "ctrl" and parts[1] == "shift":
-            if parts[2].isalpha() and len(parts[2]) == 1:
-                base = ord(parts[2]) - ord('a') + 1
-                if hasattr(curses, 'SHIFT_MASK'):
-                    return base | curses.SHIFT_MASK
-                return base
-            return -1
-        elif key_str in ("del", "delete"):  # Handle both "del" and "delete"
-            return curses.KEY_DC
-        elif key_str == "space":
-            return ord(' ')
-        elif key_str == "tab":
-            return ord('\t')
-        elif key_str == "enter":
-            return ord('\n')
-        try:
-            return ord(key_str)
-        except TypeError:
-            return -1
-    """
-
     def parse_key(self, key_str):
-        
-        # Converts a hotkey description string into the corresponding key code.
-    
+        """
+        Converts a hotkey description string into the corresponding key code.
+        """
         logging.debug(f"[parse_key] Received: '{key_str}'")
 
         if not key_str:
@@ -1359,8 +1227,6 @@ class SwayEditor:
             logging.debug(f"[parse_key] Exception: {e}")
             return -1
 
-
-
     def get_char_width(self, char):
         """
         Calculates the display width of a character, accounting for full-width and half-width characters.
@@ -1377,7 +1243,6 @@ class SwayEditor:
                 return 1
         except (UnicodeEncodeError, TypeError):
             return 1
-
 
     def open_file(self):
         """
@@ -1509,7 +1374,6 @@ class SwayEditor:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {new_filename}")
 
-
     def revert_changes(self):
         """
         Reverts unsaved changes by reloading from the last saved version.
@@ -1609,7 +1473,6 @@ class SwayEditor:
             self.stdscr.nodelay(False)
         return response
 
-
     def search_text(self, search_term):
         """
         Searches for all occurrences of the specified term across all lines
@@ -1621,7 +1484,6 @@ class SwayEditor:
                 matches.append((line_num, match.start(), match.end()))
         return matches
 
-
     def validate_filename(self, filename):
         """
         Validates the filename for length, correctness, and path.
@@ -1632,7 +1494,6 @@ class SwayEditor:
             base_dir = os.path.dirname(os.path.abspath(filename))
             return os.path.commonpath([base_dir, os.getcwd()]) == os.getcwd()
         return True
-
 
     def execute_shell_command(self):
         """
@@ -1666,7 +1527,6 @@ class SwayEditor:
             self.status_message = "Command timed out"
         except Exception as e:
             self.status_message = f"Error executing command: {str(e)}"
-
 
     def integrate_git(self):
         """
@@ -1703,7 +1563,6 @@ class SwayEditor:
         else:
             self.status_message = "Invalid choice"
 
-
     def goto_line(self):
         """
         Moves the cursor to the specified line number within the document.
@@ -1726,7 +1585,6 @@ class SwayEditor:
         except ValueError:
             self.status_message = "Invalid line number"
 
-
     def find_and_replace(self):
         """
         Performs find and replace with optional regex support.
@@ -1738,7 +1596,6 @@ class SwayEditor:
         replace_term = self.prompt("Replace with: ")
         if replace_term is None:
             return
-
         try:
             count = 0
             for i in range(len(self.text)):
@@ -1753,12 +1610,10 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Error during replace: {str(e)}"
 
-
     def toggle_insert_mode(self):
         """Toggles between Insert and Replace modes."""
         self.insert_mode = not self.insert_mode
         self.status_message = f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
-
 
     def find_matching_bracket(self, line, col, bracket):
         """
@@ -1798,7 +1653,6 @@ class SwayEditor:
                         return (self.cursor_y, i)
         return None
 
-
     def highlight_matching_brackets(self):
         """
         Highlights matching brackets if the cursor is currently on a bracket.
@@ -1837,7 +1691,6 @@ class SwayEditor:
                         line[match_x],
                         curses.A_REVERSE,
                     )
-
 
     def search_and_replace(self):
         """
@@ -1891,7 +1744,6 @@ class SwayEditor:
         else:
             self.status_message = "Auto-save disabled"
 
-
 # TODO: ---------------------------------------------------
 
     def session_save(self):
@@ -1918,9 +1770,6 @@ class SwayEditor:
         """ TODO: Validates YAML/TOML/JSON config files before saving. (Not implemented)"""
         pass
 
-# ------------------------------------
-
-
     def run(self):
         """
         Main editor loop: draws the screen, handles input,
@@ -1937,7 +1786,6 @@ class SwayEditor:
             except Exception as e:
                 logging.exception("Unhandled exception in main loop")
                 self.status_message = f"Error: {str(e)}"
-
 
 def main(stdscr):
     """
