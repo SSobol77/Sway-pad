@@ -238,8 +238,8 @@ def load_config() -> dict:
         },
         "supported_formats": {
             "python": ["py", "pyw"],
-            "javascript": ["js", "jsx"],
-            "text": ["txt", "md"],
+            "javascript": ["js", "mjs", "cjs", "jsx"],
+            "text": ["txt"],
             "html": ["html", "htm"],
             "css": ["css"]
         }
@@ -287,7 +287,6 @@ else:
 
 class SwayEditor:
     """Main class for the Sway editor."""
-class SwayEditor:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.stdscr.keypad(True)
@@ -320,6 +319,10 @@ class SwayEditor:
         self.use_system_clipboard = self.config.get("editor", {}).get("use_system_clipboard", True)
         self.pyclip_available = self._check_pyclip_availability()
         self.git_info = None  # Кэш для Git-информации
+        self._lexer = None  # Лексер для Pygments
+        self._token_cache = {}  # Кэш токенов: (line_hash, lexer_id) -> highlighted
+        self.visible_lines = 0  # Кэшированное значение visible_lines
+        self.last_window_size = (0, 0)  # Для отслеживания resize
 
         # Обновить привязки клавиш
         self.keybindings = {
@@ -337,8 +340,10 @@ class SwayEditor:
             "extend_selection_left": curses.KEY_SLEFT,
             "select_to_home": curses.KEY_SHOME,
             "select_to_end": curses.KEY_SEND, 
-            "extend_selection_up": 337,
-            "extend_selection_down": 336,
+            # "extend_selection_up": 337,
+            # "extend_selection_down": 336,
+            "extend_selection_up": curses.KEY_SR,  # вместо 337
+            "extend_selection_down": curses.KEY_SF,  # вместо 336
         }
 
         # Настроить карту действий
@@ -685,22 +690,23 @@ class SwayEditor:
         """
         Uses Pygments for automatic language detection and tokenization.
         The resulting tokens are mapped to curses color pairs for syntax highlighting.
-
-        Args:
-            line (str): The code line to highlight.
-
-        Returns:
-            list of tuples: Each tuple contains a substring and its associated curses color.
         """
-        try:
-            if self.filename and self.filename != "noname":
-                lexer = get_lexer_by_name(self.detect_language())
-            else:
-                lexer = guess_lexer(line)
-        except Exception:
-            lexer = TextLexer()
+        if self._lexer is None:
+            try:
+                if self.filename and self.filename != "noname":
+                    self._lexer = get_lexer_by_name(self.detect_language())
+                else:
+                    self._lexer = guess_lexer(line)
+            except Exception:
+                self._lexer = TextLexer()
 
-        tokens = list(lex(line, lexer))
+        # Кэширование результата
+        line_hash = hash(line)
+        cache_key = (line_hash, id(self._lexer))
+        if cache_key in self._token_cache:
+            return self._token_cache[cache_key]
+
+        tokens = list(lex(line, self._lexer))
 
         token_color_map = {
             Token.Keyword: curses.color_pair(2),
@@ -758,6 +764,12 @@ class SwayEditor:
                     color = curses_color
                     break
             highlighted.append((text_val, color))
+
+        self._token_cache[cache_key] = highlighted
+        # Ограничение размера кэша (например, 1000 строк)
+        if len(self._token_cache) > 1000:
+            self._token_cache.pop(next(iter(self._token_cache)))
+        
         return highlighted
 
 
@@ -788,6 +800,7 @@ class SwayEditor:
         self.scroll_top = 0
         self.scroll_left = 0
 
+
     def init_colors(self):
         """Initializes curses color pairs for syntax highlighting."""
         bg_color = -1
@@ -815,6 +828,15 @@ class SwayEditor:
             "property": curses.color_pair(5),
             "tag": curses.color_pair(2),
             "attribute": curses.color_pair(3),
+            "builtins": curses.color_pair(4),  # Добавлено
+            "escape": curses.color_pair(5),    # Добавлено
+            "magic": curses.color_pair(3),     # Добавлено
+            "exception": curses.color_pair(8),  # Добавлено
+            "function": curses.color_pair(2),   # Добавлено
+            "class": curses.color_pair(4),      # Добавлено
+            "number": curses.color_pair(3),     # Добавлено
+            "operator": curses.color_pair(6),   # Добавлено
+            "green": curses.color_pair(2),      # Для Git-информации
         }
 
     def apply_syntax_highlighting(self, line, lang):
@@ -846,20 +868,28 @@ class SwayEditor:
         except Exception as e:
             logging.exception("Error loading syntax highlighting")
 
-            
+                
     def draw_screen(self):
         """Renders the editor screen, including text lines, line numbers, status bar, and cursor."""
-        self.stdscr.clear()
+        self.stdscr.erase()  # вместо clear()
         height, width = self.stdscr.getmaxyx()
+
+        # Обновляем visible_lines при изменении размера окна
+        if self.last_window_size != (height, width):
+            self.visible_lines = height - 2
+            self.last_window_size = (height, width)
+
         if height < 24 or width < 80:
             try:
                 self.stdscr.addstr(
                     0, 0, "Window too small (min: 80x24)", self.colors["error"]
                 )
-                self.stdscr.refresh()
+                self.stdscr.noutrefresh()  # вместо refresh()
+                curses.doupdate()
+                return
             except curses.error:
                 pass
-            return
+                return
 
         max_line_num = len(str(len(self.text)))
         line_num_format = f"{{:>{max_line_num}}} "
@@ -871,13 +901,12 @@ class SwayEditor:
         elif self.cursor_x >= self.scroll_left + text_width:
             self.scroll_left = max(0, self.cursor_x - text_width + 1)
 
-        visible_lines = height - 2
         if self.cursor_y < self.scroll_top:
             self.scroll_top = self.cursor_y
-        elif self.cursor_y >= self.scroll_top + visible_lines:
-            self.scroll_top = self.cursor_y - visible_lines + 1
+        elif self.cursor_y >= self.scroll_top + self.visible_lines:
+            self.scroll_top = self.cursor_y - self.visible_lines + 1
 
-        for screen_row in range(visible_lines):
+        for screen_row in range(self.visible_lines):
             line_num = self.scroll_top + screen_row + 1
             if line_num > len(self.text):
                 break
@@ -953,12 +982,13 @@ class SwayEditor:
 
         cursor_screen_y = self.cursor_y - self.scroll_top
         cursor_screen_x = self.cursor_x - self.scroll_left + line_num_width
-        if 0 <= cursor_screen_y < visible_lines and 0 <= cursor_screen_x < width:
+        if 0 <= cursor_screen_y < self.visible_lines and 0 <= cursor_screen_x < width:
             try:
                 self.stdscr.move(cursor_screen_y, cursor_screen_x)
             except curses.error:
                 pass
 
+        # блок выделения
         if self.is_selecting and self.selection_start and self.selection_end:
             start_y, start_x = self.selection_start
             end_y, end_x = self.selection_end
@@ -966,56 +996,52 @@ class SwayEditor:
             if start_y > end_y or (start_y == end_y and start_x > end_x):
                 start_y, start_x, end_y, end_x = end_y, end_x, start_y, start_x
             
-            for y in range(start_y, end_y+1):
-                line = self.text[y]
-                if y < self.scroll_top or y >= self.scroll_top + visible_lines:
+            for y in range(start_y, end_y + 1):
+                if y < self.scroll_top or y >= self.scroll_top + self.visible_lines:
                     continue
                 screen_y = y - self.scroll_top
+                line = self.text[y]
+                line_len = len(line)
+                
+                # Определяем начало и конец выделения для текущей строки
                 if y == start_y and y == end_y:
-                    for x in range(start_x, end_x):
-                        if x >= self.scroll_left and x < self.scroll_left + text_width:
-                            self.stdscr.chgat(screen_y, x - self.scroll_left + line_num_width, 
-                                            1, curses.A_REVERSE)
+                    sel_start = max(start_x, self.scroll_left)
+                    sel_end = min(end_x, self.scroll_left + text_width)
+                elif y == start_y:
+                    sel_start = max(start_x, self.scroll_left)
+                    sel_end = min(line_len, self.scroll_left + text_width)
+                elif y == end_y:
+                    sel_start = self.scroll_left
+                    sel_end = min(end_x, self.scroll_left + text_width)
                 else:
-                    if y == start_y:
-                        for x in range(start_x, len(line)):
-                            if x >= self.scroll_left and x < self.scroll_left + text_width:
-                                self.stdscr.chgat(
-                                    screen_y,
-                                    x - self.scroll_left + line_num_width,
-                                    1,
-                                    curses.A_REVERSE
-                                )
-                    elif y == end_y:
-                        for x in range(0, end_x):
-                            if x >= self.scroll_left and x < self.scroll_left + text_width:
-                                self.stdscr.chgat(
-                                    screen_y,
-                                    x - self.scroll_left + line_num_width,
-                                    1,
-                                    curses.A_REVERSE
-                                )
-                    else:
-                        if len(line) == 0:
-                            self.stdscr.chgat(screen_y, line_num_width, 1, curses.A_REVERSE)
-                        else:
-                            line_len = len(line)
-                            visible_line_length = max(
-                                0, min(line_len - self.scroll_left, text_width)
-                            )
-                            self.stdscr.chgat(
-                                screen_y,
-                                line_num_width,
-                                visible_line_length,
-                                curses.A_REVERSE
-                            )
+                    sel_start = self.scroll_left
+                    sel_end = min(line_len, self.scroll_left + text_width)
+                
+                # Применяем выделение одним вызовом chgat
+                if sel_start < sel_end:
+                    try:
+                        self.stdscr.chgat(
+                            screen_y,
+                            line_num_width + (sel_start - self.scroll_left),
+                            sel_end - sel_start,
+                            curses.A_REVERSE
+                        )
+                    except curses.error:
+                        pass
+                elif line_len == 0 and y >= start_y and y <= end_y:
+                    # Для пустых строк выделяем один символ
+                    try:
+                        self.stdscr.chgat(screen_y, line_num_width, 1, curses.A_REVERSE)
+                    except curses.error:
+                        pass
 
         self.highlight_matching_brackets()
-        self.stdscr.refresh()
+        self.stdscr.noutrefresh()  # вместо refresh()
+        curses.doupdate()  # единый вызов в конце
 
     def detect_language(self):
         """Detects the file's language based on its extension."""
-        ext = os.path.splitext(self.filename)[1].lower()
+        ext = os.path.splitext(self.filename)[1].lstrip('.').lower()
         logging.debug(f"Detecting language for extension: {ext}")
         for lang, exts in self.config.get("supported_formats", {}).items():
             if ext in exts:
@@ -1057,8 +1083,6 @@ class SwayEditor:
                 self.handle_tab()
             elif key == 27:
                 self.handle_escape()
-            elif key == self.keybindings["quit"]:
-                self.exit_editor()
             elif key == self.keybindings["save_file"]:
                 self.save_file()
             elif key == self.keybindings["open_file"]:
@@ -1069,10 +1093,12 @@ class SwayEditor:
                 self.cut()
             elif key == self.keybindings["paste"]:
                 self.paste()
-            elif key == self.keybindings["undo"]:
-                self.undo()
             elif key == self.keybindings["redo"]:
                 self.redo()
+            elif key == self.keybindings["undo"]:
+                self.undo()
+            elif key == self.keybindings["quit"]:
+                self.exit_editor()
             elif key >= 32 and key <= 255:
                 self.handle_char_input(key)
             elif key == self.keybindings["select_all"]:
@@ -1089,11 +1115,11 @@ class SwayEditor:
                 self.extend_selection_up()
             elif key == 336:
                 self.extend_selection_down()
-
+        
         except Exception as e:
-            self.status_message = f"Error: {str(e)}"
-            logging.error(f"Input handling error: {str(e)}")
-            logging.error(traceback.format_exc())
+                self.status_message = f"Error: {str(e)}"
+                logging.error(f"Input handling error: {str(e)}")
+                logging.error(traceback.format_exc())
 
 
     def handle_up(self):
@@ -1326,15 +1352,12 @@ class SwayEditor:
         Converts a hotkey description string into the corresponding key code.
         """
         logging.debug(f"[parse_key] Received: '{key_str}'")
-
         if not key_str:
             logging.debug("[parse_key] Empty key_str")
             return -1
-
         key_str = key_str.strip().lower()
         parts = key_str.split("+")
         logging.debug(f"[parse_key] Parts: {parts}")
-
         try:
             if len(parts) == 2 and parts[0] == "ctrl":
                 if parts[1].isalpha() and len(parts[1]) == 1:
@@ -1347,29 +1370,24 @@ class SwayEditor:
                 elif parts[1] == "tab":
                     logging.debug("[parse_key] Ctrl+Tab → 9")
                     return ord('\t') & 0x1f
-
             elif len(parts) == 3 and parts[0] == "ctrl" and parts[1] == "shift":
                 if parts[2].isalpha() and len(parts[2]) == 1:
-                    base = ord(parts[2]) - ord('a') + 1
-                    logging.debug(f"[parse_key] Ctrl+Shift+{parts[2].upper()} → {base}")
-                    return base
-
+                    # Уникальный код для Ctrl+Shift+<key>
+                    result = (ord(parts[2]) - ord('a') + 1) | 0x100
+                    logging.debug(f"[parse_key] Ctrl+Shift+{parts[2].upper()} → {result}")
+                    return result
             elif key_str in ("del", "delete"):
                 logging.debug("[parse_key] Delete key detected → KEY_DC")
                 return curses.KEY_DC
-
             elif key_str == "space":
                 logging.debug("[parse_key] Space key → 32")
                 return ord(' ')
-
             elif key_str == "tab":
                 logging.debug("[parse_key] Tab key → 9")
                 return ord('\t')
-
             elif key_str == "enter":
                 logging.debug("[parse_key] Enter key → 10")
                 return ord('\n')
-
             result = ord(key_str)
             logging.debug(f"[parse_key] Fallback: ord('{key_str}') → {result}")
             return result
