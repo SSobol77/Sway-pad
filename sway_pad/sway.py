@@ -1057,63 +1057,63 @@ class SwayEditor:
             logging.debug(f"Key pressed: {key}")
 
             # === Основная логика обработки клавиш ===
-            if key == curses.KEY_ENTER or key == 10 or key == 13:
+            if key == curses.KEY_ENTER or key == 10 or key == 13:      # Enter
                 self.handle_enter()
-            elif key == curses.KEY_UP or key == 259 or key == 450:
+            elif key == curses.KEY_UP or key == 259 or key == 450:     # Up Arrow
                 self.handle_up()
-            elif key == curses.KEY_DOWN or key == 258 or key == 456:
+            elif key == curses.KEY_DOWN or key == 258 or key == 456:   # Down Arrow
                 self.handle_down()
-            elif key == curses.KEY_LEFT or key == 260 or key == 452:
+            elif key == curses.KEY_LEFT or key == 260 or key == 452:   # Left Arrow
                 self.handle_left()
-            elif key == curses.KEY_RIGHT or key == 261 or key == 454:
+            elif key == curses.KEY_RIGHT or key == 261 or key == 454:   # Right Arrow
                 self.handle_right()
-            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
+            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:   # Backspace
                 self.handle_backspace()
-            elif key == curses.KEY_DC or key == 330 or key == 462:
+            elif key == curses.KEY_DC or key == 330 or key == 462:    # Delete
                 self.handle_delete()
-            elif key == curses.KEY_HOME or key == 262 or key == 449:
+            elif key == curses.KEY_HOME or key == 262 or key == 449:   # Home
                 self.handle_home()
-            elif key == curses.KEY_END or key == 360 or key == 455:
+            elif key == curses.KEY_END or key == 360 or key == 455:    # End
                 self.handle_end()
-            elif key == curses.KEY_PPAGE or key == 339 or key == 451:
+            elif key == curses.KEY_PPAGE or key == 339 or key == 451:  # Page Up
                 self.handle_page_up()
-            elif key == curses.KEY_NPAGE or key == 338 or key == 457:
+            elif key == curses.KEY_NPAGE or key == 338 or key == 457:  # Page Down
                 self.handle_page_down()
             elif key == 9:
-                self.handle_tab()
+                self.handle_smart_tab() # Tab
             elif key == 27:
                 self.handle_escape()
-            elif key == self.keybindings["save_file"]:
+            elif key == self.keybindings["save_file"]:     # Ctrl+S
                 self.save_file()
-            elif key == self.keybindings["open_file"]:
+            elif key == self.keybindings["open_file"]:     # Ctrl+O
                 self.open_file()
-            elif key == self.keybindings["copy"]:
+            elif key == self.keybindings["copy"]:          # Ctrl+C
                 self.copy()
-            elif key == self.keybindings["cut"]:
+            elif key == self.keybindings["cut"]:           # Ctrl+X
                 self.cut()
-            elif key == self.keybindings["paste"]:
+            elif key == self.keybindings["paste"]:         # Ctrl+V
                 self.paste()
-            elif key == self.keybindings["redo"]:
+            elif key == self.keybindings["redo"]:          # Ctrl+Y
                 self.redo()
-            elif key == self.keybindings["undo"]:
+            elif key == self.keybindings["undo"]:          # Ctrl+Z
                 self.undo()
-            elif key == self.keybindings["quit"]:
+            elif key == self.keybindings["quit"]:          # Ctrl+Q
                 self.exit_editor()
-            elif key >= 32 and key <= 255:
+            elif key >= 32 and key <= 255:                 # Printable characters
                 self.handle_char_input(key)
-            elif key == self.keybindings["select_all"]:
+            elif key == self.keybindings["select_all"]:    # Ctrl+A
                 self.select_all()
-            elif key == curses.KEY_SRIGHT:
+            elif key == curses.KEY_SRIGHT:                 # Shift+Right Arrow
                 self.extend_selection_right()
-            elif key == curses.KEY_SLEFT:
+            elif key == curses.KEY_SLEFT:                  # Shift+Left Arrow
                 self.extend_selection_left()
-            elif key == curses.KEY_SHOME:
+            elif key == curses.KEY_SHOME:                  # Shift+Home
                 self.select_to_home()
-            elif key == curses.KEY_SEND:
+            elif key == curses.KEY_SEND:                   # Shift+End
                 self.select_to_end()
-            elif key == 337:
+            elif key == 337:                               # Shift+Page Up
                 self.extend_selection_up()
-            elif key == 336:
+            elif key == 336:                               # Shift+Page Down
                 self.extend_selection_down()
         
         except Exception as e:
@@ -1182,7 +1182,6 @@ class SwayEditor:
         if self.cursor_y >= self.scroll_top + height:
             self.scroll_top = max(0, min(len(self.text) - height, self.scroll_top + height))
 
-
     def handle_backspace(self):
         if self.is_selecting and self.selection_start and self.selection_end:
             self.delete_selected_text()
@@ -1217,7 +1216,6 @@ class SwayEditor:
                 })
         self.undone_actions.clear()
 
-
     def handle_delete(self):
         if self.is_selecting and self.selection_start and self.selection_end:
             self.delete_selected_text()
@@ -1249,7 +1247,6 @@ class SwayEditor:
                 })
         self.undone_actions.clear()
 
-
     def handle_tab(self):
         """Inserts spaces or a tab character depending on configuration."""
         tab_size = self.config.get("editor", {}).get("tab_size", 4)
@@ -1270,25 +1267,23 @@ class SwayEditor:
 
         self.modified = True
 
-
     def handle_smart_tab(self):
         """
-        Inserts indentation matching the previous line if the cursor is at the start.
-        Otherwise falls back to normal tab insertion.
+        Если курсор в начале строки (cursor_x == 0),
+        копирует отступ (пробелы/таб) предыдущей строки.
+        Иначе – падает обратно на handle_tab().
         """
         if self.cursor_y > 0:
             prev_line = self.text[self.cursor_y - 1]
-            leading_space_match = re.match(r"^(\s*)", prev_line)
-            if leading_space_match:
-                leading_space = leading_space_match.group(1)
-                if self.cursor_x == 0:
-                    self.text[self.cursor_y] = leading_space + self.text[self.cursor_y]
-                    self.cursor_x = len(leading_space)
-                    self.modified = True
-                    return
-
+            m = re.match(r"^(\s*)", prev_line)
+            if m and self.cursor_x == 0:
+                # копируем leading_spaces из prev_line
+                self.text[self.cursor_y] = m.group(1) + self.text[self.cursor_y]
+                self.cursor_x = len(m.group(1))
+                self.modified = True
+                return
+        # иначе – обычный таб
         self.handle_tab()
-
 
     def handle_char_input(self, key):
         """Handles regular character input and supports undo."""
@@ -1875,7 +1870,6 @@ class SwayEditor:
                         curses.A_REVERSE,
                     )
 
-
     def search_and_replace(self):
         """
         Searches and replaces text throughout the document using regex.
@@ -1927,35 +1921,6 @@ class SwayEditor:
             self.status_message = "Auto-save enabled"
         else:
             self.status_message = "Auto-save disabled"
-
-
-# TODO: ---------------------------------------------------
-
-    def session_save(self):
-        """ TODO: Saves the current editor session. (Not implemented)"""
-        pass
-
-
-    def session_restore(self):
-        """ TODO: Restores the editor session. (Not implemented)"""
-        pass
-
-
-    def encrypt_file(self):
-        """ TODO: Encrypts the current file. (Not implemented)"""
-        pass
-
-
-    def decrypt_file(self):
-        """ TODO: Decrypts the current file. (Not implemented)"""
-        pass
-
-
-    def validate_configuration(self):
-        """ TODO: Validates YAML/TOML/JSON config files before saving. (Not implemented)"""
-        pass
-
-# ------------------------------------
 
 
     def run(self):
