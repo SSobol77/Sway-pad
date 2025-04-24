@@ -109,98 +109,61 @@ def get_file_icon(filename: str, config: dict) -> str:
 
 # Функция для получения информации о Git (ветка, имя пользователя, количество коммитов)
 def get_git_info(file_path: str) -> tuple[str, str, str]:
-    """
-    Returns the current Git branch (with dirty indicator), user.name, and commit count.
-    Uses the directory of file_path to locate the Git repository.
-    Returns ('', '', '0') if not in a Git repository or if an error occurs.
-    """
-    # Получаем директорию файла
     repo_dir = os.path.dirname(os.path.abspath(file_path)) if file_path else os.getcwd()
-    git_dir = os.path.join(repo_dir, ".git")
-    if not os.path.isdir(git_dir):
+    if not os.path.isdir(os.path.join(repo_dir, ".git")):
         logging.debug(f"No .git directory found in {repo_dir}")
         return "", "", "0"
 
-    # Logging for git branch --show-current
-    logging.debug(f"Running git branch --show-current in {repo_dir}")
+    # 1. Определяем ветку
     try:
-        result = subprocess.run(
+        branch = subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=repo_dir
-        )
-        branch = result.stdout.strip()
-        logging.debug(f"git branch --show-current returned: {branch}")
-    except subprocess.CalledProcessError as e:
-        logging.debug(f"git branch --show-current failed: {e}")
-        # Fallback to other methods to determine the branch
+            capture_output=True, text=True, check=True, cwd=repo_dir
+        ).stdout.strip()
+    except FileNotFoundError:
+        logging.warning("Git executable not found")
+        return "", "", "0"
+    except subprocess.CalledProcessError:
+        # fallback: git symbolic-ref
         try:
-            # Use git symbolic-ref --short HEAD for older Git versions or new repositories
-            logging.debug(f"Running git symbolic-ref --short HEAD in {repo_dir}")
-            branch_result = subprocess.run(
+            branch = subprocess.run(
                 ["git", "symbolic-ref", "--short", "HEAD"],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=repo_dir
-            )
-            branch = branch_result.stdout.strip()
-            logging.debug(f"git symbolic-ref --short HEAD returned: {branch}")
-        except subprocess.CalledProcessError as e:
-            logging.debug(f"git symbolic-ref --short HEAD failed: {e}")
-            # If all else fails, assume 'main' for a new repository
+                capture_output=True, text=True, check=True, cwd=repo_dir
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
             branch = "main"
-            logging.debug(f"Assuming default branch: {branch}")
 
-    # Проверяем статус репозитория (грязное состояние)
+    # 2. Грязный репозиторий ?
     try:
-        logging.debug(f"Running git status --short in {repo_dir}")
-        status = subprocess.run(
+        dirty = subprocess.run(
             ["git", "status", "--short"],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=repo_dir
-        )
-        status_output = status.stdout.strip()
-        branch += "*" if status_output else ""
-        logging.debug(f"git status --short returned: {status_output}")
+            capture_output=True, text=True, check=True, cwd=repo_dir
+        ).stdout.strip()
+        if dirty:
+            branch += "*"
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logging.warning(f"Failed to get Git status in {repo_dir}: {str(e)}")
+        logging.warning(f"Git status failed: {e}")
 
-    # Получаем имя пользователя
+    # 3. Имя пользователя
     try:
-        logging.debug(f"Running git config user.name in {repo_dir}")
         user_name = subprocess.run(
             ["git", "config", "user.name"],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=repo_dir
+            capture_output=True, text=True, check=True, cwd=repo_dir
         ).stdout.strip()
-        logging.debug(f"git config user.name returned: {user_name}")
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logging.warning(f"Failed to get Git user.name in {repo_dir}: {str(e)}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
         user_name = ""
 
-    # Получаем количество коммитов
+    # 4. Кол-во коммитов
     try:
-        logging.debug(f"Running git rev-list --count HEAD in {repo_dir}")
         commits = subprocess.run(
             ["git", "rev-list", "--count", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=repo_dir
+            capture_output=True, text=True, check=True, cwd=repo_dir
         ).stdout.strip()
-        logging.debug(f"git rev-list --count HEAD returned: {commits}")
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logging.debug(f"No commits yet in {repo_dir}: {str(e)}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
         commits = "0"
 
     return branch, user_name, commits
+
 
 # Загрузка конфигурации
 def load_config() -> dict:
@@ -288,88 +251,84 @@ else:
 class SwayEditor:
     """Main class for the Sway editor."""
     def __init__(self, stdscr):
+        # ── базовая инициализация curses ───────────────────────────
         self.stdscr = stdscr
         self.stdscr.keypad(True)
-        curses.raw()
-        curses.nonl()
-        curses.noecho()
-        self.config = load_config()
-        self.text = [""]
-        self.cursor_x = 0
-        self.cursor_y = 0
-        self.scroll_top = 0
-        self.scroll_left = 0
+        curses.raw(); curses.nonl(); curses.noecho()
+
+        # ── внутренние поля, которые НУЖНЫ ДАЛЬШЕ ──────────────────
+        self.insert_mode = True          # ← важно задать ДО draw_screen
+        self.status_message = ""
+        self.action_history, self.undone_actions = [], []
+
+        # ── прочие поля/заглушки ───────────────────────────────────
+        self.config   = load_config()
+        self.text     = [""]
+        self.cursor_x = self.cursor_y = 0
+        self.scroll_top = self.scroll_left = 0
         self.filename = "new_file.py"
         self.modified = False
         self.encoding = "UTF-8"
-        self.stdscr.nodelay(False)
-        self.selection_start = None
-        self.selection_end = None
+        self.selection_start = self.selection_end = None
         self.is_selecting = False
-        locale.setlocale(locale.LC_ALL, "")
-        curses.start_color()
-        curses.use_default_colors()
-        curses.curs_set(1)
-        self.insert_mode = True
-        self.syntax_highlighting = {}
-        self.status_message = ""
-        self.action_history = []
-        self.undone_actions = []
-        self.internal_clipboard = ""
-        self.use_system_clipboard = self.config.get("editor", {}).get("use_system_clipboard", True)
-        self.pyclip_available = self._check_pyclip_availability()
-        self.git_info = None  # Кэш для Git-информации
-        self._lexer = None  # Лексер для Pygments
-        self._token_cache = {}  # Кэш токенов: (line_hash, lexer_id) -> highlighted
-        self.visible_lines = 0  # Кэшированное значение visible_lines
-        self.last_window_size = (0, 0)  # Для отслеживания resize
+        self.git_info = None
+        self._lexer, self._token_cache = None, {}
+        self.visible_lines, self.last_window_size = 0, (0, 0)
 
-        # Обновить привязки клавиш
+        # ── системные вызовы ───────────────────────────────────────
+        self.stdscr.nodelay(False)
+        locale.setlocale(locale.LC_ALL, "")
+        curses.start_color(); curses.use_default_colors(); curses.curs_set(1)
+
+        # ── clipboard ──────────────────────────────────────────────
+        self.use_system_clipboard = self.config.get(
+            "editor", {}).get("use_system_clipboard", True)
+        self.pyclip_available = self._check_pyclip_availability()
+
+        # ── keybindings (в одном месте!) ───────────────────────────
         self.keybindings = {
-            "delete": self.parse_key(self.config["keybindings"].get("delete", "del")),
-            "paste": self.parse_key(self.config["keybindings"].get("paste", "ctrl+v")),
-            "copy": self.parse_key(self.config["keybindings"].get("copy", "ctrl+c")),
-            "cut": self.parse_key(self.config["keybindings"].get("cut", "ctrl+x")),
-            "undo": self.parse_key(self.config["keybindings"].get("undo", "ctrl+z")),
-            "open_file": self.parse_key(self.config["keybindings"].get("open_file", "ctrl+o")),
-            "save_file": self.parse_key(self.config["keybindings"].get("save_file", "ctrl+s")),
-            "select_all": self.parse_key(self.config["keybindings"].get("select_all", "ctrl+a")),
-            "quit": self.parse_key(self.config["keybindings"].get("quit", "ctrl+q")),      
-            "redo": self.parse_key(self.config["keybindings"].get("redo", "ctrl+shift+z")),          
+            # стандартные
+            "delete":      self.parse_key(self.config["keybindings"].get("delete", "del")),
+            "paste":       self.parse_key(self.config["keybindings"].get("paste",  "ctrl+v")),
+            "copy":        self.parse_key(self.config["keybindings"].get("copy",   "ctrl+c")),
+            "cut":         self.parse_key(self.config["keybindings"].get("cut",    "ctrl+x")),
+            "undo":        self.parse_key(self.config["keybindings"].get("undo",   "ctrl+z")),
+            "open_file":   self.parse_key(self.config["keybindings"].get("open_file", "ctrl+o")),
+            "save_file":   self.parse_key(self.config["keybindings"].get("save_file", "ctrl+s")),
+            "select_all":  self.parse_key(self.config["keybindings"].get("select_all","ctrl+a")),
+            "quit":        self.parse_key(self.config["keybindings"].get("quit",   "ctrl+q")),
+            "redo":        self.parse_key(self.config["keybindings"].get("redo",   "ctrl+shift+z")),
+            # курсор / выделение
             "extend_selection_right": curses.KEY_SRIGHT,
-            "extend_selection_left": curses.KEY_SLEFT,
-            "select_to_home": curses.KEY_SHOME,
-            "select_to_end": curses.KEY_SEND, 
-            # "extend_selection_up": 337,
-            # "extend_selection_down": 336,
-            "extend_selection_up": curses.KEY_SR,  # вместо 337
-            "extend_selection_down": curses.KEY_SF,  # вместо 336
+            "extend_selection_left":  curses.KEY_SLEFT,
+            "select_to_home":         curses.KEY_SHOME,
+            "select_to_end":          curses.KEY_SEND,
+            "extend_selection_up":    curses.KEY_SR,
+            "extend_selection_down":  curses.KEY_SF,
+            # новое: Git-меню
+            "git_menu": curses.KEY_F2,
         }
 
-        # Настроить карту действий
+        # ── action_map ─────────────────────────────────────────────
         self.action_map = {
-            "copy": self.copy,
-            "paste": self.paste,
-            "cut": self.cut,
-            "undo": self.undo,
+            "copy": self.copy, "paste": self.paste, "cut": self.cut,
+            "undo": self.undo, "redo": self.redo, "select_all": self.select_all,
             "extend_selection_right": self.extend_selection_right,
-            "extend_selection_left": self.extend_selection_left,
-            "select_to_home": self.select_to_home,
-            "select_to_end": self.select_to_end,
-            "select_all": self.select_all,
-            "open_file": lambda: print("Open file"),
-            "save_file": lambda: print("Save file"),
-            "quit": lambda: print("Quit"),
-            "redo": self.redo,
+            "extend_selection_left":  self.extend_selection_left,
+            "select_to_home": self.select_to_home, "select_to_end": self.select_to_end,
             "extend_selection_up": self.extend_selection_up,
             "extend_selection_down": self.extend_selection_down,
+            "open_file": lambda: print("Open file"),
+            "save_file": lambda: print("Save file"),
+            "quit":     lambda: print("Quit"),
+            "git_menu": self.integrate_git,
         }
 
-        # Другие инициализации
+        # ── финальные инициализации ────────────────────────────────
         self.init_colors()
         self.load_syntax_highlighting()
         self.set_initial_cursor_position()
-        self.update_git_info()  # Инициализируем Git-информацию
+        self.update_git_info()
 
 
     def _check_pyclip_availability(self):
@@ -663,7 +622,6 @@ class SwayEditor:
         self.modified = True
 
 
-            
     def insert_text(self, text):
         if self.is_selecting:
             self.delete_selected_text()
@@ -1115,6 +1073,8 @@ class SwayEditor:
                 self.extend_selection_up()
             elif key == 336:                               # Shift+Page Down
                 self.extend_selection_down()
+            elif key == self.keybindings["git_menu"]:      #  F2 Git menu
+                self.integrate_git()
         
         except Exception as e:
                 self.status_message = f"Error: {str(e)}"
@@ -1182,6 +1142,7 @@ class SwayEditor:
         if self.cursor_y >= self.scroll_top + height:
             self.scroll_top = max(0, min(len(self.text) - height, self.scroll_top + height))
 
+
     def handle_backspace(self):
         if self.is_selecting and self.selection_start and self.selection_end:
             self.delete_selected_text()
@@ -1216,6 +1177,7 @@ class SwayEditor:
                 })
         self.undone_actions.clear()
 
+
     def handle_delete(self):
         if self.is_selecting and self.selection_start and self.selection_end:
             self.delete_selected_text()
@@ -1247,6 +1209,7 @@ class SwayEditor:
                 })
         self.undone_actions.clear()
 
+
     def handle_tab(self):
         """Inserts spaces or a tab character depending on configuration."""
         tab_size = self.config.get("editor", {}).get("tab_size", 4)
@@ -1267,6 +1230,7 @@ class SwayEditor:
 
         self.modified = True
 
+
     def handle_smart_tab(self):
         """
         Если курсор в начале строки (cursor_x == 0),
@@ -1284,6 +1248,8 @@ class SwayEditor:
                 return
         # иначе – обычный таб
         self.handle_tab()
+
+
 
     def handle_char_input(self, key):
         """Handles regular character input and supports undo."""
@@ -1699,41 +1665,93 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Error executing command: {str(e)}"
 
-
+    # === 4. ОБНОВЛЁННЫЙ integrate_git() ==========================
     def integrate_git(self):
         """
-        Provides simple integration with Git, allowing the user
-        to select various commands.
+        Меню Git вызывается клавишей F2.
         """
         commands = {
             "1": ("status", "git status"),
-            "2": ("commit", "git commit -a"),
-            "3": ("push", "git push"),
-            "4": ("pull", "git pull"),
-            "5": ("diff", "git diff"),
+            "2": ("commit", None),          # формируем динамически
+            "3": ("push",   "git push"),
+            "4": ("pull",   "git pull"),
+            "5": ("diff",   "git diff"),
         }
 
-        menu = "\n".join([f"{k}: {v[0]}" for k, v in commands.items()])
-        choice = self.prompt(f"Select Git command:\n{menu}\nChoice: ")
+        # однострочное приглашение — никаких \n
+        opts = " ".join(f"{k}:{v[0]}" for k, v in commands.items())
+        choice = self.prompt(f"Git menu [{opts}] → ")
 
-        if choice in commands:
-            try:
-                curses.def_prog_mode()
-                curses.endwin()
-                process = subprocess.run(
-                    commands[choice][1], shell=True, text=True, capture_output=True
-                )
-                curses.reset_prog_mode()
-                self.stdscr.refresh()
-
-                if process.returncode == 0:
-                    self.status_message = f"Git {commands[choice][0]} successful"
-                else:
-                    self.status_message = f"Git error: {process.stderr[:50]}..."
-            except Exception as e:
-                self.status_message = f"Git error: {str(e)}"
-        else:
+        if choice not in commands:
             self.status_message = "Invalid choice"
+            return
+
+        if choice == "2":                               # commit
+            msg = self.prompt("Commit message: ")
+            if not msg:
+                self.status_message = "Commit cancelled"
+                return
+            shell_cmd = f'git commit -am "{msg.replace("\"", "\\\"")}"'
+        else:
+            shell_cmd = commands[choice][1]
+
+        try:
+            curses.def_prog_mode()
+            curses.endwin()
+            proc = subprocess.run(shell_cmd, shell=True, text=True, capture_output=True)
+            curses.reset_prog_mode()
+            self.stdscr.refresh()
+
+            if proc.returncode == 0:
+                self.status_message = f"Git {commands[choice][0]} successful"
+                self.update_git_info()        # перечитать ветку / счётчик
+            else:
+                self.status_message = f"Git error: {proc.stderr.strip()[:120]}"
+
+        except FileNotFoundError:
+            self.status_message = "Git не установлен или не найден в PATH"
+        except Exception as e:
+            self.status_message = f"Git error: {e}"
+
+    # def integrate_git(self):
+    #     """
+    #     Provides simple integration with Git, allowing the user
+    #     to select various commands.
+    #     """
+    #     commands = {
+    #         "1": ("status", "git status"),
+    #         "2": ("commit", "git commit -a"),
+    #         "3": ("push", "git push"),
+    #         "4": ("pull", "git pull"),
+    #         "5": ("diff", "git diff"),
+    #     }
+
+    #     menu = "\n".join([f"{k}: {v[0]}" for k, v in commands.items()])
+    #     choice = self.prompt(f"Select Git command:\n{menu}\nChoice: ")
+
+    #     if choice in commands:
+    #         try:
+    #             curses.def_prog_mode()
+    #             curses.endwin()
+    #             process = subprocess.run(
+    #                 commands[choice][1], shell=True, text=True, capture_output=True
+    #             )
+    #             curses.reset_prog_mode()
+    #             self.stdscr.refresh()
+
+    #             if process.returncode == 0:
+    #                 self.status_message = f"Git {commands[choice][0]} successful"
+    #             else:
+    #                 self.status_message = f"Git error: {process.stderr[:50]}..."
+
+    #         except FileNotFoundError:                          # NEW
+    #             self.status_message = "Git не установлен или не найден в PATH"
+
+    #         except Exception as e:                             # существующий блок
+    #             self.status_message = f"Git error: {str(e)}"
+    #     else:
+    #         self.status_message = "Invalid choice"
+
 
 
     def goto_line(self):
@@ -1869,6 +1887,7 @@ class SwayEditor:
                         line[match_x],
                         curses.A_REVERSE,
                     )
+
 
     def search_and_replace(self):
         """
