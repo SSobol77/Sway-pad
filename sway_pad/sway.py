@@ -7,8 +7,9 @@ import curses
 import locale
 import toml
 import os
-import io
 import re
+import queue 
+import shlex    
 import sys
 import time
 import pyperclip
@@ -24,7 +25,7 @@ import threading
 from pygments import lex
 from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
 from pygments.token import Token
-from flake8.api import legacy as flake8
+
 
 # Установка кодировки по умолчанию
 def _set_default_encoding():
@@ -89,6 +90,15 @@ def deep_merge(base: dict, override: dict) -> dict:
         else:
             result[k] = v
     return result
+
+# --- безопасный запуск внешних команд ---------------------------------------
+def safe_run(cmd: list[str]) -> subprocess.CompletedProcess:
+    """
+    Обёртка над subprocess.run без shell=True, с захватом вывода.
+    Не возбуждает исключения при ненулевом коде возврата (check=False).
+    """
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
 
 # Функция для получения иконки файла
 def get_file_icon(filename: str, config: dict) -> str:
@@ -190,7 +200,8 @@ def load_config() -> dict:
             "redo": "ctrl+shift+z",
         },
         "editor": {
-            "use_system_clipboard": True
+            "use_system_clipboard": True,
+            "default_new_filename": "new_file.py"          
         },
         "file_icons": {
             "python": "🐍",
@@ -257,16 +268,22 @@ class SwayEditor:
         curses.raw(); curses.nonl(); curses.noecho()
 
         # ── внутренние поля, которые НУЖНЫ ДАЛЬШЕ ──────────────────
-        self.insert_mode = True          # ← важно задать ДО draw_screen
+        self.insert_mode = True
         self.status_message = ""
+        self._msg_q = queue.Queue() 
         self.action_history, self.undone_actions = [], []
+
+        # ── поля для поиска ───────────────────────────────
+        self.search_term        = ""   # текущий запрос
+        self.search_matches     = []   # [(row,col_start,col_end), …]
+        self.current_match_idx  = -1   # индекс в search_matches
 
         # ── прочие поля/заглушки ───────────────────────────────────
         self.config   = load_config()
+        self.filename = ""  
         self.text     = [""]
         self.cursor_x = self.cursor_y = 0
         self.scroll_top = self.scroll_left = 0
-        self.filename = "new_file.py"
         self.modified = False
         self.encoding = "UTF-8"
         self.selection_start = self.selection_end = None
@@ -281,8 +298,7 @@ class SwayEditor:
         curses.start_color(); curses.use_default_colors(); curses.curs_set(1)
 
         # ── clipboard ──────────────────────────────────────────────
-        self.use_system_clipboard = self.config.get(
-            "editor", {}).get("use_system_clipboard", True)
+        self.use_system_clipboard = self.config.get("editor", {}).get("use_system_clipboard", True)
         self.pyclip_available = self._check_pyclip_availability()
 
         # ── keybindings (в одном месте!) ───────────────────────────
@@ -293,8 +309,10 @@ class SwayEditor:
             "copy":        self.parse_key(self.config["keybindings"].get("copy",   "ctrl+c")),
             "cut":         self.parse_key(self.config["keybindings"].get("cut",    "ctrl+x")),
             "undo":        self.parse_key(self.config["keybindings"].get("undo",   "ctrl+z")),
+            "new_file":    self.parse_key(self.config["keybindings"].get("new_file", "f4")),
             "open_file":   self.parse_key(self.config["keybindings"].get("open_file", "ctrl+o")),
             "save_file":   self.parse_key(self.config["keybindings"].get("save_file", "ctrl+s")),
+            "save_as": self.parse_key(self.config["keybindings"].get("save_as", "f5")),
             "select_all":  self.parse_key(self.config["keybindings"].get("select_all","ctrl+a")),
             "quit":        self.parse_key(self.config["keybindings"].get("quit",   "ctrl+q")),
             "redo":        self.parse_key(self.config["keybindings"].get("redo",   "ctrl+shift+z")),
@@ -305,8 +323,13 @@ class SwayEditor:
             "select_to_end":          curses.KEY_SEND,
             "extend_selection_up":    curses.KEY_SR,
             "extend_selection_down":  curses.KEY_SF,
-            # новое: Git-меню
-            "git_menu": curses.KEY_F2,
+            # Git-меню
+            "git_menu": self.parse_key(self.config["keybindings"].get("git_menu", "f2")),
+            # ★ Esc-отмена
+            "cancel_operation": self.parse_key(self.config["keybindings"].get("cancel_operation", "esc")),
+            # Поиск
+            "find":       self.parse_key(self.config["keybindings"].get("find", "ctrl+f")),
+            "find_next":  self.parse_key(self.config["keybindings"].get("find_next", "f3")),
         }
 
         # ── action_map ─────────────────────────────────────────────
@@ -318,10 +341,16 @@ class SwayEditor:
             "select_to_home": self.select_to_home, "select_to_end": self.select_to_end,
             "extend_selection_up": self.extend_selection_up,
             "extend_selection_down": self.extend_selection_down,
+            "new_file": self.new_file,
             "open_file": lambda: print("Open file"),
             "save_file": lambda: print("Save file"),
-            "quit":     lambda: print("Quit"),
+            "save_as": self.save_file_as,
+            "delete": lambda: print("Delete"),
+            "quit":   lambda: print("Quit"),
             "git_menu": self.integrate_git,
+            # ★ Esc-отмена
+            "cancel_operation": self.cancel_operation,
+            
         }
 
         # ── финальные инициализации ────────────────────────────────
@@ -733,22 +762,25 @@ class SwayEditor:
 
     def run_lint_async(self, code):
         """
-        Запускает линтинг в отдельном потоке (раньше pylint, теперь Flake8).
+        Запускает Flake8 в отдельном потоке и отправляет краткий результат
+        в очередь self._msg_q, чтобы не обращаться к curses из другого потока.
         """
         lint_results = run_flake8_on_code(code, self.filename)
 
-        if not lint_results:
-            # Если функция умолчит и вернет пустой список (вдруг такое случится)
-            self.status_message = f"No issues found in {self.filename}"
-            return
-
-        # Предположим, если в результатах ровно одна строка, начинающаяся с "Flake8: No issues found."
-        if len(lint_results) == 1 and lint_results[0].startswith("Flake8: No issues found."):
-            self.status_message = f"No issues found in {self.filename}"
+        # Формируем сообщение для статус-бара
+        if (not lint_results or
+            (len(lint_results) == 1 and
+            lint_results[0].startswith("Flake8: No issues"))):
+            message = f"No issues found in {self.filename}"
         else:
-            # Иначе берём первые две строки
-            short_info = " | ".join(lint_results[:2])
-            self.status_message = short_info
+            # берём первые две строки отчёта
+            message = " | ".join(lint_results[:2])
+
+        # Кладём его в потокобезопасную очередь;
+        # главный цикл прочитает и покажет.
+        self._msg_q.put(message)
+
+
 
 
     def set_initial_cursor_position(self):
@@ -786,15 +818,15 @@ class SwayEditor:
             "property": curses.color_pair(5),
             "tag": curses.color_pair(2),
             "attribute": curses.color_pair(3),
-            "builtins": curses.color_pair(4),  # Добавлено
-            "escape": curses.color_pair(5),    # Добавлено
-            "magic": curses.color_pair(3),     # Добавлено
-            "exception": curses.color_pair(8),  # Добавлено
-            "function": curses.color_pair(2),   # Добавлено
-            "class": curses.color_pair(4),      # Добавлено
-            "number": curses.color_pair(3),     # Добавлено
-            "operator": curses.color_pair(6),   # Добавлено
-            "green": curses.color_pair(2),      # Для Git-информации
+            "builtins": curses.color_pair(4), 
+            "escape": curses.color_pair(5),     
+            "magic": curses.color_pair(3),      
+            "exception": curses.color_pair(8),   
+            "function": curses.color_pair(2),    
+            "class": curses.color_pair(4),       
+            "number": curses.color_pair(3),      
+            "operator": curses.color_pair(6),    
+            "green": curses.color_pair(2), 
         }
 
     def apply_syntax_highlighting(self, line, lang):
@@ -1038,11 +1070,14 @@ class SwayEditor:
             elif key == curses.KEY_NPAGE or key == 338 or key == 457:  # Page Down
                 self.handle_page_down()
             elif key == 9:
-                self.handle_smart_tab() # Tab
-            elif key == 27:
-                self.handle_escape()
+                self.handle_smart_tab()                                # Tab
+
+            elif key == self.keybindings["new_file"]:                  # F4
+                self.new_file()
             elif key == self.keybindings["save_file"]:     # Ctrl+S
                 self.save_file()
+            elif key == self.keybindings["save_as"]:       # F5
+                self.save_file_as()
             elif key == self.keybindings["open_file"]:     # Ctrl+O
                 self.open_file()
             elif key == self.keybindings["copy"]:          # Ctrl+C
@@ -1055,8 +1090,12 @@ class SwayEditor:
                 self.redo()
             elif key == self.keybindings["undo"]:          # Ctrl+Z
                 self.undo()
-            elif key == self.keybindings["quit"]:          # Ctrl+Q
-                self.exit_editor()
+            elif key == self.keybindings["find"]:          # Ctrl+F
+                self.find_prompt()
+            elif key == self.keybindings["find_next"]:     # F3
+                self.find_next()
+
+
             elif key >= 32 and key <= 255:                 # Printable characters
                 self.handle_char_input(key)
             elif key == self.keybindings["select_all"]:    # Ctrl+A
@@ -1072,9 +1111,14 @@ class SwayEditor:
             elif key == 337:                               # Shift+Page Up
                 self.extend_selection_up()
             elif key == 336:                               # Shift+Page Down
-                self.extend_selection_down()
+                self.extend_selection_down()           
+            elif key == self.keybindings["quit"]:          # Ctrl+Q
+                self.exit_editor()
+            elif key == self.keybindings["cancel_operation"]:  # Esc
+                self.cancel_operation()
             elif key == self.keybindings["git_menu"]:      #  F2 Git menu
                 self.integrate_git()
+            
         
         except Exception as e:
                 self.status_message = f"Error: {str(e)}"
@@ -1250,7 +1294,6 @@ class SwayEditor:
         self.handle_tab()
 
 
-
     def handle_char_input(self, key):
         """Handles regular character input and supports undo."""
 
@@ -1296,7 +1339,6 @@ class SwayEditor:
             self.status_message = f"Input error: {str(e)}"
 
 
-
     def handle_enter(self):
         """Handles the Enter key, creating a new line at the cursor position."""
         self.text.insert(self.cursor_y + 1, "")
@@ -1308,54 +1350,76 @@ class SwayEditor:
         self.modified = True
 
 
-    def parse_key(self, key_str):
+    def parse_key(self, key_str: str) -> int:
         """
-        Converts a hotkey description string into the corresponding key code.
+        Преобразует строку-описание горячей клавиши в curses-код.
+
+        Поддерживается:
+        • F1–F12, стрелки, Home/End, PgUp/PgDn, Insert/Delete, Backspace
+        • Ctrl+<буква>, Ctrl+Shift+<буква>
+        • Alt+<…> (буква, цифра, символ, F-клавиша, именованная), помечается битом 0x200
+        Если строка некорректна — возбуждает ValueError.
         """
-        logging.debug(f"[parse_key] Received: '{key_str}'")
         if not key_str:
-            logging.debug("[parse_key] Empty key_str")
-            return -1
+            raise ValueError("empty hotkey")
+
         key_str = key_str.strip().lower()
+
+        # ---------- фиксированные имена ----------
+        named = {
+            "del":        curses.KEY_DC,
+            "delete":     curses.KEY_DC,
+            "backspace":  curses.KEY_BACKSPACE,
+            "tab":        ord("\t"),
+            "enter":      ord("\n"),
+            "return":     ord("\n"),
+            "space":      ord(" "),
+            "esc":        27,
+            "escape":     27,
+            "up":         curses.KEY_UP,
+            "down":       curses.KEY_DOWN,
+            "left":       curses.KEY_LEFT,
+            "right":      curses.KEY_RIGHT,
+            "home":       curses.KEY_HOME,
+            "end":        curses.KEY_END,
+            "pageup":     curses.KEY_PPAGE,
+            "pgup":       curses.KEY_PPAGE,
+            "pagedown":   curses.KEY_NPAGE,
+            "pgdn":       curses.KEY_NPAGE,
+            "insert":     curses.KEY_IC,
+        }
+        # Добавляем F1–F12
+        named.update({f"f{i}": getattr(curses, f"KEY_F{i}") for i in range(1, 13)})
+
+        # ---------- Alt-модификатор ----------
+        if key_str.startswith("alt+"):
+            base = self.parse_key(key_str[4:])      # рекурсивно разбираем «хвост»
+            return base | 0x200                     # задаём собственный бит Alt
+
         parts = key_str.split("+")
-        logging.debug(f"[parse_key] Parts: {parts}")
-        try:
-            if len(parts) == 2 and parts[0] == "ctrl":
-                if parts[1].isalpha() and len(parts[1]) == 1:
-                    result = ord(parts[1]) - ord('a') + 1
-                    logging.debug(f"[parse_key] Ctrl+{parts[1].upper()} → {result}")
-                    return result
-                elif parts[1] == "space":
-                    logging.debug("[parse_key] Ctrl+Space → 0")
-                    return ord(' ') & 0x1f
-                elif parts[1] == "tab":
-                    logging.debug("[parse_key] Ctrl+Tab → 9")
-                    return ord('\t') & 0x1f
-            elif len(parts) == 3 and parts[0] == "ctrl" and parts[1] == "shift":
-                if parts[2].isalpha() and len(parts[2]) == 1:
-                    # Уникальный код для Ctrl+Shift+<key>
-                    result = (ord(parts[2]) - ord('a') + 1) | 0x100
-                    logging.debug(f"[parse_key] Ctrl+Shift+{parts[2].upper()} → {result}")
-                    return result
-            elif key_str in ("del", "delete"):
-                logging.debug("[parse_key] Delete key detected → KEY_DC")
-                return curses.KEY_DC
-            elif key_str == "space":
-                logging.debug("[parse_key] Space key → 32")
-                return ord(' ')
-            elif key_str == "tab":
-                logging.debug("[parse_key] Tab key → 9")
-                return ord('\t')
-            elif key_str == "enter":
-                logging.debug("[parse_key] Enter key → 10")
-                return ord('\n')
-            result = ord(key_str)
-            logging.debug(f"[parse_key] Fallback: ord('{key_str}') → {result}")
-            return result
-        except Exception as e:
-            logging.exception(f"[parse_key] Error parsing key: {key_str}")
-            logging.debug(f"[parse_key] Exception: {e}")
-            return -1
+
+        # ---------- Ctrl и Ctrl+Shift ----------
+        if len(parts) == 2 and parts[0] == "ctrl":
+            ch = parts[1]
+            if len(ch) == 1 and ch.isalpha():
+                return ord(ch) - ord("a") + 1       # стандарт ASCII Ctrl
+            raise ValueError(f"unsupported Ctrl combination: {key_str}")
+
+        if len(parts) == 3 and parts[:2] == ["ctrl", "shift"]:
+            ch = parts[2]
+            if len(ch) == 1 and ch.isalpha():
+                return (ord(ch) - ord("a") + 1) | 0x100   # свой диапазон
+            raise ValueError(f"unsupported Ctrl+Shift combination: {key_str}")
+
+        # ---------- просто имя ----------
+        if key_str in named:
+            return named[key_str]
+
+        # ---------- один символ ----------
+        if len(key_str) == 1:
+            return ord(key_str)
+
+        raise ValueError(f"cannot parse hotkey: {key_str}")
 
 
     def get_char_width(self, char):
@@ -1387,6 +1451,9 @@ class SwayEditor:
                 self.save_file()
 
         filename = self.prompt("Open file: ")
+        if not self.validate_filename(filename):
+            self.status_message = "Invalid filename"
+            return
         if not filename:
             self.status_message = "Open cancelled"
             return
@@ -1404,7 +1471,7 @@ class SwayEditor:
             self.modified = False
             self.set_initial_cursor_position()
             self.status_message = f"Opened {filename} with encoding {self.encoding}"
-            self.update_git_info()  # Обновляем Git-информацию при открытии файла
+            self.update_git_info()  # обновляем Git-информацию при открытии файла
             curses.flushinp()
         except ImportError:
             try:
@@ -1417,7 +1484,7 @@ class SwayEditor:
                 self.modified = False
                 self.set_initial_cursor_position()
                 self.status_message = f"Opened {filename}"
-                self.update_git_info()  # Обновляем Git-информацию при открытии файла
+                self.update_git_info()  # обновил Git-информацию при открытии файла
                 curses.flushinp()
             except FileNotFoundError:
                 self.status_message = f"File not found: {filename}"
@@ -1438,72 +1505,88 @@ class SwayEditor:
             self.status_message = f"Error opening file: {e}"
             logging.exception(f"Error opening file: {filename}")
  
+
     def save_file(self):
         """
-        Saves the file. If no filename is set, prompts for one.
-        After saving, runs pylint in a separate thread and updates Git information.
+        Сохраняет файл.  Если имя ещё не задано – спрашивает «Save as:».
+        После первого сохранения просто перезаписывает тот же файл.
         """
-        if self.filename == "noname":
-            self.filename = self.prompt("Save as: ")
-            if not self.filename:
+        # 1. имя ещё не задано? -> спрашиваем
+        if not self.filename:                       # пустая строка
+            new_name = self.prompt("Save as: ")
+            if not new_name:
                 self.status_message = "Save cancelled"
                 return
+            if not self.validate_filename(new_name):
+                self.status_message = "Invalid filename"
+                return
+            self.filename = new_name                # имя подтвердили
 
+        # 2. проверки существующего имени
         if os.path.isdir(self.filename):
             self.status_message = f"Cannot save: {self.filename} is a directory"
             return
+        if os.path.exists(self.filename) and not os.access(self.filename, os.W_OK):
+            self.status_message = f"No write permissions: {self.filename}"
+            return
 
-        if os.path.exists(self.filename):
-            if not os.access(self.filename, os.W_OK):
-                self.status_message = f"No write permissions: {self.filename}"
-                return
+        # 3. запись файла
         try:
             with open(self.filename, "w", encoding=self.encoding, errors="replace") as f:
                 f.write(os.linesep.join(self.text))
             self.modified = False
             self.status_message = f"Saved to {self.filename}"
+
             code = os.linesep.join(self.text)
-            threading.Thread(
-                target=self.run_lint_async, args=(code,), daemon=True
-            ).start()
-            self.update_git_info()  # Обновляем Git-информацию после сохранения
-        except OSError as e:
-            self.status_message = f"Error saving file: {e}"
-            logging.exception(f"Error saving file: {self.filename}")
+            threading.Thread(target=self.run_lint_async, args=(code,), daemon=True).start()
+            self.update_git_info()
         except Exception as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {self.filename}")
 
+
     def save_file_as(self):
         """
-        Saves the file under a new name, updates self.filename,
-        resets modification flag, and runs pylint asynchronously.
+        Сохраняет документ под новым именем.
+        • Проверяет корректность имени через validate_filename().
+        • Обновляет self.filename и флаг modified.
+        • После записи запускает линтер в отдельном потоке.
         """
         new_filename = self.prompt("Save file as: ")
         if not new_filename:
             self.status_message = "Save cancelled"
             return
 
+        # ── 1. Проверяем валидность имени ──────────────────────────────
+        if not self.validate_filename(new_filename):
+            self.status_message = "Invalid filename"
+            return
+
         if os.path.isdir(new_filename):
             self.status_message = f"Cannot save: {new_filename} is a directory"
             return
 
-        if os.path.exists(new_filename):
-            if not os.access(new_filename, os.W_OK):
-                self.status_message = f"No write permissions: {new_filename}"
-                return
+        if os.path.exists(new_filename) and not os.access(new_filename, os.W_OK):
+            self.status_message = f"No write permissions: {new_filename}"
+            return
 
+        # ── 2. Пытаемся записать файл ─────────────────────────────────
         try:
             with open(new_filename, "w", encoding=self.encoding, errors="replace") as f:
                 f.write(os.linesep.join(self.text))
+
             self.filename = new_filename
             self.modified = False
             self.status_message = f"Saved as {new_filename}"
+
+            # Линтинг в фоне
             code = os.linesep.join(self.text)
-            threading.Thread(
-                target=self.run_lint_async, args=(code,), daemon=True
-            ).start()
-        except (OSError, Exception) as e:
+            threading.Thread(target=self.run_lint_async, args=(code,), daemon=True).start()
+
+        except OSError as e:
+            self.status_message = f"Error saving file: {e}"
+            logging.exception(f"Error saving file: {new_filename}")
+        except Exception as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {new_filename}")
 
@@ -1553,13 +1636,65 @@ class SwayEditor:
 
         try:
             self.text = [""]
-            self.filename = "noname"
+            self.filename = ""           # тоже пусто
             self.modified = False
             self.set_initial_cursor_position()
             self.status_message = "New file created"
         except Exception as e:
             self.status_message = f"Error creating new file: {e}"
             logging.exception("Error creating new file")
+            
+
+    def cancel_operation(self):
+        """
+        Обработчик «Esc-отмены», вызывается из handle_input()
+        и через action_map/горячую клавишу.
+
+        • если есть выделение ‒ снимает его;  
+        • если открыт prompt (нажатие Esc уже вернуло пустую строку) –
+        просто пишет статус «Cancelled»;  
+        • иначе сбрасывает строку статуса.
+        """
+        if self.is_selecting:
+            self.is_selecting = False
+            self.selection_start = self.selection_end = None
+            self.status_message = "Selection cancelled"
+        else:
+            self.status_message = "Cancelled"
+
+
+    def handle_escape(self):
+            """
+            Универсальная обработка Esc.
+
+            • Если есть активное выделение ‒ просто убираем его.  
+            • Если предыдущая Esc была менее чем 1.5 с назад,
+            считаем это намерением выйти и завершаемся.  
+            • Иначе  ‒ лишь ставим статус «Cancelled».
+            """
+            now = time.monotonic()
+            last = getattr(self, "_last_esc_time", 0)
+
+            # 1) идёт выделение → сбрасываем
+            if self.is_selecting:
+                self.is_selecting = False
+                self.selection_start = self.selection_end = None
+                self.status_message = "Selection cancelled"
+
+            # 2) двойной Esc (быстрее 1.5 c) → выход
+            elif now - last < 1.5:
+                if self.modified:
+                    choice = self.prompt("Save changes before exit? (y/n): ")
+                    if choice and choice.lower().startswith("y"):
+                        self.save_file()
+                self.exit_editor()
+
+            # 3) всё остальное → просто «Cancelled»
+            else:
+                self.status_message = "Cancelled"
+
+            # запоминаем время Esc
+            self._last_esc_time = now
 
 
     def exit_editor(self):
@@ -1574,38 +1709,159 @@ class SwayEditor:
         sys.exit(0)
 
 
-    def handle_escape(self):
-        """Handles the Escape key."""
-        if self.modified:
-            choice = self.prompt("Save changes before exit? (y/n): ")
-            if choice and choice.lower().startswith("y"):
-                self.save_file()
-        self.exit_editor()
-
-
-    def prompt(self, message):
+    def prompt(self, message: str, max_len: int = 1024) -> str:
         """
-        Displays a message to the user, captures text input from the keyboard,
-        and returns the string entered.
+        Однострочный ввод в статус-строке.
+
+        ▸ Esc      — отмена, возвращает ""  
+        ▸ Enter    — подтверждение  
+        ▸ Backspace, ←/→, Home/End работают «как привычно»  
         """
+        # переключаем curses в «обычный» режим
         self.stdscr.nodelay(False)
-        curses.echo()
+        curses.echo(False)
+
+        # координаты строки ввода
+        row = curses.LINES - 1
+        col = 0
         try:
-            self.stdscr.addstr(curses.LINES - 1, 0, message)
+            # рисуем приглашение
+            self.stdscr.move(row, col)
             self.stdscr.clrtoeol()
+            self.stdscr.addstr(row, col, message)
             self.stdscr.refresh()
-            response = (
-                self.stdscr.getstr(curses.LINES - 1, len(message), 1024)
-                .decode("utf-8", errors="replace")
-                .strip()
-            )
+
+            # буфер и позиция курсора внутри него
+            buf: list[str] = []
+            pos = 0
+
+            while True:
+                ch = self.stdscr.get_wch()   # поддерживает UTF-8
+
+                # ─── клавиши управления ──────────────────────────────
+                if ch in ("\n", "\r"):                    # Enter
+                    break
+                elif ch == "\x1b":                       # Esc (0x1B)
+                    buf = []          # пустой ответ = отмена
+                    break
+                elif ch in ("\x08", "\x7f", curses.KEY_BACKSPACE):
+                    if pos > 0:
+                        pos -= 1
+                        buf.pop(pos)
+                elif ch in (curses.KEY_LEFT,):
+                    pos = max(0, pos - 1)
+                elif ch in (curses.KEY_RIGHT,):
+                    pos = min(len(buf), pos + 1)
+                elif ch in (curses.KEY_HOME,):
+                    pos = 0
+                elif ch in (curses.KEY_END,):
+                    pos = len(buf)
+
+                # ─── печатный символ ─────────────────────────────────
+                elif isinstance(ch, str) and ch.isprintable():
+                    if len(buf) < max_len:
+                        buf.insert(pos, ch)
+                        pos += 1
+
+                # ─── отрисовка строки ввода ──────────────────────────
+                # очищаем хвост, чтобы стирались удалённые символы
+                self.stdscr.move(row, len(message))
+                self.stdscr.clrtoeol()
+                self.stdscr.addstr(row, len(message), "".join(buf))
+                # позиционируем курсор
+                self.stdscr.move(row, len(message) + pos)
+                self.stdscr.refresh()
+
         except Exception:
-            response = ""
             logging.exception("Prompt error")
+            buf = []          # считаем ввод отменённым
+
         finally:
+            curses.flushinp()            # очистить буфер ввода
             curses.noecho()
             self.stdscr.nodelay(False)
-        return response
+
+        return "".join(buf).strip()
+
+
+    # === ПОИСК ====================================================================
+
+    def _collect_matches(self, term):
+        """Возвращает список всех (row, col_start, col_end) для term (без учёта регистра)."""
+        matches = []
+        if not term:
+            return matches
+        low = term.lower()
+        for row, line in enumerate(self.text):
+            start = 0
+            while True:
+                idx = line.lower().find(low, start)
+                if idx == -1:
+                    break
+                matches.append((row, idx, idx + len(term)))
+                start = idx + len(term)
+        return matches
+
+
+    def find_prompt(self):
+        """
+        Запрашивает у пользователя строку поиска, выделяет все совпадения
+        и переходит к первому.
+        """
+        term = self.prompt("Find: ")
+        if term == "":
+            self.status_message = "Search cancelled"
+            return
+
+        self.search_term    = term
+        self.search_matches = self._collect_matches(term)
+        if not self.search_matches:
+            self.status_message = f"'{term}' not found"
+            self.current_match_idx = -1
+            return
+
+        self.current_match_idx = 0
+        self._goto_match(self.current_match_idx)
+        self.status_message = f"Found {len(self.search_matches)} match(es)"
+
+
+    def find_next(self):
+        """
+        Переходит к следующему совпадению (по циклу).
+        """
+        if not self.search_matches:
+            # если пользователь нажал F3 до первого поиска
+            self.find_prompt()
+            return
+
+        self.current_match_idx = (self.current_match_idx + 1) % len(self.search_matches)
+        self._goto_match(self.current_match_idx)
+        self.status_message = (
+            f"Match {self.current_match_idx + 1}/{len(self.search_matches)}"
+        )
+
+
+    def _goto_match(self, idx):
+        """Переносит курсор/прокрутку к совпадению № idx и показывает его."""
+        row, col_start, col_end = self.search_matches[idx]
+        self.cursor_y, self.cursor_x = row, col_start
+        height = self.stdscr.getmaxyx()[0]
+        # вертикальная прокрутка
+        if self.cursor_y < self.scroll_top:
+            self.scroll_top = max(0, self.cursor_y - height // 2)
+        elif self.cursor_y >= self.scroll_top + self.visible_lines:
+            self.scroll_top = min(
+                len(self.text) - self.visible_lines,
+                self.cursor_y - height // 2,
+            )
+        # горизонтальная прокрутка
+        width = self.stdscr.getmaxyx()[1]
+        ln_width = len(str(len(self.text))) + 1   # ширина номера + пробел
+        text_width = width - ln_width
+        if self.cursor_x < self.scroll_left:
+            self.scroll_left = self.cursor_x
+        elif self.cursor_x >= self.scroll_left + text_width:
+            self.scroll_left = max(0, self.cursor_x - text_width + 1)
 
 
     def search_text(self, search_term):
@@ -1634,38 +1890,56 @@ class SwayEditor:
 
     def execute_shell_command(self):
         """
-        Executes a shell command entered by the user, displaying
-        partial output or error in the status bar.
+        Запрашивает у пользователя команду, выполняет её без shell=True
+        и выводит первые символы stdout/stderr в строку статуса.
         """
         command = self.prompt("Enter command: ")
         if not command:
             self.status_message = "Command cancelled"
             return
 
+        # разбиваем строку на аргументы (учитывает кавычки, экранирование)
+        try:
+            cmd_list = shlex.split(command)
+        except ValueError as e:
+            self.status_message = f"Parse error: {e}"
+            return
+
+        # блокируем curses-экран, чтобы вывести результат после выполнения
         try:
             curses.def_prog_mode()
             curses.endwin()
+
+            # запускаем без shell=True
             process = subprocess.Popen(
-                command,
-                shell=True,
+                cmd_list,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
             output, error = process.communicate(timeout=30)
+
+        except subprocess.TimeoutExpired:
+            self.status_message = "Command timed out"
+            return
+        except FileNotFoundError:
+            self.status_message = f"Executable not found: {cmd_list[0]}"
+            return
+        except Exception as e:
+            self.status_message = f"Exec error: {e}"
+            return
+        finally:
+            # возвращаемся в curses-режим
             curses.reset_prog_mode()
             self.stdscr.refresh()
 
-            if error:
-                self.status_message = f"Error: {error[:50]}..."
-            else:
-                self.status_message = f"Command executed: {output[:50]}..."
-        except subprocess.TimeoutExpired:
-            self.status_message = "Command timed out"
-        except Exception as e:
-            self.status_message = f"Error executing command: {str(e)}"
+        # выводим результат
+        if error and error.strip():
+            self.status_message = f"Error: {error[:50]}..."
+        else:
+            self.status_message = f"Command executed: {output[:50]}..."
 
-    # === 4. ОБНОВЛЁННЫЙ integrate_git() ==========================
+    
     def integrate_git(self):
         """
         Меню Git вызывается клавишей F2.
@@ -1691,14 +1965,14 @@ class SwayEditor:
             if not msg:
                 self.status_message = "Commit cancelled"
                 return
-            shell_cmd = f'git commit -am "{msg.replace("\"", "\\\"")}"'
+            cmd = ["git", "commit", "-am", msg]         # список аргументов
         else:
-            shell_cmd = commands[choice][1]
+            cmd = commands[choice][1].split()           # "git status" → ["git","status"]
 
         try:
             curses.def_prog_mode()
             curses.endwin()
-            proc = subprocess.run(shell_cmd, shell=True, text=True, capture_output=True)
+            proc = safe_run(cmd)                     
             curses.reset_prog_mode()
             self.stdscr.refresh()
 
@@ -1712,46 +1986,6 @@ class SwayEditor:
             self.status_message = "Git не установлен или не найден в PATH"
         except Exception as e:
             self.status_message = f"Git error: {e}"
-
-    # def integrate_git(self):
-    #     """
-    #     Provides simple integration with Git, allowing the user
-    #     to select various commands.
-    #     """
-    #     commands = {
-    #         "1": ("status", "git status"),
-    #         "2": ("commit", "git commit -a"),
-    #         "3": ("push", "git push"),
-    #         "4": ("pull", "git pull"),
-    #         "5": ("diff", "git diff"),
-    #     }
-
-    #     menu = "\n".join([f"{k}: {v[0]}" for k, v in commands.items()])
-    #     choice = self.prompt(f"Select Git command:\n{menu}\nChoice: ")
-
-    #     if choice in commands:
-    #         try:
-    #             curses.def_prog_mode()
-    #             curses.endwin()
-    #             process = subprocess.run(
-    #                 commands[choice][1], shell=True, text=True, capture_output=True
-    #             )
-    #             curses.reset_prog_mode()
-    #             self.stdscr.refresh()
-
-    #             if process.returncode == 0:
-    #                 self.status_message = f"Git {commands[choice][0]} successful"
-    #             else:
-    #                 self.status_message = f"Git error: {process.stderr[:50]}..."
-
-    #         except FileNotFoundError:                          # NEW
-    #             self.status_message = "Git не установлен или не найден в PATH"
-
-    #         except Exception as e:                             # существующий блок
-    #             self.status_message = f"Git error: {str(e)}"
-    #     else:
-    #         self.status_message = "Invalid choice"
-
 
 
     def goto_line(self):
@@ -1944,20 +2178,38 @@ class SwayEditor:
 
     def run(self):
         """
-        Main editor loop: draws the screen, handles input,
-        and refreshes the display continuously.
+        Главный цикл редактора:
+        • принимает сообщения из фоновых потоков через self._msg_q
+        • перерисовывает экран
+        • обрабатывает клавиши
+        • ловит исключения и завершает работу корректно
         """
         while True:
+            # ── 1. Получаем сообщения от фоновых задач ──────────────────
+            try:
+                while not self._msg_q.empty():
+                    self.status_message = self._msg_q.get_nowait()
+            except queue.Empty:
+                pass
+
+            # ── 2. Отрисовываем интерфейс ────────────────────────────────
             try:
                 self.draw_screen()
+            except Exception as e:
+                logging.exception("Draw error")
+                self.status_message = f"Draw error: {e}"
+
+            # ── 3. Обрабатываем ввод пользователя ───────────────────────
+            try:
                 self.stdscr.keypad(True)
-                key = self.stdscr.getch()
+                key = self.stdscr.getch()          # блокирующий вызов
                 self.handle_input(key)
             except KeyboardInterrupt:
                 self.exit_editor()
             except Exception as e:
                 logging.exception("Unhandled exception in main loop")
-                self.status_message = f"Error: {str(e)}"
+                self.status_message = f"Error: {e}"
+
 
 
 def main(stdscr):
