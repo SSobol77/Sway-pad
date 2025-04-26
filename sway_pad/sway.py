@@ -330,6 +330,7 @@ class SwayEditor:
             # Поиск
             "find":       self.parse_key(self.config["keybindings"].get("find", "ctrl+f")),
             "find_next":  self.parse_key(self.config["keybindings"].get("find_next", "f3")),
+            "help": self.parse_key(self.config["keybindings"].get("help", "f1")),
         }
 
         # ── action_map ─────────────────────────────────────────────
@@ -350,7 +351,7 @@ class SwayEditor:
             "git_menu": self.integrate_git,
             # ★ Esc-отмена
             "cancel_operation": self.cancel_operation,
-            
+            "help": self.show_help,
         }
 
         # ── финальные инициализации ────────────────────────────────
@@ -1069,10 +1070,11 @@ class SwayEditor:
                 self.handle_page_up()
             elif key == curses.KEY_NPAGE or key == 338 or key == 457:  # Page Down
                 self.handle_page_down()
-            elif key == 9:
-                self.handle_smart_tab()                                # Tab
-
-            elif key == self.keybindings["new_file"]:                  # F4
+            elif key == 9:                                              # Tab
+                self.handle_smart_tab()                                
+            elif key == self.keybindings["help"]:                       # F1
+                self.show_help()
+            elif key == self.keybindings["new_file"]:                   # F4
                 self.new_file()
             elif key == self.keybindings["save_file"]:     # Ctrl+S
                 self.save_file()
@@ -1294,6 +1296,7 @@ class SwayEditor:
         self.handle_tab()
 
 
+
     def handle_char_input(self, key):
         """Handles regular character input and supports undo."""
 
@@ -1337,6 +1340,7 @@ class SwayEditor:
         except Exception as e:
             logging.exception(f"Error handling character input: {str(e)}")
             self.status_message = f"Input error: {str(e)}"
+
 
 
     def handle_enter(self):
@@ -1471,7 +1475,7 @@ class SwayEditor:
             self.modified = False
             self.set_initial_cursor_position()
             self.status_message = f"Opened {filename} with encoding {self.encoding}"
-            self.update_git_info()  # обновляем Git-информацию при открытии файла
+            self.update_git_info()  # Обновляем Git-информацию при открытии файла
             curses.flushinp()
         except ImportError:
             try:
@@ -1484,7 +1488,7 @@ class SwayEditor:
                 self.modified = False
                 self.set_initial_cursor_position()
                 self.status_message = f"Opened {filename}"
-                self.update_git_info()  # обновил Git-информацию при открытии файла
+                self.update_git_info()  # Обновляем Git-информацию при открытии файла
                 curses.flushinp()
             except FileNotFoundError:
                 self.status_message = f"File not found: {filename}"
@@ -1643,7 +1647,8 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Error creating new file: {e}"
             logging.exception("Error creating new file")
-            
+
+
 
     def cancel_operation(self):
         """
@@ -2157,6 +2162,7 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Error during search and replace: {e}"
 
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     def toggle_auto_save(self):
         """ TODO: Enables or disables auto-save functionality."""
         self.auto_save = getattr(self, "auto_save", False)
@@ -2175,6 +2181,68 @@ class SwayEditor:
         else:
             self.status_message = "Auto-save disabled"
 
+
+    def show_help(self):
+        """
+        Показывает всплывающее окно со справкой.
+        Закрывается по Esc.  На время показа курсор скрывается.
+        """
+        help_lines = [
+            "  ──  Sway-Pad Help  ──  ",
+            "",
+            "  F1        : Help (это окно)",
+            "  F2        : Git-меню",
+            "  F3        : Find next",
+            "  F4        : New file",
+            "  F5        : Save as…",
+            "  Ctrl+S    : Save",
+            "  Ctrl+O    : Open file",
+            "  Ctrl+Q    : Quit",
+            "  Ctrl+Z/Y  : Undo / Redo",
+            "  Ctrl+F    : Find",
+            "",
+            "  © 2025 Siergej Sobolewski — Sway-Pad",
+            "  Licensed under the Apache License 2.0",
+            "",
+            "  Esc — закрыть окно",
+        ]
+
+        # размеры и позиция
+        h = len(help_lines) + 2
+        w = max(len(l) for l in help_lines) + 4
+        max_y, max_x = self.stdscr.getmaxyx()
+        y0 = (max_y - h) // 2
+        x0 = (max_x - w) // 2
+
+        win = curses.newwin(h, w, y0, x0)
+        win.bkgd(" ", curses.color_pair(6))
+        win.border()
+
+        for i, text in enumerate(help_lines, start=1):
+            win.addstr(i, 2, text)
+
+        win.refresh()
+
+        # ★ прячем курсор и запоминаем предыдущее состояние
+        try:
+            prev_vis = curses.curs_set(0)   # 0 = invisible, 1/2 = visible
+        except curses.error:
+            prev_vis = 1                     # если терминал не поддерживает
+
+        # ждём Esc
+        while True:
+            ch = win.getch()
+            if ch == 27:                     # Esc
+                break
+
+        # ★ возвращаем курсор
+        try:
+            curses.curs_set(prev_vis)
+        except curses.error:
+            pass
+
+        del win
+        self.draw_screen()
 
     def run(self):
         """
