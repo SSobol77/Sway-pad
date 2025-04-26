@@ -1443,80 +1443,57 @@ class SwayEditor:
         except (UnicodeEncodeError, TypeError):
             return 1
 
-
     def open_file(self):
         """
-        Opens a file with automatic encoding detection using chardet,
-        or UTF-8 fallback if chardet is not available.
+        Открывает файл с авто-определением кодировки (chardet),
+        сбрасывает лексер и Git-инфо.
         """
+        # спросить о сохранении, если были изменения
         if self.modified:
-            choice = self.prompt("Save changes? (y/n): ")
-            if choice and choice.lower().startswith("y"):
+            if (ans := self.prompt("Save changes? (y/n): ")).lower().startswith("y"):
                 self.save_file()
 
         filename = self.prompt("Open file: ")
+        if not filename:                       # Esc или пустая строка
+            self.status_message = "Open cancelled"
+            return
         if not self.validate_filename(filename):
             self.status_message = "Invalid filename"
             return
-        if not filename:
-            self.status_message = "Open cancelled"
-            return
 
         try:
+            # ── определяем кодировку ───────────────────────────
             with open(filename, "rb") as f:
-                result = chardet.detect(f.read())
-                self.encoding = result["encoding"] or "UTF-8"
+                enc_guess = chardet.detect(f.read())["encoding"]
+            self.encoding = enc_guess or "UTF-8"
 
+            # ── читаем файл ────────────────────────────────────
             with open(filename, "r", encoding=self.encoding, errors="replace") as f:
-                self.text = f.read().splitlines()
-                if not self.text:
-                    self.text = [""]
-            self.filename = filename
-            self.modified = False
+                self.text = f.read().splitlines() or [""]
+
+            # ── обновляем состояние ────────────────────────────
+            self.filename  = filename
+            self._lexer    = None        # ✨ заставляем Pygments выбрать новый лексер
+            self.modified  = False
             self.set_initial_cursor_position()
-            self.status_message = f"Opened {filename} with encoding {self.encoding}"
-            self.update_git_info()  # Обновляем Git-информацию при открытии файла
+            self.status_message = f"Opened {filename}  (enc: {self.encoding})"
+            self.update_git_info()
             curses.flushinp()
-        except ImportError:
-            try:
-                with open(filename, "r", encoding="utf-8", errors="replace") as f:
-                    self.text = f.read().splitlines()
-                    if not self.text:
-                        self.text = [""]
-                self.filename = filename
-                self.encoding = "UTF-8"
-                self.modified = False
-                self.set_initial_cursor_position()
-                self.status_message = f"Opened {filename}"
-                self.update_git_info()  # Обновляем Git-информацию при открытии файла
-                curses.flushinp()
-            except FileNotFoundError:
-                self.status_message = f"File not found: {filename}"
-                logging.error(f"File not found: {filename}")
-            except OSError as e:
-                self.status_message = f"Error opening file: {e}"
-                logging.exception(f"Error opening file: {filename}")
-            except Exception as e:
-                self.status_message = f"Error opening file: {e}"
-                logging.exception(f"Error opening file: {filename}")
+
         except FileNotFoundError:
             self.status_message = f"File not found: {filename}"
-            logging.error(f"File not found: {filename}")
-        except OSError as e:
-            self.status_message = f"Error opening file: {e}"
-            logging.exception(f"Error opening file: {filename}")
         except Exception as e:
             self.status_message = f"Error opening file: {e}"
             logging.exception(f"Error opening file: {filename}")
- 
+
 
     def save_file(self):
         """
-        Сохраняет файл.  Если имя ещё не задано – спрашивает «Save as:».
-        После первого сохранения просто перезаписывает тот же файл.
+        Сохраняет текущий документ.
+        Если имя файла ещё не задано – предлагает «Save as:».
         """
-        # 1. имя ещё не задано? -> спрашиваем
-        if not self.filename:                       # пустая строка
+        # ── 1. имя не задано → спрашиваем ─────────────────────
+        if not self.filename:
             new_name = self.prompt("Save as: ")
             if not new_name:
                 self.status_message = "Save cancelled"
@@ -1524,9 +1501,10 @@ class SwayEditor:
             if not self.validate_filename(new_name):
                 self.status_message = "Invalid filename"
                 return
-            self.filename = new_name                # имя подтвердили
+            self.filename = new_name
+            self._lexer   = None          # ✨ подсветка по новому расширению
 
-        # 2. проверки существующего имени
+        # ── 2. санк-проверки ──────────────────────────────────
         if os.path.isdir(self.filename):
             self.status_message = f"Cannot save: {self.filename} is a directory"
             return
@@ -1534,16 +1512,19 @@ class SwayEditor:
             self.status_message = f"No write permissions: {self.filename}"
             return
 
-        # 3. запись файла
+        # ── 3. записываем файл ───────────────────────────────
         try:
             with open(self.filename, "w", encoding=self.encoding, errors="replace") as f:
                 f.write(os.linesep.join(self.text))
+
             self.modified = False
             self.status_message = f"Saved to {self.filename}"
 
             code = os.linesep.join(self.text)
-            threading.Thread(target=self.run_lint_async, args=(code,), daemon=True).start()
+            threading.Thread(target=self.run_lint_async,
+                            args=(code,), daemon=True).start()
             self.update_git_info()
+
         except Exception as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {self.filename}")
@@ -1551,45 +1532,36 @@ class SwayEditor:
 
     def save_file_as(self):
         """
-        Сохраняет документ под новым именем.
-        • Проверяет корректность имени через validate_filename().
-        • Обновляет self.filename и флаг modified.
-        • После записи запускает линтер в отдельном потоке.
+        Сохраняет документ под новым именем
+        и сбрасывает лексер для корректной подсветки.
         """
         new_filename = self.prompt("Save file as: ")
         if not new_filename:
             self.status_message = "Save cancelled"
             return
-
-        # ── 1. Проверяем валидность имени ──────────────────────────────
         if not self.validate_filename(new_filename):
             self.status_message = "Invalid filename"
             return
-
         if os.path.isdir(new_filename):
             self.status_message = f"Cannot save: {new_filename} is a directory"
             return
-
         if os.path.exists(new_filename) and not os.access(new_filename, os.W_OK):
             self.status_message = f"No write permissions: {new_filename}"
             return
 
-        # ── 2. Пытаемся записать файл ─────────────────────────────────
         try:
             with open(new_filename, "w", encoding=self.encoding, errors="replace") as f:
                 f.write(os.linesep.join(self.text))
 
             self.filename = new_filename
+            self._lexer   = None          # ✨ выбрать лексер по новому расширению
             self.modified = False
             self.status_message = f"Saved as {new_filename}"
 
-            # Линтинг в фоне
             code = os.linesep.join(self.text)
-            threading.Thread(target=self.run_lint_async, args=(code,), daemon=True).start()
+            threading.Thread(target=self.run_lint_async,
+                            args=(code,), daemon=True).start()
 
-        except OSError as e:
-            self.status_message = f"Error saving file: {e}"
-            logging.exception(f"Error saving file: {new_filename}")
         except Exception as e:
             self.status_message = f"Error saving file: {e}"
             logging.exception(f"Error saving file: {new_filename}")
@@ -1631,23 +1603,29 @@ class SwayEditor:
 
     def new_file(self):
         """
-        Creates a new empty document, prompting the user to save changes if any.
+        Создаёт пустой документ.
+        При наличии несохранённых правок предлагает сохранить.
+        Сбрасывает имя файла, лексер и позицию курсора.
         """
+        # ── 1. при необходимости спрашиваем о сохранении ─────────────
         if self.modified:
-            choice = self.prompt("Save changes? (y/n): ")
-            if choice and choice.lower().startswith("y"):
+            if (ans := self.prompt("Save changes? (y/n): ")).lower().startswith("y"):
                 self.save_file()
 
+        # ── 2. инициализируем «чистый» буфер ─────────────────────────
         try:
-            self.text = [""]
-            self.filename = ""           # тоже пусто
-            self.modified = False
+            self.text       = [""]
+            self.filename   = ""       # имя ещё не задано
+            self._lexer     = None     # ✨ Pygments выберет лексер позже
+            self.modified   = False
+            self.encoding   = "UTF-8"  # разумное значение по умолчанию
+
             self.set_initial_cursor_position()
             self.status_message = "New file created"
+
         except Exception as e:
             self.status_message = f"Error creating new file: {e}"
             logging.exception("Error creating new file")
-
 
 
     def cancel_operation(self):
