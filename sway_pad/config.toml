@@ -33,38 +33,59 @@ number = "magenta"
 operator = "white"     
 escape = "cyan"       
 
-
 [fonts]
 font_family = "monospace"
 font_size = 12
 
-
 [keybindings]
-copy = "ctrl+c"
-cut = "ctrl+x"
-paste = "ctrl+v"
-undo = "ctrl+z"
-redo = "ctrl+shift+z"
-quit = "ctrl+q"
-save_file = "ctrl+s"
-open_file = "ctrl+o"
-select_all = "ctrl+a"
-delete = "del"
+# ── базовые операции ──────────────────────────────────────────────
+copy                 = "ctrl+c"
+cut                  = "ctrl+x"
+paste                = "ctrl+v"
+undo                 = "ctrl+z"
+redo                 = "ctrl+shift+z"
+quit                 = "ctrl+q"
+save_file            = "ctrl+s"
+save_as              = "f5"  
+open_file            = "ctrl+o"
+save_file_as         = "ctrl+shift+s"   # если используете
+select_all           = "ctrl+a"
+delete               = "del"
+auto_save            = "f6"
+
+# ── перемещение курсора / выделение ───────────────────────────────
 extend_selection_right = "shift+right"
-extend_selection_left = "shift+left"
-select_to_home = "shift+home"
-select_to_end = "shift+end"
+extend_selection_left  = "shift+left"
+select_to_home         = "shift+home"
+select_to_end          = "shift+end"
+extend_selection_up    = "shift+pgup"    # ← поддерживается
+extend_selection_down  = "shift+pgdn"
 
+# ── новые горячие клавиши (пример) ────────────────────────────────
+git_menu     = "f2"          # открывает Git-меню
+comment_line = "alt+#"       # закомментировать / раскомментировать строку
+go_to_top    = "home"        # курсор в начало файла
+go_to_bottom = "end"         # курсор в конец файла
+page_up      = "pgup"
+page_down    = "pgdn"
+toggle_insert_mode = "insert"
+find       = "ctrl+f"
+find_next  = "f3"
 
+# F-клавиши до F12 распознаются так же:
+build_project   = "f12"
+run_tests       = "f9"
 
 [editor]
 use_system_clipboard = true  # Использовать системный буфер обмена (pyperclip)
 show_line_numbers = true
+#default_new_filename = "my_draft.toml"  # имя файла по умолчанию
 tab_size = 4
 use_spaces = true
 word_wrap = false
 auto_indent = true
 auto_brackets = true
+auto_save_interval = 120  # секунды
 
 
 [theme]
@@ -83,7 +104,7 @@ cursor = "#AEAFAD"
 text = "📝"
 code = "💻"
 python = "🐍"
-toml = "⚙️"
+toml = "❄️"
 javascript = "📜"
 typescript = "📑"  
 php = "📑"  
@@ -126,6 +147,7 @@ perl = "⚒"
 powershell = "⚒"
 folder = "📁"
 folder_open = "📂"
+nix = "❄️"
 
 
 [syntax_highlighting]
@@ -415,17 +437,18 @@ patterns = [
 
 [supported_formats]
 python = ["py", "pyw"]
-toml = ["toml","tml"]
+toml = ["toml","tml","nix"]
 javascript = ["js", "mjs", "cjs", "jsx"]
 code = ["jl", "dart"]
 css = ["css"]
+nix = ["nix"]
 html = ["html", "htm"]
 json = ["json"]
 yaml = ["yaml", "yml"]
 xml = ["xml"]
 markdown = ["md"]
 plaintext = ["txt"]
-shell = ["sh", "bash", "zsh"]
+shell = ["sh", "bash", "zsh", "fish", "ksh", "csh", "tcsh", "dash", "ash", "cmd"]
 dart = ["dart"]
 go = ["go"]
 c = ["c", "h"]
