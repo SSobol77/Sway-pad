@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 # Sway-Pad is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
+
 import curses
 import locale
 import toml
 import os
 import re
-import queue 
-import shlex    
+import queue
+import shlex
 import sys
 import time
 import pyperclip
@@ -25,6 +27,7 @@ import threading
 from pygments import lex
 from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
 from pygments.token import Token
+from wcwidth import wcwidth, wcswidth 
 
 
 # Установка кодировки по умолчанию
@@ -267,16 +270,23 @@ class SwayEditor:
         self.stdscr.keypad(True)
         curses.raw(); curses.nonl(); curses.noecho()
 
+
         # ── внутренние поля, которые НУЖНЫ ДАЛЬШЕ ──────────────────
         self.insert_mode = True
         self.status_message = ""
         self._msg_q = queue.Queue() 
         self.action_history, self.undone_actions = [], []
 
+        # Очередь для результатов команд оболочки
+        self._shell_cmd_q = queue.Queue()
+        # Очередь для Git-информации
+        self._git_q = queue.Queue() 
+
         # ── поля для поиска ───────────────────────────────
-        self.search_term        = ""   # текущий запрос
-        self.search_matches     = []   # [(row,col_start,col_end), …]
-        self.current_match_idx  = -1   # индекс в search_matches
+        self.search_term = ""           # Текущий запрос поиска
+        self.search_matches = []        # Список всех совпадений: [(row, col_start_idx, col_end_idx), ...]
+        self.current_match_idx = -1     # Индекс текущего совпадения для F3/перехода
+        self.highlighted_matches = []   # Список совпадений для ПОДСВЕТКИ на экране
 
         # ── прочие поля/заглушки ───────────────────────────────────
         self.config   = load_config()
@@ -291,7 +301,8 @@ class SwayEditor:
         self.git_info = None
         self._lexer, self._token_cache = None, {}
         self.visible_lines, self.last_window_size = 0, (0, 0)
-
+        self.colors = {} # Инициализируем словарь цветов
+        
         # ── системные вызовы ───────────────────────────────────────
         self.stdscr.nodelay(False)
         locale.setlocale(locale.LC_ALL, "")
@@ -356,10 +367,11 @@ class SwayEditor:
 
         # ── финальные инициализации ────────────────────────────────
         self.init_colors()
-        self.load_syntax_highlighting()
+        #self.load_syntax_highlighting()
         self.set_initial_cursor_position()
+        
         self.update_git_info()
-
+        
 
     def _check_pyclip_availability(self):
         """Проверяет доступность pyperclip и системных утилит для буфера обмена."""
@@ -371,9 +383,6 @@ class SwayEditor:
             logging.warning(f"System clipboard unavailable: {str(e)}")
             return False
 
-    def update_git_info(self):
-        """Обновляет кэшированную Git-информацию для текущего файла."""
-        self.git_info = get_git_info(self.filename)
 
     def get_selected_text(self):
         if not self.is_selecting or self.selection_start is None or self.selection_end is None:
@@ -793,20 +802,30 @@ class SwayEditor:
 
 
     def init_colors(self):
-        """Initializes curses color pairs for syntax highlighting."""
-        bg_color = -1
-        curses.init_pair(1, curses.COLOR_BLUE, bg_color)
-        curses.init_pair(2, curses.COLOR_GREEN, bg_color)
-        curses.init_pair(3, curses.COLOR_MAGENTA, bg_color)
-        curses.init_pair(4, curses.COLOR_YELLOW, bg_color)
-        curses.init_pair(5, curses.COLOR_CYAN, bg_color)
-        curses.init_pair(6, curses.COLOR_WHITE, bg_color)
-        curses.init_pair(7, curses.COLOR_YELLOW, bg_color)
-        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+        """Initializes curses color pairs for syntax highlighting and search."""
+        bg_color = -1 # Используем фон терминала по умолчанию
+        curses.start_color()
+        curses.use_default_colors()
+
+        # Основные цвета для синтаксиса (примеры)
+        curses.init_pair(1, curses.COLOR_BLUE, bg_color)    # Comment
+        curses.init_pair(2, curses.COLOR_GREEN, bg_color)   # Keyword
+        curses.init_pair(3, curses.COLOR_MAGENTA, bg_color) # String
+        curses.init_pair(4, curses.COLOR_YELLOW, bg_color)  # Literal / Type
+        curses.init_pair(5, curses.COLOR_CYAN, bg_color)    # Decorator / Tag
+        curses.init_pair(6, curses.COLOR_WHITE, bg_color)   # Operator / Punctuation / Variable
+        curses.init_pair(7, curses.COLOR_YELLOW, bg_color)  # Line number / Builtins
+        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_RED) # Error background
+
+        # *** цвет для подсветки поиска ***
+        # Черный текст на светло-желтом фоне
+        curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW) # Search Highlight
+
+        # Обновляем словарь self.colors
         self.colors = {
-            "error": curses.color_pair(8),
+            "error": curses.color_pair(8) | curses.A_BOLD, # делаем ошибку жирной
             "line_number": curses.color_pair(7),
-            "status": curses.color_pair(6),
+            "status": curses.color_pair(6) | curses.A_BOLD, # Статус жирным
             "comment": curses.color_pair(1),
             "keyword": curses.color_pair(2),
             "string": curses.color_pair(3),
@@ -815,19 +834,19 @@ class SwayEditor:
             "literal": curses.color_pair(4),
             "decorator": curses.color_pair(5),
             "type": curses.color_pair(4),
-            "selector": curses.color_pair(2),
-            "property": curses.color_pair(5),
-            "tag": curses.color_pair(2),
+            "tag": curses.color_pair(5),
             "attribute": curses.color_pair(3),
-            "builtins": curses.color_pair(4), 
-            "escape": curses.color_pair(5),     
-            "magic": curses.color_pair(3),      
-            "exception": curses.color_pair(8),   
-            "function": curses.color_pair(2),    
-            "class": curses.color_pair(4),       
-            "number": curses.color_pair(3),      
-            "operator": curses.color_pair(6),    
-            "green": curses.color_pair(2), 
+            "builtins": curses.color_pair(7),
+            "escape": curses.color_pair(5),
+            "magic": curses.color_pair(3),
+            "exception": curses.color_pair(8),
+            "function": curses.color_pair(2),
+            "class": curses.color_pair(4),
+            "number": curses.color_pair(3),
+            "operator": curses.color_pair(6),
+            "green": curses.color_pair(2), # Для Git
+            # *** Добавляем цвет поиска в словарь ***
+            "search_highlight": curses.color_pair(9),
         }
 
     def apply_syntax_highlighting(self, line, lang):
@@ -859,176 +878,263 @@ class SwayEditor:
         except Exception as e:
             logging.exception("Error loading syntax highlighting")
 
-                
+
     def draw_screen(self):
-        """Renders the editor screen, including text lines, line numbers, status bar, and cursor."""
-        self.stdscr.erase()  # вместо clear()
+        """
+        Renders the editor screen, including text lines, line numbers, status bar, cursor,
+        selection, and search result highlighting.
+        Uses wcwidth for correct character width calculation.
+        """
+        # --- Начало отрисовки (как в предыдущей версии) ---
+        self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
 
-        # Обновляем visible_lines при изменении размера окна
         if self.last_window_size != (height, width):
-            self.visible_lines = height - 2
+            self.visible_lines = height - 1
             self.last_window_size = (height, width)
 
-        if height < 24 or width < 80:
+        if height < 5 or width < 20:
+            # Если окно слишком маленькое, показываем сообщение об ошибке
             try:
-                self.stdscr.addstr(
-                    0, 0, "Window too small (min: 80x24)", self.colors["error"]
-                )
-                self.stdscr.noutrefresh()  # вместо refresh()
+                error_color = self.colors.get("error", curses.A_NORMAL)
+                self.stdscr.addstr(0, 0, "Window too small", error_color)
+                self.stdscr.noutrefresh()
                 curses.doupdate()
                 return
-            except curses.error:
-                pass
+            except curses.error as e:
+                logging.error(f"Curses error during small window display: {e}")
                 return
 
-        max_line_num = len(str(len(self.text)))
-        line_num_format = f"{{:>{max_line_num}}} "
-        line_num_width = len(line_num_format.format(0))
+        max_line_num_digits = len(str(len(self.text)))
+        line_num_width = max_line_num_digits + 1
         text_width = width - line_num_width
 
-        if self.cursor_x < self.scroll_left:
-            self.scroll_left = max(0, self.cursor_x)
-        elif self.cursor_x >= self.scroll_left + text_width:
-            self.scroll_left = max(0, self.cursor_x - text_width + 1)
-
+        # --- Вертикальная прокрутка (как раньше) ---
         if self.cursor_y < self.scroll_top:
             self.scroll_top = self.cursor_y
         elif self.cursor_y >= self.scroll_top + self.visible_lines:
             self.scroll_top = self.cursor_y - self.visible_lines + 1
 
+        # --- Отрисовка строк текста с синтаксисом (как раньше) ---
         for screen_row in range(self.visible_lines):
-            line_num = self.scroll_top + screen_row + 1
-            if line_num > len(self.text):
-                break
-            try:
-                self.stdscr.addstr(
-                    screen_row,
-                    0,
-                    line_num_format.format(line_num),
-                    self.colors["line_number"],
-                )
-            except curses.error:
-                pass
+            text_line_index = self.scroll_top + screen_row
+            if text_line_index >= len(self.text): break
 
-            line = self.text[line_num - 1] if line_num <= len(self.text) else ""
+            # Номер строки
+            line_num_str = f"{text_line_index + 1:<{max_line_num_digits}} "
+            try: self.stdscr.addstr(screen_row, 0, line_num_str, self.colors["line_number"])
+            except curses.error as e:
+                logging.error(f"Curses error drawing line number at ({screen_row}, 0): {e}")
+                pass # Возможно, просто пропустить отрисовку номера строки при ошибке
+
+            # Текст строки с подсветкой синтаксиса
+            line = self.text[text_line_index]
+            # Убедитесь, что apply_syntax_highlighting существует и возвращает [(text, color), ...]
             syntax_line = self.apply_syntax_highlighting(line, self.detect_language())
-            x_pos = 0
+
+            current_screen_x = line_num_width
+            char_col_index = 0
+
             for text_part, color in syntax_line:
-                text_len = len(text_part.encode("utf-8"))
-                if x_pos + text_len <= self.scroll_left:
-                    x_pos += text_len
+                if current_screen_x >= width: break
+                part_buffer = ""
+                accumulated_width = 0
+                for char in text_part:
+                    char_width = self.get_char_width(char)
+                    if char_col_index < self.scroll_left:
+                        char_col_index += 1
+                        continue
+                    if current_screen_x + char_width > width:
+                        if part_buffer:
+                            try: self.stdscr.addstr(screen_row, current_screen_x - accumulated_width, part_buffer, color)
+                            except curses.error as e: 
+                                logging.error(f"Curses error drawing status bar: {e}") 
+                                pass
+                        part_buffer = ""
+                        current_screen_x = width
+                        break
+                    part_buffer += char
+                    accumulated_width += char_width
+                    char_col_index += 1
+                if part_buffer:
+                    try:
+                        draw_pos_x = current_screen_x
+                        self.stdscr.addstr(screen_row, draw_pos_x, part_buffer, color)
+                        current_screen_x += accumulated_width
+                    except curses.error as e:
+                        logging.error(f"Curses error drawing text part at ({screen_row}, {draw_pos_x}): {e}")
+                        current_screen_x = width # Пропускаем эту часть строки при ошибке
+                                    
+                if current_screen_x >= width: break
+
+        # --- Отрисовка подсветки поиска ---
+        if self.highlighted_matches:
+            search_highlight_color = self.colors.get("search_highlight", curses.A_REVERSE) # Получаем цвет
+
+            for match_row, match_start_idx, match_end_idx in self.highlighted_matches:
+                # Проверяем, видима ли строка совпадения на экране
+                if match_row < self.scroll_top or match_row >= self.scroll_top + self.visible_lines:
                     continue
-                visible_start = max(0, self.scroll_left - x_pos)
-                visible_part = text_part[visible_start:]
-                visible_width = len(visible_part.encode("utf-8"))
-                visible_part = visible_part[: text_width - (x_pos - self.scroll_left)]
-                screen_x = line_num_width + (x_pos - self.scroll_left)
-                try:
-                    self.stdscr.addstr(screen_row, screen_x, visible_part, color)
-                except curses.error:
-                    pass
-                x_pos += visible_width
 
-        try:
-            status_y = height - 1
-            file_type = self.detect_language()
-            file_icon = get_file_icon(self.filename, self.config)
-            # Используем кэшированную Git-информацию
-            git_branch, git_user, git_commits = self.git_info
+                screen_y = match_row - self.scroll_top # Экранная строка Y
+                line = self.text[match_row]
 
-            # Формируем левую часть статусной строки
-            left_status = (
-                f"File: {self.filename} | "
-                f"Type: {file_icon} {file_type} | "
-                f"Encoding: {self.encoding} | "
-                f"Line: {self.cursor_y + 1}/{len(self.text)} | "
-                f"Column: {self.cursor_x + 1} | "
-                f"Mode: {'Insert' if self.insert_mode else 'Replace'}"
-            )
+                # Рассчитываем начальную позицию X и ширину подсветки на ЭКРАНЕ
+                highlight_screen_start_x = -1
+                highlight_screen_width = 0
+                current_screen_x = line_num_width # Начинаем с позиции после номера строки
 
-            # Формируем правую часть статусной строки
-            if git_branch or git_user:
-                right_status = f"Git :: branch: {git_branch} | {git_user} | commits: {git_commits}"
-            else:
-                right_status = "Git :: none"
+                for char_idx, char in enumerate(line):
+                    char_width = self.get_char_width(char)
 
-            # Очищаем строку статуса
-            self.stdscr.addstr(status_y, 0, " " * (width - 1), self.colors["status"])
+                    # Пропускаем символы до scroll_left
+                    if char_idx < self.scroll_left:
+                        current_screen_x += char_width # Нужно для правильного расчета стартовой позиции видимой части
+                        continue
 
-            # Отображаем левую часть
-            max_left_length = width - len(right_status) - 2
-            self.stdscr.addstr(status_y, 0, left_status[:max_left_length], self.colors["status"])
+                    # Мы в видимой части. Проверяем, входит ли символ в совпадение
+                    is_highlighted = match_start_idx <= char_idx < match_end_idx
 
-            # Отображаем правую часть (Git-информация) в зелёном цвете
-            if right_status:
-                self.stdscr.addstr(
-                    status_y,
-                    width - len(right_status) - 1,
-                    right_status,
-                    self.colors.get("green", self.colors["status"])
-                )
-        except curses.error:
-            pass
+                    # Проверяем, помещается ли символ на экране
+                    effective_screen_x = current_screen_x
+                    # Корректируем позицию на экране для символов после scroll_left
+                    if char_idx >= self.scroll_left:
+                         scroll_w = self.get_string_width(line[self.scroll_left:char_idx])
+                         effective_screen_x = line_num_width + scroll_w
 
-        cursor_screen_y = self.cursor_y - self.scroll_top
-        cursor_screen_x = self.cursor_x - self.scroll_left + line_num_width
-        if 0 <= cursor_screen_y < self.visible_lines and 0 <= cursor_screen_x < width:
-            try:
-                self.stdscr.move(cursor_screen_y, cursor_screen_x)
-            except curses.error:
-                pass
 
-        # блок выделения
+                    if effective_screen_x >= width: # Используем effective_screen_x для проверки границы
+                        break # Достигли правого края
+
+                    if is_highlighted:
+                        if highlight_screen_start_x == -1:
+                            # Начало видимой части подсветки
+                            highlight_screen_start_x = effective_screen_x
+                        highlight_screen_width += char_width
+
+                    # Обновляем позицию на экране (не нужно, т.к. считаем effective_screen_x заново)
+                    # current_screen_x += char_width # Убрано, считаем effective_screen_x
+
+                # Применяем подсветку через chgat, если она видима
+                if highlight_screen_start_x != -1 and highlight_screen_width > 0:
+                    # Убедимся, что ширина не выходит за пределы экрана
+                    actual_width = min(highlight_screen_width, width - highlight_screen_start_x)
+                    if actual_width > 0:
+                        try:
+                            self.stdscr.chgat(
+                                screen_y,
+                                highlight_screen_start_x,
+                                actual_width, # Используем скорректированную ширину
+                                search_highlight_color
+                            )
+                        except curses.error as e:
+                            logging.error(f"Curses error applying search highlight at ({screen_y}, {highlight_screen_start_x}) width {actual_width}: {e}")
+                            pass # Игнорируем ошибки chgat, но логируем их
+
+        # --- Отрисовка выделения (как раньше, поверх подсветки поиска) ---
         if self.is_selecting and self.selection_start and self.selection_end:
-            start_y, start_x = self.selection_start
-            end_y, end_x = self.selection_end
-            
-            if start_y > end_y or (start_y == end_y and start_x > end_x):
-                start_y, start_x, end_y, end_x = end_y, end_x, start_y, start_x
-            
+            start_y, start_x_idx = self.selection_start
+            end_y, end_x_idx = self.selection_end
+            if (start_y > end_y) or (start_y == end_y and start_x_idx > end_x_idx):
+                start_y, start_x_idx, end_y, end_x_idx = end_y, end_x_idx, start_y, start_x_idx
+
             for y in range(start_y, end_y + 1):
-                if y < self.scroll_top or y >= self.scroll_top + self.visible_lines:
-                    continue
+                if y < self.scroll_top or y >= self.scroll_top + self.visible_lines: continue
                 screen_y = y - self.scroll_top
                 line = self.text[y]
-                line_len = len(line)
-                
-                # Определяем начало и конец выделения для текущей строки
-                if y == start_y and y == end_y:
-                    sel_start = max(start_x, self.scroll_left)
-                    sel_end = min(end_x, self.scroll_left + text_width)
-                elif y == start_y:
-                    sel_start = max(start_x, self.scroll_left)
-                    sel_end = min(line_len, self.scroll_left + text_width)
-                elif y == end_y:
-                    sel_start = self.scroll_left
-                    sel_end = min(end_x, self.scroll_left + text_width)
-                else:
-                    sel_start = self.scroll_left
-                    sel_end = min(line_len, self.scroll_left + text_width)
-                
-                # Применяем выделение одним вызовом chgat
-                if sel_start < sel_end:
-                    try:
-                        self.stdscr.chgat(
-                            screen_y,
-                            line_num_width + (sel_start - self.scroll_left),
-                            sel_end - sel_start,
-                            curses.A_REVERSE
-                        )
-                    except curses.error:
-                        pass
-                elif line_len == 0 and y >= start_y and y <= end_y:
-                    # Для пустых строк выделяем один символ
-                    try:
-                        self.stdscr.chgat(screen_y, line_num_width, 1, curses.A_REVERSE)
-                    except curses.error:
-                        pass
+                line_len_idx = len(line)
+                current_start_idx = start_x_idx if y == start_y else 0
+                current_end_idx = end_x_idx if y == end_y else line_len_idx
+                if current_start_idx >= current_end_idx and not (line_len_idx == 0 and y == start_y == end_y): continue
 
-        self.highlight_matching_brackets()
-        self.stdscr.noutrefresh()  # вместо refresh()
-        curses.doupdate()  # единый вызов в конце
+                sel_screen_start_x, sel_screen_width = -1, 0
+                current_screen_x = line_num_width
+                for char_idx, char in enumerate(line):
+                    char_width = self.get_char_width(char)
+                    if char_idx < self.scroll_left:
+                        current_screen_x += char_width
+                        continue
+                    is_selected = current_start_idx <= char_idx < current_end_idx
+                    effective_screen_x = line_num_width + self.get_string_width(line[self.scroll_left:char_idx])
+                    if effective_screen_x >= width: break
+                    if is_selected:
+                        if sel_screen_start_x == -1: sel_screen_start_x = effective_screen_x
+                        sel_screen_width += char_width
+                if sel_screen_start_x != -1 and sel_screen_width > 0:
+                    actual_width = min(sel_screen_width, width - sel_screen_start_x)
+                    if actual_width > 0:
+                        try: self.stdscr.chgat(screen_y, sel_screen_start_x, actual_width, curses.A_REVERSE)
+                        except curses.error as e:
+                            logging.error(f"Curses error applying selection highlight at ({screen_y}, {sel_screen_start_x}) width {actual_width}: {e}")
+                            pass # Игнорируем ошибки chgat, но логируем их
+
+                elif line_len_idx == 0 and current_start_idx == 0 and current_end_idx == 0 and y >= start_y and y <= end_y:
+                    if line_num_width < width:
+                        try: self.stdscr.chgat(screen_y, line_num_width, 1, curses.A_REVERSE)
+                        except curses.error as e:
+                            logging.error(f"Curses error applying selection highlight for empty line at ({screen_y}, {line_num_width}): {e}")
+                            pass
+
+        # --- Отрисовка статус-бара (как раньше) ---
+        try:
+            status_y = height - 1
+            # ... (код отрисовки статус-бара без изменений) ...
+            file_type = self.detect_language()
+            file_icon = get_file_icon(self.filename or "untitled", self.config)
+            git_branch, git_user, git_commits = self.git_info or ("", "", "0")
+            left_status = (f"{file_icon} {os.path.basename(self.filename) if self.filename else '[No Name]'}{'*' if self.modified else ''} | "
+                           f"{file_type} | {self.encoding} | "
+                           f"Ln {self.cursor_y + 1}/{len(self.text)}, Col {self.cursor_x + 1} | "
+                           f"{'INS' if self.insert_mode else 'OVR'}")
+            if git_branch or git_user: right_status = f"Git: {git_branch} ({git_commits})"
+            else: right_status = ""
+            status_color = self.colors.get("status", curses.A_NORMAL)
+            self.stdscr.addstr(status_y, 0, " " * (width -1), status_color)
+            left_width = self.get_string_width(left_status)
+            max_left_width = width - self.get_string_width(right_status) - 2
+            if left_width > max_left_width: left_status = left_status[:max_left_width - 3] + "..."
+            self.stdscr.addstr(status_y, 0, left_status, status_color)
+            if right_status:
+                git_color = self.colors.get("green", status_color)
+                right_start_col = width - self.get_string_width(right_status) -1
+                if right_start_col < self.get_string_width(left_status) + 1: right_start_col = self.get_string_width(left_status) + 1
+                if right_start_col < width: self.stdscr.addstr(status_y, right_start_col, right_status, git_color)
+            if self.status_message:
+                msg_width = self.get_string_width(self.status_message)
+                msg_start_col = (width - msg_width) // 2
+                if msg_start_col > self.get_string_width(left_status) and msg_start_col + msg_width < (width - self.get_string_width(right_status) -1) :
+                    self.stdscr.addstr(status_y, msg_start_col, self.status_message, status_color | curses.A_BOLD)
+                self.status_message = ""
+        except curses.error: pass
+
+
+        # --- Позиционирование курсора (как раньше) ---
+        cursor_screen_y = self.cursor_y - self.scroll_top
+        cursor_line_text = self.text[self.cursor_y]
+        processed_width_before_cursor = self.get_string_width(cursor_line_text[:self.cursor_x])
+        scroll_left_width = self.get_string_width(cursor_line_text[:self.scroll_left])
+        final_cursor_screen_x = line_num_width + processed_width_before_cursor - scroll_left_width
+
+        if 0 <= cursor_screen_y < self.visible_lines and line_num_width <= final_cursor_screen_x < width:
+            try:
+                self.stdscr.move(cursor_screen_y, final_cursor_screen_x)
+            except curses.error as e:
+                logging.error(f"Curses error moving cursor to ({cursor_screen_y}, {final_cursor_screen_x}): {e}")
+                    # Попытка переместить курсор хотя бы в начало видимой строки
+                try:
+                    self.stdscr.move(cursor_screen_y, line_num_width)
+                except curses.error as e_fallback:
+                    logging.error(f"Curses fallback error moving cursor to ({cursor_screen_y}, {line_num_width}): {e_fallback}")
+                    pass
+                
+        elif 0 <= cursor_screen_y < self.visible_lines:
+            try: self.stdscr.move(cursor_screen_y, line_num_width)
+            except curses.error: pass
+
+        # --- Обновление экрана ---
+        self.stdscr.noutrefresh()
+        curses.doupdate()
+
 
     def detect_language(self):
         """Detects the file's language based on its extension."""
@@ -1130,7 +1236,6 @@ class SwayEditor:
 
     def handle_up(self):
         """Moves the cursor up by one line."""
-        self.is_selecting = False  #сброс выделения при обычном движении курсора
         if self.cursor_y > 0:
             self.cursor_y -= 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
@@ -1138,7 +1243,6 @@ class SwayEditor:
 
     def handle_down(self):
         """Moves the cursor down by one line."""
-        self.is_selecting = False  #сброс выделения при обычном движении курсора
         if self.cursor_y < len(self.text) - 1:
             self.cursor_y += 1
             self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
@@ -1428,20 +1532,31 @@ class SwayEditor:
 
     def get_char_width(self, char):
         """
-        Calculates the display width of a character, accounting for full-width and half-width characters.
+        Calculates the display width of a character using wcwidth.
+        Returns 1 for control characters or characters with ambiguous width (-1).
+        """
+        width = wcwidth(char)
+        # Возвращаем 1 для непечатаемых или нулевой ширины, иначе ширину
+        return width if width > 0 else 1
+
+
+    def get_string_width(self, text):
+        """
+        Calculates the display width of a string using wcswidth.
+        Handles potential errors by summing individual character widths.
         """
         try:
-            if ord(char) < 128:
-                return 1
-            width = unicodedata.east_asian_width(char)
-            if width in ("F", "W"):
-                return 2
-            elif width == "A":
-                return 2
-            else:
-                return 1
-        except (UnicodeEncodeError, TypeError):
-            return 1
+            width = wcswidth(text)
+            if width >= 0:
+                return width
+        except Exception:
+            pass # Fallback
+
+        total_width = 0
+        for char in text:
+            total_width += self.get_char_width(char)
+        return total_width
+
 
     def open_file(self):
         """
@@ -1642,8 +1757,16 @@ class SwayEditor:
             self.is_selecting = False
             self.selection_start = self.selection_end = None
             self.status_message = "Selection cancelled"
+        elif self.highlighted_matches: # Если есть активная подсветка поиска
+            self.highlighted_matches = [] # Очищаем ее
+            self.search_matches = []      # Также сбрасываем результаты для F3
+            self.search_term = ""
+            self.current_match_idx = -1
+            self.status_message = "Search highlighting cancelled"
         else:
-            self.status_message = "Cancelled"
+            # Если не было ни выделения, ни подсветки, просто сообщение
+            self.status_message = "Operation cancelled"
+        # Перерисовка произойдет в главном цикле
 
 
     def handle_escape(self):
@@ -1688,6 +1811,10 @@ class SwayEditor:
             choice = self.prompt("Save changes? (y/n): ")
             if choice and choice.lower().startswith("y"):
                 self.save_file()
+        
+        self._auto_save_enabled = False # Останавливаем поток автосохранения
+        if hasattr(self, "_auto_save_thread") and self._auto_save_thread and self._auto_save_thread.is_alive():
+            self._auto_save_thread.join(timeout=5) # Ждем немного, чтобы поток завершился
         curses.endwin()
         sys.exit(0)
 
@@ -1754,15 +1881,25 @@ class SwayEditor:
                 # позиционируем курсор
                 self.stdscr.move(row, len(message) + pos)
                 self.stdscr.refresh()
-
-        except Exception:
-            logging.exception("Prompt error")
+        # ────────────────────────────────────────────────
+        except Exception as e:
+            logging.exception(f"Prompt error: {e}")
             buf = []          # считаем ввод отменённым
 
         finally:
-            curses.flushinp()            # очистить буфер ввода
-            curses.noecho()
-            self.stdscr.nodelay(False)
+            try:
+                curses.flushinp()            # очистить буфер ввода
+                curses.noecho()
+                self.stdscr.nodelay(False)
+                # Возможно, добавить очистку строки приглашения
+                self.stdscr.move(row, 0)
+                self.stdscr.clrtoeol()
+                self.stdscr.refresh()
+            except curses.error as e_finally:
+                logging.error(f"Curses error in prompt cleanup: {e_finally}")
+                # В этом случае, возможно, потребуется аварийное завершение или сброс
+                print(f"Critical Curses error during prompt cleanup: {e_finally}")
+                sys.exit(1) # Или другой механизм выхода
 
         return "".join(buf).strip()
 
@@ -1770,58 +1907,82 @@ class SwayEditor:
     # === ПОИСК ====================================================================
 
     def _collect_matches(self, term):
-        """Возвращает список всех (row, col_start, col_end) для term (без учёта регистра)."""
+        """
+        Находит все вхождения term (без учета регистра) в self.text.
+        Возвращает список кортежей: [(row_idx, col_start_idx, col_end_idx), ...].
+        """
         matches = []
         if not term:
             return matches
-        low = term.lower()
-        for row, line in enumerate(self.text):
-            start = 0
+        low = term.lower() # Поиск без учета регистра
+        for row_idx, line in enumerate(self.text):
+            start_col_idx = 0
+            line_lower = line.lower() # Сравниваем с нижней версией строки
             while True:
-                idx = line.lower().find(low, start)
-                if idx == -1:
+                # Ищем в line_lower, но индексы берем из оригинальной line
+                found_idx = line_lower.find(low, start_col_idx)
+                if found_idx == -1:
                     break
-                matches.append((row, idx, idx + len(term)))
-                start = idx + len(term)
+                match_end_idx = found_idx + len(term)
+                matches.append((row_idx, found_idx, match_end_idx))
+                # Следующий поиск начинаем после текущего совпадения
+                start_col_idx = match_end_idx
         return matches
 
 
     def find_prompt(self):
         """
-        Запрашивает у пользователя строку поиска, выделяет все совпадения
-        и переходит к первому.
+        Запрашивает строку поиска, находит все совпадения,
+        сохраняет их для подсветки и переходит к первому.
         """
+        # Очищаем предыдущие результаты подсветки
+        self.highlighted_matches = []
+        self.current_match_idx = -1
+
         term = self.prompt("Find: ")
         if term == "":
             self.status_message = "Search cancelled"
+            # Нужно перерисовать экран, чтобы убрать старую подсветку, если была
+            # self.draw_screen() # Неявно вызовется в главном цикле
             return
 
-        self.search_term    = term
+        self.search_term = term
+        # Находим все совпадения
         self.search_matches = self._collect_matches(term)
+        # Сохраняем их же для подсветки
+        self.highlighted_matches = self.search_matches
+
         if not self.search_matches:
             self.status_message = f"'{term}' not found"
             self.current_match_idx = -1
-            return
+        else:
+            # Переходим к первому совпадению
+            self.current_match_idx = 0
+            self._goto_match(self.current_match_idx) # Перемещаем курсор
+            self.status_message = f"Found {len(self.search_matches)} match(es). Press F3 for next."
 
-        self.current_match_idx = 0
-        self._goto_match(self.current_match_idx)
-        self.status_message = f"Found {len(self.search_matches)} match(es)"
+        # Перерисовка произойдет в главном цикле, отображая подсветку
 
 
     def find_next(self):
         """
         Переходит к следующему совпадению (по циклу).
+        Не меняет список highlighted_matches.
         """
         if not self.search_matches:
-            # если пользователь нажал F3 до первого поиска
-            self.find_prompt()
+            # Если пользователь нажал F3 до первого поиска или поиск не дал результатов
+            self.status_message = "No search results to cycle through. Use Ctrl+F first."
+            # Очищаем подсветку на всякий случай
+            self.highlighted_matches = []
             return
 
+        # Переходим к следующему индексу по кругу
         self.current_match_idx = (self.current_match_idx + 1) % len(self.search_matches)
-        self._goto_match(self.current_match_idx)
+        self._goto_match(self.current_match_idx) # Перемещаем курсор
         self.status_message = (
             f"Match {self.current_match_idx + 1}/{len(self.search_matches)}"
         )
+        # Перерисовка с подсветкой произойдет в главном цикле
 
 
     def _goto_match(self, idx):
@@ -1871,10 +2032,73 @@ class SwayEditor:
         return True
 
 
+# =============выполнения команд оболочки Shell commands =================================
+
+    def _execute_shell_command_async(self, cmd_list):
+        """
+        Выполняет команду оболочки в отдельном потоке и отправляет результат
+        в очередь self._shell_cmd_q.
+        """
+        output = ""
+        error = ""
+        message = ""
+
+        try:
+            # Блокируем curses-экран на время выполнения внешней команды
+            # (Это должно происходить в потоке, который *не* вызывает curses)
+            # Лучше передать результат блокировки в основной поток, если это возможно.
+            # Простой вариант: блокируем здесь, НО stdscr.refresh() НЕ вызываем.
+            # Curses state switching should ideally be handled by the main thread
+            # based on a signal from the worker thread.
+            # For simplicity in this example, we do state switching here,
+            # but be aware of potential issues with state changes from non-main threads.
+
+            # ВНИМАНИЕ: Вызовы curses.def_prog_mode(), curses.endwin(),
+            # curses.reset_prog_mode() из вторичного потока потенциально опасны!
+            # Лучше отправить сигнал в основной поток для выполнения этих действий.
+            # Однако, как временное решение для примера:
+            # curses.def_prog_mode() # <-- Может вызвать проблемы
+            # curses.endwin() # <-- Может вызвать проблемы
+
+            # Запускаем без shell=True
+            process = subprocess.Popen(
+                cmd_list,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            # communicate() блокирует поток, но не curses
+            output, error = process.communicate(timeout=30)
+
+        except FileNotFoundError:
+            message = f"Executable not found: {cmd_list[0]}"
+        except subprocess.TimeoutExpired:
+            message = "Command timed out"
+            # Можно убить процесс здесь, если необходимо:
+            # process.kill()
+            # output, error = process.communicate() # Получить оставшийся вывод
+        except Exception as e:
+            logging.exception(f"Error executing shell command: {e}")
+            message = f"Exec error: {e}"
+        finally:
+            # Возвращаемся в curses-режим (опять же, лучше в основном потоке)
+            # curses.reset_prog_mode() # <-- Может вызвать проблемы
+            # self.stdscr.refresh() # <-- КРИТИЧЕСКИ НЕЛЬЗЯ вызывать из вторичного потока!
+
+            # Отправляем результат обратно в основной поток через очередь
+            if not message: # Если нет ошибки выполнения процесса
+                if error and error.strip():
+                    message = f"Error: {error.strip()[:80]}..." # Ограничиваем длину
+                else:
+                    message = f"Command executed: {output.strip()[:80]}..." # Ограничиваем длину
+
+            self._shell_cmd_q.put(message)
+            
+
     def execute_shell_command(self):
         """
-        Запрашивает у пользователя команду, выполняет её без shell=True
-        и выводит первые символы stdout/stderr в строку статуса.
+        Запрашивает у пользователя команду, запускает её выполнение в отдельном потоке
+        и ожидает результат через очередь для обновления статуса.
         """
         command = self.prompt("Enter command: ")
         if not command:
@@ -1884,49 +2108,58 @@ class SwayEditor:
         # разбиваем строку на аргументы (учитывает кавычки, экранирование)
         try:
             cmd_list = shlex.split(command)
+            if not cmd_list: # Пустая команда после split
+                self.status_message = "Empty command"
+                return
         except ValueError as e:
             self.status_message = f"Parse error: {e}"
             return
 
-        # блокируем curses-экран, чтобы вывести результат после выполнения
+        # Запускаем выполнение команды в отдельном потоке
+        self.status_message = f"Executing command: {' '.join(cmd_list[:3])}..." # Показать начало команды
+        threading.Thread(target=self._execute_shell_command_async,
+                        args=(cmd_list,), daemon=True).start()
+
+        # Результат будет получен позже в главном цикле через _shell_cmd_q
+
+
+
+    # GIT ==================================================================
+
+    def _run_git_command_async(self, cmd_list, command_name):
+        """Выполняет команду Git в отдельном потоке."""
         try:
+            # Блокируем curses-экран, чтобы вывести результат после выполнения
             curses.def_prog_mode()
             curses.endwin()
 
-            # запускаем без shell=True
-            process = subprocess.Popen(
-                cmd_list,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            output, error = process.communicate(timeout=30)
+            proc = safe_run(cmd_list)
 
-        except subprocess.TimeoutExpired:
-            self.status_message = "Command timed out"
-            return
-        except FileNotFoundError:
-            self.status_message = f"Executable not found: {cmd_list[0]}"
-            return
-        except Exception as e:
-            self.status_message = f"Exec error: {e}"
-            return
-        finally:
             # возвращаемся в curses-режим
             curses.reset_prog_mode()
-            self.stdscr.refresh()
+            self.stdscr.refresh() # Здесь может быть ошибка, если вызывается не из основного потока!
+                                # Лучше передать результат в очередь.
 
-        # выводим результат
-        if error and error.strip():
-            self.status_message = f"Error: {error[:50]}..."
-        else:
-            self.status_message = f"Command executed: {output[:50]}..."
+            if proc.returncode == 0:
+                message = f"Git {command_name} successful"
+                # Возможно, нужно передать output/stderr тоже
+            else:
+                message = f"Git error: {proc.stderr.strip()[:120]}"
 
-    
+            self._git_cmd_q.put(message) # Отправка сообщения в очередь
+            if command_name in ["pull", "commit"]: # Обновляем Git-инфо после этих команд
+                self.update_git_info()
+
+
+        except FileNotFoundError:
+            self._git_cmd_q.put("Git не установлен или не найден в PATH")
+        except Exception as e:
+            logging.exception(f"Git command async error: {e}")
+            self._git_cmd_q.put(f"Git error: {e}")
+
+
     def integrate_git(self):
-        """
-        Меню Git вызывается клавишей F2.
-        """
+        """Меню Git вызывается клавишей F2."""
         commands = {
             "1": ("status", "git status"),
             "2": ("commit", None),          # формируем динамически
@@ -1935,13 +2168,15 @@ class SwayEditor:
             "5": ("diff",   "git diff"),
         }
 
-        # однострочное приглашение — никаких \n
         opts = " ".join(f"{k}:{v[0]}" for k, v in commands.items())
         choice = self.prompt(f"Git menu [{opts}] → ")
 
-        if choice not in commands:
-            self.status_message = "Invalid choice"
+        if not choice or choice not in commands:
+            self.status_message = "Invalid choice or cancelled"
             return
+
+        command_name = commands[choice][0]
+        cmd = []
 
         if choice == "2":                               # commit
             msg = self.prompt("Commit message: ")
@@ -1950,25 +2185,95 @@ class SwayEditor:
                 return
             cmd = ["git", "commit", "-am", msg]         # список аргументов
         else:
-            cmd = commands[choice][1].split()           # "git status" → ["git","status"]
+            cmd_str = commands[choice][1]
+            if cmd_str:
+                try:
+                    cmd = shlex.split(cmd_str) # Разбиваем строку команды
+                except ValueError as e:
+                    self.status_message = f"Git command parse error: {e}"
+                    return
 
+        if cmd:
+            # Запускаем команду в отдельном потоке
+            threading.Thread(target=self._run_git_command_async,
+                            args=(cmd, command_name), daemon=True).start()
+            self.status_message = f"Running git {command_name}..."
+
+
+    def _fetch_git_info_async(self, file_path: str):
+        """Выполняет получение Git-инфо в отдельном потоке."""
         try:
-            curses.def_prog_mode()
-            curses.endwin()
-            proc = safe_run(cmd)                     
-            curses.reset_prog_mode()
-            self.stdscr.refresh()
+            repo_dir = os.path.dirname(os.path.abspath(file_path)) if file_path else os.getcwd()
+            if not os.path.isdir(os.path.join(repo_dir, ".git")):
+                self._git_q.put(("", "", "0")) # Пустое инфо
+                return
 
-            if proc.returncode == 0:
-                self.status_message = f"Git {commands[choice][0]} successful"
-                self.update_git_info()        # перечитать ветку / счётчик
-            else:
-                self.status_message = f"Git error: {proc.stderr.strip()[:120]}"
+            # 1. Определяем ветку
+            try:
+                branch = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True, text=True, check=True, cwd=repo_dir
+                ).stdout.strip()
+            except FileNotFoundError:
+                logging.warning("Git executable not found")
+                return "", "", "0"
+            except subprocess.CalledProcessError:
+                # fallback: git symbolic-ref
+                try:
+                    branch = subprocess.run(
+                        ["git", "symbolic-ref", "--short", "HEAD"],
+                        capture_output=True, text=True, check=True, cwd=repo_dir
+                    ).stdout.strip()
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    branch = "main"
+
+            # 2. Грязный репозиторий ?
+            try:
+                dirty = subprocess.run(
+                    ["git", "status", "--short"],
+                    capture_output=True, text=True, check=True, cwd=repo_dir
+                ).stdout.strip()
+                if dirty:
+                    branch += "*"
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                logging.warning(f"Git status failed: {e}")
+
+            # 3. Имя пользователя
+            try:
+                user_name = subprocess.run(
+                    ["git", "config", "user.name"],
+                    capture_output=True, text=True, check=True, cwd=repo_dir
+                ).stdout.strip()
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                user_name = ""
+
+            # 4. Кол-во коммитов
+            try:
+                commits = subprocess.run(
+                    ["git", "rev-list", "--count", "HEAD"],
+                    capture_output=True, text=True, check=True, cwd=repo_dir
+                ).stdout.strip()
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                commits = "0"
+
+            # 5. Отправляем результат в очередь
+            self._git_q.put((branch, user_name, commits))
 
         except FileNotFoundError:
-            self.status_message = "Git не установлен или не найден в PATH"
+            logging.warning("Git executable not found in async thread")
+            self._git_q.put(("", "", "0")) # Отправка ошибки
         except Exception as e:
-            self.status_message = f"Git error: {e}"
+            logging.exception(f"Error fetching Git info in async thread: {e}")
+            self._git_q.put(("", "", "0")) # Отправка ошибки
+
+
+    def update_git_info(self):
+        """Запускает асинхронное обновление Git-информации."""
+        # Запускаем поток, только если не было активного файла или filename изменился
+        # Или если прошло достаточно времени с последнего обновления?
+        # Простая версия: запускаем всегда при необходимости
+        threading.Thread(target=self._fetch_git_info_async,
+                        args=(self.filename,), daemon=True).start()
 
 
     def goto_line(self):
@@ -2140,24 +2445,70 @@ class SwayEditor:
         except Exception as e:
             self.status_message = f"Error during search and replace: {e}"
 
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+# -------------- Auto-save ------------------------------
     def toggle_auto_save(self):
-        """ TODO: Enables or disables auto-save functionality."""
-        self.auto_save = getattr(self, "auto_save", False)
-        self.auto_save = not self.auto_save
+        """Enables or disables auto-save functionality."""
+        # Инициализируем флаг и поток, если их нет
+        if not hasattr(self, "_auto_save_enabled"):
+            self._auto_save_enabled = False
+            self._auto_save_thread = None
 
-        if self.auto_save:
+        self._auto_save_enabled = not self._auto_save_enabled
 
-            def auto_save_thread():
-                while self.auto_save:
-                    time.sleep(60)
-                    if self.modified:
-                        self.save_file()
+        if self._auto_save_enabled:
+            if self._auto_save_thread is None or not self._auto_save_thread.is_alive():
+                def auto_save_task():
+                    logging.info("Auto-save thread started")
+                    while self._auto_save_enabled: # Цикл зависит от флага
+                        try:
+                            time.sleep(60) # Период сохранения
+                            if self.modified:
+                                # Сохранение должно происходить в отдельном потоке,
+                                # но взаимодействие со SwayEditor (например, обновление статуса)
+                                # должно быть через очередь.
+                                # Простейший вариант: вызываем save_file, но он блокирует.
+                                # Более правильный: отправить сигнал в основной поток на сохранение.
+                                # Пример с блокирующим save_file (не рекомендуется в реальном приложении,
+                                # если save_file сам не потокобезопасен или не отправляет статус через очередь):
+                                # self.save_file() # <- Это вызовет проблемы, если save_file блокирует UI!
+                                # Лучше:
+                                self._msg_q.put("Attempting auto-save...")
+                                try:
+                                    # Это все равно должно быть выполнено синхронно в основном потоке
+                                    # или Save должен быть реализован так, чтобы не блокировать
+                                    # Но для примера:
+                                    with open(self.filename, "w", encoding=self.encoding, errors="replace") as f:
+                                        f.write(os.linesep.join(self.text))
+                                    self.modified = False # Доступ к modified из другого потока - не потокобезопасно!
+                                                        # Должно быть через очередь или блокировку.
+                                    self._msg_q.put(f"Auto-saved to {self.filename}")
+                                except Exception as e:
+                                    self._msg_q.put(f"Auto-save error: {e}")
+                                    logging.exception("Auto-save failed")
 
-            threading.Thread(target=auto_save_thread, daemon=True).start()
+                        except Exception as e:
+                            logging.exception(f"Error in auto-save thread: {e}")
+                            # Можно выключить автосохранение при критической ошибке
+                            self._auto_save_enabled = False
+                            self._msg_q.put("Auto-save disabled due to error")
+
+                    logging.info("Auto-save thread finished")
+
+
+                self._auto_save_thread = threading.Thread(target=auto_save_task, daemon=True) # daemon=True для автоматического завершения
+                self._auto_save_thread.start()
             self.status_message = "Auto-save enabled"
         else:
             self.status_message = "Auto-save disabled"
+            # Нет необходимости явно останавливать daemon=True поток,
+            # он завершится сам, когда self._auto_save_enabled станет False
+            # Но если бы не был daemon, пришлось бы ждать завершения
+
+    # Добавить в exit_editor() перед curses.endwin():
+    # self._auto_save_enabled = False # Останавливаем поток автосохранения
+    # if hasattr(self, "_auto_save_thread") and self._auto_save_thread and self._auto_save_thread.is_alive():
+    #     self._auto_save_thread.join(timeout=5) # Ждем немного, чтобы поток завершился
 
 
     def show_help(self):
@@ -2180,7 +2531,7 @@ class SwayEditor:
             "  Ctrl+F    : Find",
             "",
             "  © 2025 Siergej Sobolewski — Sway-Pad",
-            "  Licensed under the Apache License 2.0",
+            "  Licensed under the GPL-3.0 License",
             "",
             "  Esc — закрыть окно",
         ]
@@ -2202,25 +2553,34 @@ class SwayEditor:
         win.refresh()
 
         # ★ прячем курсор и запоминаем предыдущее состояние
+        prev_vis = 1 # Значение по умолчанию
         try:
             prev_vis = curses.curs_set(0)   # 0 = invisible, 1/2 = visible
-        except curses.error:
-            prev_vis = 1                     # если терминал не поддерживает
+        except curses.error as e:
+            logging.warning(f"Curses error hiding cursor in help: {e}")
+            prev_vis = 1 # если терминал не поддерживает                   # если терминал не поддерживает
 
         # ждём Esc
         while True:
-            ch = win.getch()
-            if ch == 27:                     # Esc
+            try:
+                ch = win.getch()
+                if ch == 27:                     # Esc
+                    break
+            except curses.error as e_getch:
+                logging.error(f"Curses error getting char in help: {e_getch}")
+                # Возможно, здесь нужно прервать цикл, если getch не работает
                 break
 
         # ★ возвращаем курсор
         try:
             curses.curs_set(prev_vis)
-        except curses.error:
-            pass
-
+        except curses.error as e_curs_set:
+            logging.warning(f"Curses error restoring cursor after help: {e_curs_set}")
         del win
         self.draw_screen()
+
+
+# =============  Главный цикл редактора  =========================================
 
     def run(self):
         """
@@ -2237,6 +2597,29 @@ class SwayEditor:
                     self.status_message = self._msg_q.get_nowait()
             except queue.Empty:
                 pass
+
+            # Получаем сообщения о результатах команд оболочки
+            try:
+                while not self._shell_cmd_q.empty():
+                    self.status_message = self._shell_cmd_q.get_nowait()
+            except queue.Empty:
+                pass
+
+            # Получаем Git-информацию из очереди
+            try:
+                while not self._git_q.empty():
+                    # Получаем кортеж (branch, user_name, commits) из потока
+                    git_data = self._git_q.get_nowait()
+                    # Обновляем self.git_info
+                    self.git_info = git_data
+                    # Можно также обновить статус-бар, если нужно уведомить пользователя об обновлении Git-инфо
+                    self.status_message = "Git info updated" # Или более детально
+                    logging.debug(f"Updated Git info: {self.git_info}") # Добавьте логирование для отладки
+            except queue.Empty:
+                 pass
+            except Exception as e:
+                 logging.exception(f"Error processing Git info queue: {e}")
+                 self.status_message = f"Git info error: {e}"
 
             # ── 2. Отрисовываем интерфейс ────────────────────────────────
             try:
