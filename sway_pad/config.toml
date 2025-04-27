@@ -71,6 +71,7 @@ page_down    = "pgdn"
 toggle_insert_mode = "insert"
 find       = "ctrl+f"
 find_next  = "f3"
+goto_line = "ctrl+g"
 
 # F-клавиши до F12 распознаются так же:
 build_project   = "f12"
