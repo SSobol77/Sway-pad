@@ -1158,6 +1158,10 @@ class SwayEditor:
             # Логируем только критические события
             logging.debug(f"Key pressed: {key}")
 
+ 
+
+
+
             # === Основная логика обработки клавиш ===
             if key in (curses.KEY_ENTER, 10, 13):     # Enter
                 self.handle_enter()
@@ -1228,6 +1232,10 @@ class SwayEditor:
                 self.extend_selection_up()
             elif key in (self.keybindings["extend_selection_down"], curses.KEY_SF, 336):
                 self.extend_selection_down()         
+            # elif key == 337: # Shift+Page Up
+            #     self.extend_selection_up()
+            # elif key == 336: # Shift+Page Down
+            #     self.extend_selection_down()    
             elif key == self.keybindings["quit"]:          # Ctrl+Q
                 self.exit_editor()
             elif key == self.keybindings["cancel_operation"]:  # Esc
@@ -1367,46 +1375,69 @@ class SwayEditor:
                 })
         self.undone_actions.clear()
 
-
     def handle_tab(self):
-        """Inserts spaces or a tab character depending on configuration."""
-        tab_size = self.config.get("editor", {}).get("tab_size", 4)
-        use_spaces = self.config.get("editor", {}).get("use_spaces", True)
-        current_line = self.text[self.cursor_y]
+            """Inserts spaces or a tab character depending on configuration."""
+            tab_size = self.config.get("editor", {}).get("tab_size", 4)
+            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+            current_line = self.text[self.cursor_y]
 
-        if use_spaces:
-            spaces = " " * tab_size
-            self.text[self.cursor_y] = (
-                current_line[: self.cursor_x] + spaces + current_line[self.cursor_x :]
-            )
-            self.cursor_x += tab_size
-        else:
-            self.text[self.cursor_y] = (
-                current_line[: self.cursor_x] + "\t" + current_line[self.cursor_x :]
-            )
-            self.cursor_x += 1
+            if use_spaces:
+                spaces = " " * tab_size
+                self.text[self.cursor_y] = (
+                    current_line[: self.cursor_x] + spaces + current_line[self.cursor_x :]
+                )
+                self.cursor_x += tab_size
+            else:
+                self.text[self.cursor_y] = (
+                    current_line[: self.cursor_x] + "\t" + current_line[self.cursor_x :]
+                )
+                self.cursor_x += 1
 
-        self.modified = True
+            self.modified = True
 
 
     def handle_smart_tab(self):
         """
         Если курсор в начале строки (cursor_x == 0),
         копирует отступ (пробелы/таб) предыдущей строки.
-        Иначе – падает обратно на handle_tab().
+        Если копирование невозможно или отступ пустой,
+        вставляет стандартный отступ (tab_size или '\t') в начале строки.
+        Иначе (курсор не в начале строки) – вставляет стандартный отступ в текущей позиции.
         """
+        if self.cursor_x > 0:
+            # Если курсор не в начале строки, используем обычный таб в текущей позиции
+            self.handle_tab()
+            return
+
+        # Если курсор в начале строки (self.cursor_x == 0)
+        indentation_to_copy = ""
         if self.cursor_y > 0:
             prev_line = self.text[self.cursor_y - 1]
             m = re.match(r"^(\s*)", prev_line)
-            if m and self.cursor_x == 0:
-                # копируем leading_spaces из prev_line
-                self.text[self.cursor_y] = m.group(1) + self.text[self.cursor_y]
-                self.cursor_x = len(m.group(1))
-                self.modified = True
-                return
-        # иначе – обычный таб
-        self.handle_tab()
+            if m:
+                indentation_to_copy = m.group(1)
 
+        # Если есть НЕПУСТОЙ отступ для копирования, вставляем его
+        if indentation_to_copy:
+            current_line = self.text[self.cursor_y]
+            self.text[self.cursor_y] = indentation_to_copy + current_line
+            self.cursor_x = len(indentation_to_copy)
+            self.modified = True
+        else:
+            # Если нет отступа для копирования (первая строка или предыдущая строка без отступа),
+            # вставляем стандартный таб/пробелы в начале строки
+            tab_size = self.config.get("editor", {}).get("tab_size", 4)
+            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+            current_line = self.text[self.cursor_y]
+
+            # Определяем текст для вставки (пробелы или таб)
+            insert_text = " " * tab_size if use_spaces else "\t"
+
+            self.text[self.cursor_y] = insert_text + current_line
+            self.cursor_x = len(insert_text) # Курсор перемещается в конец вставленного отступа
+            self.modified = True
+
+        
 
 
     def handle_char_input(self, key):
@@ -2016,16 +2047,16 @@ class SwayEditor:
             self.scroll_left = max(0, self.cursor_x - text_width + 1)
 
 
-    def search_text(self, search_term):
-        """
-        Searches for all occurrences of the specified term across all lines
-        of the document and returns a list of matches.
-        """
-        matches = []
-        for line_num, line in enumerate(self.text):
-            for match in re.finditer(re.escape(search_term), line):
-                matches.append((line_num, match.start(), match.end()))
-        return matches
+    # def search_text(self, search_term):
+    #     """
+    #     Searches for all occurrences of the specified term across all lines
+    #     of the document and returns a list of matches.
+    #     """
+    #     matches = []
+    #     for line_num, line in enumerate(self.text):
+    #         for match in re.finditer(re.escape(search_term), line):
+    #             matches.append((line_num, match.start(), match.end()))
+    #     return matches
 
 
     def validate_filename(self, filename):
