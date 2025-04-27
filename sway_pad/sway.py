@@ -327,6 +327,7 @@ class SwayEditor:
             "select_all":  self.parse_key(self.config["keybindings"].get("select_all","ctrl+a")),
             "quit":        self.parse_key(self.config["keybindings"].get("quit",   "ctrl+q")),
             "redo":        self.parse_key(self.config["keybindings"].get("redo",   "ctrl+shift+z")),
+            "goto_line": self.parse_key(self.config["keybindings"].get("goto_line", "ctrl+g")),
             # курсор / выделение
             "extend_selection_right": curses.KEY_SRIGHT,
             "extend_selection_left":  curses.KEY_SLEFT,
@@ -363,6 +364,7 @@ class SwayEditor:
             # ★ Esc-отмена
             "cancel_operation": self.cancel_operation,
             "help": self.show_help,
+            "goto_line": self.goto_line,
         }
 
         # ── финальные инициализации ────────────────────────────────
@@ -890,7 +892,7 @@ class SwayEditor:
         height, width = self.stdscr.getmaxyx()
 
         if self.last_window_size != (height, width):
-            self.visible_lines = height - 1
+            self.visible_lines = height - 2
             self.last_window_size = (height, width)
 
         if height < 5 or width < 20:
@@ -1154,29 +1156,29 @@ class SwayEditor:
             logging.debug(f"Key pressed: {key}")
 
             # === Основная логика обработки клавиш ===
-            if key == curses.KEY_ENTER or key == 10 or key == 13:      # Enter
+            if key in (curses.KEY_ENTER, 10, 13):     # Enter
                 self.handle_enter()
-            elif key == curses.KEY_UP or key == 259 or key == 450:     # Up Arrow
+            elif key in (curses.KEY_UP, 259, 450):     # Up Arrow  
                 self.handle_up()
-            elif key == curses.KEY_DOWN or key == 258 or key == 456:   # Down Arrow
+            elif key in (curses.KEY_DOWN, 258, 456):   # Down Arrow
                 self.handle_down()
-            elif key == curses.KEY_LEFT or key == 260 or key == 452:   # Left Arrow
+            elif key in (curses.KEY_LEFT, 260, 452):   # Left Arrow
                 self.handle_left()
-            elif key == curses.KEY_RIGHT or key == 261 or key == 454:   # Right Arrow
+            elif key in (curses.KEY_RIGHT, 261, 454):   # Right Arrow
                 self.handle_right()
-            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:   # Backspace
+            elif key in (curses.KEY_BACKSPACE, 127, 8):   # Backspace
                 self.handle_backspace()
-            elif key == curses.KEY_DC or key == 330 or key == 462:    # Delete
+            elif key in (curses.KEY_DC, 330, 462):    # Delete
                 self.handle_delete()
-            elif key == curses.KEY_HOME or key == 262 or key == 449:   # Home
+            elif key in (curses.KEY_HOME, 262, 449):   # Home
                 self.handle_home()
-            elif key == curses.KEY_END or key == 360 or key == 455:    # End
+            elif key in (curses.KEY_END, 360, 455):    # End
                 self.handle_end()
-            elif key == curses.KEY_PPAGE or key == 339 or key == 451:  # Page Up
+            elif key in (curses.KEY_PPAGE, 339, 451):  # Page Up
                 self.handle_page_up()
-            elif key == curses.KEY_NPAGE or key == 338 or key == 457:  # Page Down
+            elif key in (curses.KEY_NPAGE, 338, 457):  # Page Down
                 self.handle_page_down()
-            elif key == 9:                                              # Tab
+            elif key == ord('\t'):                                        # Tab
                 self.handle_smart_tab()                                
             elif key == self.keybindings["help"]:                       # F1
                 self.show_help()
@@ -1202,8 +1204,9 @@ class SwayEditor:
                 self.find_prompt()
             elif key == self.keybindings["find_next"]:     # F3
                 self.find_next()
-
-
+            elif key == self.keybindings["goto_line"]:  # Ctrl+G   
+                self.goto_line()
+                
             elif key >= 32 and key <= 255:                 # Printable characters
                 self.handle_char_input(key)
             elif key == self.keybindings["select_all"]:    # Ctrl+A
@@ -1216,10 +1219,10 @@ class SwayEditor:
                 self.select_to_home()
             elif key == curses.KEY_SEND:                   # Shift+End
                 self.select_to_end()
-            elif key == 337:                               # Shift+Page Up
+            elif key in (self.keybindings["extend_selection_up"], curses.KEY_SR, 337):
                 self.extend_selection_up()
-            elif key == 336:                               # Shift+Page Down
-                self.extend_selection_down()           
+            elif key in (self.keybindings["extend_selection_down"], curses.KEY_SF, 336):
+                self.extend_selection_down()         
             elif key == self.keybindings["quit"]:          # Ctrl+Q
                 self.exit_editor()
             elif key == self.keybindings["cancel_operation"]:  # Esc
@@ -1888,13 +1891,12 @@ class SwayEditor:
 
         finally:
             try:
-                curses.flushinp()            # очистить буфер ввода
-                curses.noecho()
-                self.stdscr.nodelay(False)
-                # Возможно, добавить очистку строки приглашения
-                self.stdscr.move(row, 0)
-                self.stdscr.clrtoeol()
-                self.stdscr.refresh()
+                curses.flushinp()          # чистим буфер ввода
+                curses.noecho()            # отключаем эхо
+                self.stdscr.nodelay(False) # возвращаем в «нормальный» режим
+                self.stdscr.move(row, 0)   # возвращаем курсор в начало строки
+                self.stdscr.clrtoeol()     # очищаем строку ввода
+                self.stdscr.refresh()      # очищаем экран
             except curses.error as e_finally:
                 logging.error(f"Curses error in prompt cleanup: {e_finally}")
                 # В этом случае, возможно, потребуется аварийное завершение или сброс
@@ -2024,12 +2026,24 @@ class SwayEditor:
         """
         Validates the filename for length, correctness, and path.
         """
+
         if not filename or len(filename) > 255:
             return False
-        if os.path.isabs(filename):
-            base_dir = os.path.dirname(os.path.abspath(filename))
-            return os.path.commonpath([base_dir, os.getcwd()]) == os.getcwd()
-        return True
+
+        try:
+            # Получаем канонический путь к файлу после разрешения символических ссылок и ..
+            absolute_path = os.path.abspath(filename)
+            # Получаем канонический путь к текущей рабочей директории
+            current_dir = os.path.abspath(os.getcwd())
+
+            # Проверяем, начинается ли абсолютный путь файла с пути текущей директории
+            # Это гарантирует, что файл находится внутри текущей директории или поддиректории
+            return absolute_path.startswith(current_dir + os.sep) or absolute_path == current_dir
+        except Exception as e:
+            logging.error(f"Error validating filename '{filename}': {e}")
+            return False # При любой ошибке валидация считается неуспешной
+        
+
 
 
 # =============выполнения команд оболочки Shell commands =================================
@@ -2277,26 +2291,37 @@ class SwayEditor:
 
 
     def goto_line(self):
-        """
-        Moves the cursor to the specified line number within the document.
-        """
-        line_num = self.prompt("Go to line: ")
+        """Переходит на указанную строку. Поддерживает +N / -N от текущей."""
+        raw = self.prompt("Go to line (±N or %): ")
+        if not raw:
+            self.status_message = "Goto cancelled"
+            return
+
         try:
-            line_num = int(line_num)
-            if 1 <= line_num <= len(self.text):
-                self.cursor_y = line_num - 1
-                self.cursor_x = 0
-                height = self.stdscr.getmaxyx()[0]
-                if self.cursor_y < self.scroll_top:
-                    self.scroll_top = max(0, self.cursor_y - height // 2)
-                elif self.cursor_y >= self.scroll_top + height - 2:
-                    self.scroll_top = min(
-                        len(self.text) - height + 2, self.cursor_y - height // 2
-                    )
+            if raw.endswith('%'):
+                # Процент от длины файла
+                pct = int(raw.rstrip('%'))
+                target = max(1, min(len(self.text), round(len(self.text) * pct / 100)))
+            elif raw.startswith(('+', '-')):
+                # Относительный сдвиг
+                delta = int(raw)
+                target = self.cursor_y + 1 + delta
             else:
-                self.status_message = f"Line number out of range (1-{len(self.text)})"
+                target = int(raw)
         except ValueError:
-            self.status_message = "Invalid line number"
+            self.status_message = "Invalid number"
+            return
+
+        if not (1 <= target <= len(self.text)):
+            self.status_message = f"Line out of range (1–{len(self.text)})"
+            return
+
+        self.cursor_y = target - 1
+        self.cursor_x = 0
+        # Центрируем вид
+        height = self.stdscr.getmaxyx()[0]
+        self.scroll_top = max(0, self.cursor_y - height // 2)
+        self.status_message = f"Moved to line {target}"  # ✓
 
 
     def find_and_replace(self):
