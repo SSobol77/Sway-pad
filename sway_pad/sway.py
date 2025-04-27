@@ -276,6 +276,7 @@ class SwayEditor:
         self.status_message = ""
         self._msg_q = queue.Queue() 
         self.action_history, self.undone_actions = [], []
+        self._state_lock = threading.Lock()
 
         # Очередь для результатов команд оболочки
         self._shell_cmd_q = queue.Queue()
@@ -342,6 +343,7 @@ class SwayEditor:
             # Поиск
             "find":       self.parse_key(self.config["keybindings"].get("find", "ctrl+f")),
             "find_next":  self.parse_key(self.config["keybindings"].get("find_next", "f3")),
+            "find_and_replace": self.parse_key(self.config["keybindings"].get("find_and_replace", "f6")),
             "help": self.parse_key(self.config["keybindings"].get("help", "f1")),
         }
 
@@ -365,6 +367,7 @@ class SwayEditor:
             "cancel_operation": self.cancel_operation,
             "help": self.show_help,
             "goto_line": self.goto_line,
+            "find_and_replace": self.find_and_replace,
         }
 
         # ── финальные инициализации ────────────────────────────────
@@ -1204,9 +1207,11 @@ class SwayEditor:
                 self.find_prompt()
             elif key == self.keybindings["find_next"]:     # F3
                 self.find_next()
+            elif key == self.keybindings["find_and_replace"]:   # Ctrl+R  F6
+                self.find_and_replace()
             elif key == self.keybindings["goto_line"]:  # Ctrl+G   
                 self.goto_line()
-                
+
             elif key >= 32 and key <= 255:                 # Printable characters
                 self.handle_char_input(key)
             elif key == self.keybindings["select_all"]:    # Ctrl+A
@@ -1891,12 +1896,13 @@ class SwayEditor:
 
         finally:
             try:
-                curses.flushinp()          # чистим буфер ввода
-                curses.noecho()            # отключаем эхо
-                self.stdscr.nodelay(False) # возвращаем в «нормальный» режим
-                self.stdscr.move(row, 0)   # возвращаем курсор в начало строки
-                self.stdscr.clrtoeol()     # очищаем строку ввода
-                self.stdscr.refresh()      # очищаем экран
+                curses.flushinp()            # очистить буфер ввода
+                curses.noecho()
+                self.stdscr.nodelay(False)
+                # Возможно, добавить очистку строки приглашения
+                self.stdscr.move(row, 0)
+                self.stdscr.clrtoeol()
+                self.stdscr.refresh()
             except curses.error as e_finally:
                 logging.error(f"Curses error in prompt cleanup: {e_finally}")
                 # В этом случае, возможно, потребуется аварийное завершение или сброс
@@ -2328,27 +2334,36 @@ class SwayEditor:
         """
         Performs find and replace with optional regex support.
         """
-        search_term = self.prompt("Search for: ")
-        if not search_term:
+        search_pattern = self.prompt("Search for (regex): ")
+        if not search_pattern:
+            self.status_message = "Search cancelled"
             return
 
-        replace_term = self.prompt("Replace with: ")
-        if replace_term is None:
+        replace_with = self.prompt("Replace with: ")
+        if replace_with is None:
+            self.status_message = "Replacement cancelled"
             return
 
         try:
-            count = 0
-            for i in range(len(self.text)):
-                new_line = re.sub(search_term, replace_term, self.text[i])
-                if new_line != self.text[i]:
-                    count += len(re.findall(search_term, self.text[i]))
-                    self.text[i] = new_line
-                    self.modified = True
-            self.status_message = f"Replaced {count} occurrences"
+            compiled_pattern = re.compile(search_pattern)
+            replacements = 0
+            with self._state_lock:
+                for idx, line in enumerate(self.text):
+                    new_line, count = compiled_pattern.subn(replace_with, line)
+                    if count > 0:
+                        self.text[idx] = new_line
+                        replacements += count
+
+            if replacements > 0:
+                self.modified = True
+                self.status_message = f"Replaced {replacements} occurrences"
+            else:
+                self.status_message = "No occurrences found"
+
         except re.error as e:
-            self.status_message = f"Invalid regex pattern: {str(e)}"
+            self.status_message = f"Regex error: {str(e)}"
         except Exception as e:
-            self.status_message = f"Error during replace: {str(e)}"
+            self.status_message = f"Unexpected error: {str(e)}"
 
 
     def toggle_insert_mode(self):
