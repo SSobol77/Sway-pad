@@ -4532,7 +4532,7 @@ class SwayEditor:
                 "----------------------------",
                 "",
                 "  © 2025 Siergej Sobolewski — Sway-Pad",
-                "  Licensed under the GPL-3.0 License",
+                "  Licensed under the GPLv3 License",
                 "",
                 "  Press any key to close", # Изменено с Esc
             ]
