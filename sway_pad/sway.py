@@ -347,21 +347,22 @@ class SwayEditor:
 
     def _set_status_message(self, message):
         """
-        Устанавливает сообщение в статус-баре потокобезопасно через очередь.
-        Избегает дубликатов сообщений, используя last_status_message_sent.
+        Ставит статусное сообщение в очередь, избегая дубликатов.
         """
         if not hasattr(self, "_last_status_msg_sent"):
             self._last_status_msg_sent = None
-
         if message == self._last_status_msg_sent:
-            return  # уже было поставлено в очередь, пропускаем
-
+            return
         try:
             self._msg_q.put_nowait(str(message))
             self._last_status_msg_sent = message
             logging.debug(f"Queued status message: {message}")
+        except queue.Full:
+            logging.error("Status message queue is full")
         except Exception as e:
             logging.error(f"Failed to queue status message: {e}")
+
+
 
     def __init__(self, stdscr):
         # ─────────────── Настройка терминала: отключаем IXON/IXOFF и canonical mode ───────────────
@@ -414,7 +415,6 @@ class SwayEditor:
             self._auto_save_interval = 1
 
         self.insert_mode = True
-        self._status_message_queue = queue.Queue()
         self.status_message = ""
         self._msg_q = queue.Queue()
         self.action_history = []
@@ -3092,61 +3092,78 @@ class SwayEditor:
             logging.exception(f"Unexpected error during revert: {self.filename}")
             self.modified = original_modified
 
-
+# -------------- Auto-save ------------------------------
     def toggle_auto_save(self):
         """
-        Включает / выключает автосохранение согласно config.toml.
-        Срабатывает после первого ручного сохранения.
+        Включает или выключает автосохранение.
+        Интервал (в минутах) задаётся через self._auto_save_interval (по умолчанию 5 минут).
+        Сохраняет только если файл назван и есть изменения.
         """
-        interval = self.config.get("settings", {}).get("auto_save_interval", 5)
-
-        # --- валидация ---
-        if not isinstance(interval, (int, float)) or interval < 0:
-            logging.warning(
-                f"Invalid auto_save_interval: {interval}. Defaulting to 1 minute"
-            )
-            interval = 1
-
-        if interval == 0:
+        # Гарантируем поля
+        if not hasattr(self, "_auto_save_enabled"):
             self._auto_save_enabled = False
-            self._set_status_message("Auto‑save disabled (interval = 0)")
-            return
+        if not hasattr(self, "_auto_save_thread"):
+            self._auto_save_thread = None
 
-        self._auto_save_interval = interval          # запоминаем
+        # Получаем интервал из конфига или ставим дефолт
+        try:
+            interval = float(self.config.get("settings", {}).get("auto_save_interval", 5))
+            if interval <= 0:
+                interval = 5
+        except Exception:
+            interval = 5
 
-        # поток уже есть → просто включаем флаг и выходим
-        if getattr(self, "_auto_save_thread", None) and self._auto_save_thread.is_alive():
-            self._auto_save_enabled = True
-            return
+        self._auto_save_interval = interval  # всегда актуальный интервал (минуты)
+        self._auto_save_enabled = not self._auto_save_enabled
 
-        # --- стартуем новый поток ---
-        self._auto_save_enabled = True
-        self._set_status_message(f"Auto‑save every {interval} min")
+        if self._auto_save_enabled:
+            # Запускаем поток автосэйва, если он не работает
+            if self._auto_save_thread is None or not self._auto_save_thread.is_alive():
+                def auto_save_task():
+                    logging.info("Auto-save thread started")
+                    last_saved_text = None
+                    while self._auto_save_enabled:
+                        try:
+                            # Ждём интервал (минуты)
+                            sleep_sec = max(1, int(self._auto_save_interval * 60))
+                            for _ in range(sleep_sec):
+                                if not self._auto_save_enabled:
+                                    break
+                                time.sleep(1)
+                            if not self._auto_save_enabled:
+                                break
 
-        def auto_save_task():
-            logging.debug("Auto‑save thread started")
-            while self._auto_save_enabled:
-                time.sleep(self._auto_save_interval * 60)
+                            # Не сохраняем, если файл не выбран
+                            if not self.filename:
+                                continue
 
-                with self._state_lock:
-                    if not (self.modified and self.filename and self.filename != "noname"):
-                        continue
-                    # копируем данные, чтобы не держать блокировку долго
-                    buf_copy = list(self.text)
-                    filename = self.filename
-                    enc      = self.encoding
+                            current_text = os.linesep.join(self.text)
+                            if self.modified and current_text != last_saved_text:
+                                try:
+                                    with open(self.filename, "w", encoding=self.encoding, errors="replace") as f:
+                                        f.write(current_text)
+                                    last_saved_text = current_text
+                                    self.modified = False
+                                    self._set_status_message(f"Auto-Saved to {self.filename}")
+                                    logging.info(f"Auto-Saved to {self.filename}")
+                                except Exception as e:
+                                    self._set_status_message(f"Auto-save error: {e}")
+                                    logging.exception("Auto-save failed")
+                        except Exception as e:
+                            logging.exception(f"Error in auto-save thread: {e}")
+                            self._auto_save_enabled = False
+                            self._set_status_message("Auto-save disabled due to error")
+                    logging.info("Auto-save thread finished")
 
-                # кладём задание в общую очередь
-                self._msg_q.put(("auto_save", buf_copy, filename, enc))
-                logging.debug("Queued auto‑save job")
-
-        th = threading.Thread(
-            target=auto_save_task,
-            daemon=True,
-            name=f"AutoSave-{int(time.time())}"
-        )
-        th.start()
-        self._auto_save_thread = th
+                self._auto_save_thread = threading.Thread(target=auto_save_task, daemon=True)
+                self._auto_save_thread.start()
+            self.status_message = f"Auto-save enabled (every {self._auto_save_interval} min)"
+            self._set_status_message(self.status_message)
+            logging.info(self.status_message)
+        else:
+            self.status_message = "Auto-save disabled"
+            self._set_status_message(self.status_message)
+            logging.info(self.status_message)
 
 
     def new_file(self) -> None:
@@ -3866,7 +3883,7 @@ class SwayEditor:
         # Результат будет получен позже в главном цикле через _shell_cmd_q
 
 
-    # === GIT ==================================================================
+# === GIT ==================================================================
     def _run_git_command_async(self, cmd_list, command_name):
         """
         Выполняет команду Git в отдельном потоке и отправляет результат в очередь.
@@ -4204,68 +4221,37 @@ class SwayEditor:
                  # logging.debug(f"Git update skipped: filename unchanged ({current_filename}) and git_info not explicitly requested.")
 
 
-    def _process_background_queue(self) -> None:
+    def _handle_git_info(self, git_data):
         """
-        Обрабатывает сообщения от фоновых потоков.
-        Поддерживаемые сообщения:
-            • ('auto_save', lines: List[str], filename: str, encoding: str)
-            • ('general', msg: str) — показать в статус-баре
-            • ('git_info', branch: str, user: str, commits: str) — обновить информацию Git
-        Также любые простые строковые сообщения рассматриваются как общий статус.
+        Обрабатывает и форматирует информацию о git для статус-бара.
+        git_data: tuple (branch, user, commits)
         """
-        while True:
-            try:
-                item = self._msg_q.get_nowait()
-            except queue.Empty:
-                break
+        with self._state_lock:
+            self.git_info = git_data
 
-            # Игнорируем пустые элементы
-            if not item:
-                continue
+        branch, user, commits = git_data
+        git_status_msg = ""
+        if branch or user or commits != "0":
+            # Определяем цвет для Git инфо в статус-баре
+            git_color = self.colors.get("git_info", curses.color_pair(12))
+            if '*' in branch:
+                git_color = self.colors.get("git_dirty", curses.color_pair(13))
+            # Форматируем строку статуса Git
+            git_status_msg = f"Git: {branch}"
+            if commits != "0":
+                git_status_msg += f" ({commits} commits)"
+            # Можно добавить user по желанию:
+            # if user: git_status_msg += f" by {user}"
+            # Удаляем неотображаемые символы
+            git_status_msg = ''.join(c if c.isprintable() else '?' for c in git_status_msg)
+            # Сохраняем статус, можно также отрисовать в статус-бар
+            self.status_message = git_status_msg
+            logging.debug(f"Git status updated: {git_status_msg}")
+        else:
+            self.status_message = "Git: (no repo)"
+            logging.debug("Git status updated: no repo found.")
 
-            # Простое строковое сообщение
-            if isinstance(item, str):
-                self._set_status_message(item)
-                continue
-
-            # Ожидаем tuple-формат сообщений
-            if not isinstance(item, tuple):
-                logging.warning("Unsupported queue item type: %r", item)
-                continue
-
-            kind = item[0]
-
-            # Автосохранение
-            if kind == "auto_save" and len(item) == 4:
-                _, lines, fname, enc = item
-                try:
-                    with self.safe_open(fname, "w", encoding=enc) as f:
-                        f.write(os.linesep.join(lines))
-                    with self._state_lock:
-                        self.modified = False
-                    self._set_status_message("Auto‑saved")
-                    logging.info("Auto‑saved file: %s", fname)
-                except Exception as e:
-                    self._set_status_message(f"Auto‑save error: {e}")
-                    logging.exception("Auto‑save failed for %s", fname)
-
-            # Общие сообщения
-            elif kind == "general" and len(item) == 2:
-                _, msg = item
-                self._set_status_message(msg)
-
-            # Обновление Git-информации
-            elif kind == "git_info" and len(item) == 4:
-                _, branch, user, commits = item
-                with self._state_lock:
-                    self.git_info = (branch, user, commits)
-                # Отображаем короткий статус Git
-                self._set_status_message(f"Git: {branch} ({commits} commits)")
-                logging.debug("Git info updated: %s", self.git_info)
-
-            else:
-                logging.warning("Unknown queue item: %r", item)
-
+#-------------- end GIT ------------------------------------------------------
 
     def goto_line(self):
         """Переходит на указанную строку. Поддерживает +N / -N от текущей."""
@@ -4703,127 +4689,14 @@ class SwayEditor:
             time.sleep(0.005)
 
 
-    def _process_queue(self, q: queue.Queue):
-        """Обрабатывает все сообщения из указанной очереди."""
-        processed_count = 0
-        while True:
-            try:
-                # Получаем сообщение из очереди без блокировки
-                msg = q.get_nowait()
-                processed_count += 1
-
-                # Обработка сообщений из общей очереди (_msg_q) и _shell_cmd_q/_git_cmd_q (просто строки статуса)
-                if isinstance(msg, tuple) and msg[0] == "auto_save":
-                    # Сообщение для автосохранения (приходит из потока автосохранения)
-                    _, text_content, filename, encoding = msg
-                    logging.debug(f"Processing auto_save message for {filename}")
-                    try:
-                        # Выполняем фактическую запись файла в основном потоке
-                        with open(filename, "w", encoding=encoding, errors="replace") as f:
-                            # content = os.linesep.join(text_content) # text_content уже список строк
-                            f.write(os.linesep.join(text_content))
-
-                        # Обновляем флаг modified после успешного сохранения
-                        with self._state_lock:
-                            self.modified = False # Считаем, что файл не изменен после автосохранения
-
-                        # Отправляем подтверждение в статус-бар (через общую очередь)
-                        self._set_status_message(f"Auto-saved to {os.path.basename(filename)}")
-                        logging.info(f"Auto-saved {filename}")
-
-                        # Запускаем асинхронный линтинг после автосохранения
-                        if self._lexer and self._lexer.name in ['python', 'python3']:
-                             threading.Thread(target=self.run_lint_async,
-                                              args=(os.linesep.join(text_content),), # Передаем текст
-                                              daemon=True).start()
-                             logging.debug("Started async linting after auto-save.")
-
-                        # Асинхронно обновляем Git инфо
-                        self.update_git_info()
-                        logging.debug("Requested Git info update after auto-save.")
-
-                    except Exception as e:
-                        # Обработка ошибок при автосохранении файла
-                        error_msg = f"Auto-save error for {os.path.basename(filename)}: {str(e)[:80]}..."
-                        self._set_status_message(error_msg)
-                        logging.exception(f"Auto-save failed for {filename}")
-
-                # Обработка сообщений о результате Shell команд
-                elif q is self._shell_cmd_q:
-                     # Сообщение из очереди Shell команд - это просто строка для статуса
-                    status_msg = str(msg)
-                    logging.debug(f"Processing shell command result: {status_msg}")
-                    # Устанавливаем сообщение статуса. status_message изменяется только в main thread.
-                    self.status_message = status_msg
-
-                # Обработка сообщений о Git информации
-                elif q is self._git_q:
-                     # Сообщение из очереди Git инфо - это кортеж (branch, user, commits)
-                    git_data = msg # ожидаем (branch, user, commits)
-                    logging.debug(f"Processing Git info result: {git_data}")
-                    if isinstance(git_data, tuple) and len(git_data) >= 3:
-                        with self._state_lock: # Обновляем общую переменную под lock
-                            self.git_info = git_data
-
-                        # Формируем сообщение для статус-бара на основе Git инфо
-                        branch, user, commits = git_data
-                        git_status_msg = ""
-                        if branch or user or commits != "0":
-                            # Определяем цвет для Git инфо в статус баре
-                            git_color = self.colors.get("git_info", curses.color_pair(12)) # Дефолтный цвет
-                            # Проверяем, содержит ли ветка '*', чтобы использовать цвет для "dirty"
-                            if '*' in branch:
-                                 git_color = self.colors.get("git_dirty", curses.color_pair(13)) # Цвет для грязного репозитория
-
-                            # Форматируем строку статуса Git
-                            git_status_msg = f"Git: {branch}"
-                            if commits != "0":
-                                 git_status_msg += f" ({commits} commits)"
-                            # if user: # Можно добавить пользователя, если нужно
-                            #      git_status_msg += f" by {user}"
-
-                            # Заменяем символы, которые могут вызвать проблемы в curses (например, непечатаемые)
-                            git_status_msg = ''.join(c if c.isprintable() else '?' for c in git_status_msg)
-                        pass 
-
-                # Обработка сообщений о результате выполнения Git команд
-                elif q is self._git_cmd_q:
-                    # Сообщение из очереди Git команд - это строка для статуса
-                    msg = str(msg)
-                    logging.debug(f"Processing Git command result: {msg}")
-                    if msg == "update_git_info":
-                        # Специальное сообщение для запроса обновления Git инфо
-                        logging.debug("Received 'update_git_info' signal, requesting update.")
-                        self.update_git_info() # Запускаем асинхронное обновление
-                    else:
-                        # Обычное сообщение о результате команды Git
-                        self.status_message = msg # Обновляем статус-бар
-
-                # Общая очередь сообщений (_msg_q) - для любых других сообщений статуса
-                elif q is self._msg_q:
-                     status_msg = str(msg)
-                     logging.debug(f"Processing general message: {status_msg}")
-                     self.status_message = status_msg # Обновляем статус-бар
-
-            except queue.Empty:
-                # Очередь пуста, обработали все доступные сообщения
-                break
-            except Exception as e:
-                # Непредвиденная ошибка при обработке конкретного сообщения
-                logging.exception(f"Error processing message from queue {q}")
-                if not self.status_message.startswith("Error"):
-                    self.status_message = f"Queue msg error: {str(e)[:80]}..."
-
-
-
     def _process_all_queues(self) -> bool:
         """
         Обрабатывает все внутренние очереди сообщений.
-        Возвращает True, если было что-то обработано и требуется перерисовка.
+        Возвращает True, если что-то обработано и требуется перерисовка.
         """
         processed_any = False
 
-        # --- обработка общей очереди сообщений ---
+        # --- общая очередь сообщений (_msg_q) ---
         while True:
             try:
                 msg = self._msg_q.get_nowait()
@@ -4832,7 +4705,6 @@ class SwayEditor:
 
             processed_any = True
 
-            # Проверяем тип сообщения явно
             if isinstance(msg, tuple):
                 msg_type, *msg_data = msg
 
@@ -4845,7 +4717,7 @@ class SwayEditor:
                             self.modified = False
                         self.status_message = f"Auto-saved {os.path.basename(filename)}"
                         logging.info(f"Auto-saved {filename}")
-                        if self._lexer and self._lexer.name in ("python", "python3"):
+                        if self._lexer and getattr(self._lexer, "name", None) in ("python", "python3"):
                             threading.Thread(
                                 target=self.run_lint_async,
                                 args=(os.linesep.join(text_lines),),
@@ -4864,7 +4736,7 @@ class SwayEditor:
                     logging.warning(f"Unknown queue tuple ignored: {msg!r}")
 
             elif isinstance(msg, str):
-                # для совместимости со старыми сообщениями
+                # Поддержка старого формата: просто строка — статус
                 self.status_message = msg
                 logging.debug(f"Set status_message to (legacy): {msg}")
 
@@ -4879,6 +4751,7 @@ class SwayEditor:
                 break
             processed_any = True
             self.status_message = str(result)
+            logging.debug(f"Shell command result set to status: {result}")
 
         # --- очередь обновлённого git_info ---
         while True:
@@ -4888,8 +4761,9 @@ class SwayEditor:
                 break
             processed_any = True
             if isinstance(git_data, tuple) and len(git_data) >= 3:
-                with self._state_lock:
-                    self.git_info = git_data
+                self._handle_git_info(git_data)
+            else:
+                logging.warning(f"Unknown git_data format in _git_q: {git_data!r}")
 
         # --- очередь результатов git-команд ---
         while True:
@@ -4901,8 +4775,10 @@ class SwayEditor:
             text = str(git_msg)
             if text == "update_git_info":
                 self.update_git_info()
+                logging.debug("Git info update requested from git_cmd_q.")
             else:
                 self.status_message = text
+                logging.debug(f"Git command result set to status: {text}")
 
         return processed_any
 
@@ -4924,7 +4800,7 @@ class DrawScreen:
         """Основной метод отрисовки экрана."""
         try:
             # сначала обрабатываем фоновые очереди (auto-save, shell, git и т.п.)
-            self.editor._process_background_queue()
+            self.editor._process_all_queues()
             height, width = self.stdscr.getmaxyx()
 
             # Проверяем минимальный размер окна
