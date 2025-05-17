@@ -363,7 +363,6 @@ class SwayEditor:
             logging.error(f"Failed to queue status message: {e}")
 
 
-
     def __init__(self, stdscr):
         # ─────────────── Настройка терминала: отключаем IXON/IXOFF и canonical mode ───────────────
         try:
@@ -483,8 +482,6 @@ class SwayEditor:
         предупреждает, если TERM/terminfo не отдаёт KEY_Fn, а в конфиге
         всё‑таки прописан 'fN'.
         """
-        import curses, logging
-
         # ── 0. значения по умолчанию ─────────────────────────────────────────────
         defaults = {
             "delete":        "del",
@@ -621,9 +618,7 @@ class SwayEditor:
             return apply_mod(ord(base))
         raise ValueError(f"Unknown key binding: {s!r}")
 
-    #  ──────────────────────────────────────────────────────────
-    #  основной метод
-    #  ──────────────────────────────────────────────────────────
+    # ─────────────────────  Настройка действий по клавишам  ─────────────────────
     def _setup_action_map(self) -> dict[int, Callable[..., Any]]:
         """
         Строит словарь {key_code: bound_method}.
@@ -669,9 +664,7 @@ class SwayEditor:
             "tab": self.handle_smart_tab,
         }
 
-        # -------------------------------------------------------------------
         # 1. пользовательские бинды  (self.keybindings уже содержит int|str)
-        # -------------------------------------------------------------------
         final_map: dict[int, Callable] = {}
         for action, keystr in self.keybindings.items():
             if keystr in (None, ""):
@@ -691,9 +684,7 @@ class SwayEditor:
                 logging.warning("Key '%s' (%r) игнорируется — нет метода '%s'",
                                 keystr, code, action)
 
-        # -------------------------------------------------------------------
         # 2. встроённые «по умолчанию» — только если пользователь НЕ переопределил
-        # -------------------------------------------------------------------
         builtin: dict[int, Callable] = {
             curses.KEY_UP:      self.handle_up,
             curses.KEY_DOWN:    self.handle_down,
@@ -729,20 +720,21 @@ class SwayEditor:
         return final_map
 
 
-    # Функция для проверки кода с помощью Flake8
-    def run_flake8_on_code(self, code_string, filename="<buffer>"):
+    def run_flake8_on_code(self, code_string: str, filename: Optional[str] = "<buffer>") -> None:
         """
-        Запускает Flake8 на code_string через subprocess, возвращает список строк с сообщениями.
-        Результат отправляется в self._msg_q.
+        Запускает анализ Python-кода с помощью Flake8 в отдельном потоке.
+        Результат помещается в очередь self._msg_q для отображения в статус-баре.
+        
+        :param code_string: Исходный код Python для проверки.
+        :param filename: Имя файла (опционально, только для логирования).
         """
-        # Ограничение для больших файлов для производительности
-        if len(code_string.encode('utf-8', errors='replace')) > 1_000_000: # 1MB
-            message = "File is too large for flake8 analysis (max 1MB)"
-            self._set_status_message(message) # Используем безопасную установку статуса
+        # Ограничение для больших файлов — для производительности
+        if len(code_string.encode('utf-8', errors='replace')) > 1_000_000:
+            self._set_status_message("File is too large for flake8 analysis (max 1MB)")
             return
 
-        # Создаём временный файл с .py
-        tmp_name = None
+        tmp_name: Optional[str] = None
+
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', errors='replace') as tmp:
                 tmp_name = tmp.name
@@ -752,24 +744,17 @@ class SwayEditor:
             self._set_status_message("Error creating temp file for flake8")
             return
 
-        def _run_in_thread():
-            """Запускает flake8 в отдельном потоке."""
+        def _run():
             try:
-                # Запускаем flake8 как отдельный процесс
-                # Добавляем "--exit-zero" чтобы flake8 всегда возвращал 0, если только не системная ошибка
-                # Это предотвратит ошибку в subprocess.run(check=True), хотя мы используем check=False
-                # Добавляем "--isolated" чтобы игнорировать локальные файлы flake8
                 cmd = [sys.executable, "-m", "flake8", "--isolated", "--max-line-length=88", tmp_name]
-                logging.debug(f"Running flake8 command: {' '.join(shlex.quote(c) for c in cmd)}")
+                logging.debug(f"Running flake8 command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
 
-                # Используем subprocess.run для простоты, так как нам нужен весь вывод
-                # timeout добавлен для предотвращения зависания на больших/сложных файлах
                 process = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
-                    check=False,  # Не поднимать исключение при ненулевом коде возврата flake8
-                    timeout=20, # Таймаут 20 секунд
+                    check=False,
+                    timeout=20,
                     encoding='utf-8',
                     errors='replace'
                 )
@@ -777,31 +762,29 @@ class SwayEditor:
                 output = process.stdout.strip()
                 stderr = process.stderr.strip()
 
-                # Логгируем stderr, так как там могут быть ошибки запуска flake8
                 if stderr:
                     logging.warning(f"Flake8 stderr for {tmp_name}: {stderr}")
 
                 if not output:
                     message = "Flake8: No issues found."
                 else:
-                    # Ограничиваем количество строк в сообщении статуса
                     lines = output.splitlines()
                     message = f"Flake8 results ({len(lines)}): {lines[0]}"
                     if len(lines) > 1:
-                         message += f" (+ {len(lines) - 1} more...)"
+                        message += f" (+ {len(lines) - 1} more...)"
 
-
-                self._set_status_message(message) # Используем безопасную установку статуса
+                # Передача результата в очередь сообщений редактора
+                self._set_status_message(message)
 
             except FileNotFoundError:
                 self._set_status_message("Flake8: Executable not found (install with 'pip install flake8')")
             except subprocess.TimeoutExpired:
-                 self._set_status_message("Flake8: Command timed out.")
+                self._set_status_message("Flake8: Command timed out.")
             except Exception as e:
                 logging.exception(f"Error running flake8 on code for {tmp_name}: {e}")
                 self._set_status_message(f"Flake8 error: {str(e)[:80]}...")
             finally:
-                # Попытка удалить временный файл
+                # Удаление временного файла
                 if tmp_name and os.path.exists(tmp_name):
                     try:
                         os.remove(tmp_name)
@@ -809,19 +792,19 @@ class SwayEditor:
                     except Exception as e:
                         logging.warning(f"Failed to remove temp file {tmp_name}: {e}")
 
-        # Запускаем в отдельном потоке
-        threading.Thread(target=_run_in_thread, daemon=True).start()
+        # Запуск анализа в отдельном потоке (не блокирует UI)
+        threading.Thread(target=_run, daemon=True).start()
 
 
-    def run_lint_async(self, code):
+    def run_lint_async(self, code: str) -> None:
         """
-        Запускает Flake8 в отдельном потоке и отправляет краткий результат
-        в очередь self._msg_q, чтобы не обращаться к curses из другого потока.
+        Асинхронно запускает flake8-анализ для переданного кода.
+        Результат передаётся в очередь сообщений редактора через self._set_status_message.
+        
+        :param code: Исходный код Python для проверки.
         """
-        # Запускаем в отдельном потоке
-        threading.Thread(target=self.run_flake8_on_code,
-                         args=(code, self.filename),
-                         daemon=True).start()
+        self.run_flake8_on_code(code, self.filename)
+        
 
     def _check_pyclip_availability(self):
         """Проверяет доступность pyperclip и системных утилит для буфера обмена."""
@@ -912,19 +895,29 @@ class SwayEditor:
 
     def cut(self):
         """Вырезает выделенный текст в буфер обмена."""
-        selected_text = self.get_selected_text()
-        if not selected_text:
+        logging.debug(
+            f"CUT CALLED. is_selecting: {self.is_selecting}, "
+            f"selection_start: {self.selection_start}, selection_end: {self.selection_end}"
+        )
+        selected_text_to_cut = self.get_selected_text()
+        
+        logging.debug(
+            f"Cut: get_selected_text() returned: '{selected_text_to_cut}' (len: {len(selected_text_to_cut)}). "
+            f"Selection was: start: {self.selection_start}, end: {self.selection_end}, is_selecting: {self.is_selecting}"
+        )
+
+        if not selected_text_to_cut:
             self._set_status_message("Nothing to cut")
             return
 
         # Копируем во внутренний буфер
-        self.internal_clipboard = selected_text
+        self.internal_clipboard = selected_text_to_cut # Используем новое имя
         message = "Cut to internal clipboard"
 
         # Попытка копирования в системный буфер
         if self.use_system_clipboard and self.pyclip_available:
             try:
-                pyperclip.copy(selected_text)
+                pyperclip.copy(selected_text_to_cut) # Используем новое имя
                 message = "Cut to system clipboard"
                 logging.debug("Cut to system clipboard successfully")
             except pyperclip.PyperclipException as e:
@@ -935,11 +928,7 @@ class SwayEditor:
                  message = "Cut to internal clipboard (system clipboard error)"
 
         # Удаляем текст (эта логика перенесена в handle_delete для унификации)
-        # self.delete_selected_text() # Теперь удаление происходит через handle_delete
-        # Вызываем handle_delete, который увидит выделение и удалит его,
-        # добавив корректное действие в историю.
-        self.handle_delete()
-
+        self.handle_delete() # handle_delete теперь вызовется, так как selected_text_to_cut не был пуст
         self._set_status_message(message)
 
 
@@ -958,18 +947,19 @@ class SwayEditor:
 
         Result: cursor ends **after** pasted text; action history ready for undo/redo.
         """
+        # ── 0. sanity check ────────────────────────────────────────────────
         logging.debug("paste() called – use_system_clipboard=%s, pyclip_available=%s",
                     self.use_system_clipboard, self.pyclip_available)
 
-        text, src = self.internal_clipboard, "internal"
+        text_to_paste, src = self.internal_clipboard, "internal" # Переименовали text
 
         # ── 1. system clipboard ─────────────────────────────────────────
         if self.use_system_clipboard and self.pyclip_available:
             try:
                 sys_text = pyperclip.paste()
                 if sys_text:
-                    text, src = sys_text, "system"
-                    logging.debug("Pasted %s chars from system clipboard", len(text))
+                    text_to_paste, src = sys_text, "system" # Переименовали text
+                    logging.debug("Pasted %s chars from system clipboard", len(text_to_paste))
                 else:
                     logging.debug("System clipboard empty → fallback to internal")
             except pyperclip.PyperclipException as e:
@@ -977,43 +967,47 @@ class SwayEditor:
             except Exception:      # any unforeseen error
                 logging.exception("Unexpected clipboard error – fallback to internal")
 
-        if not text:
+        if not text_to_paste: # Переименовали text
             self._set_status_message("Clipboard is empty")
             return
 
         # ── 2. normalise new‑lines ─────────────────────────────────────
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text_to_paste = text_to_paste.replace("\r\n", "\n").replace("\r", "\n")
 
         # ── 3. handle active selection (delete + history) ─────────────
         if self.is_selecting and self.selection_start and self.selection_end:
+            # Сохраняем координаты выделения перед их возможным изменением или сбросом
+            sel_start_coords = self.selection_start 
+            
             deleted = self.delete_selected_text_internal(
                 *self.selection_start, *self.selection_end
             )
             self.action_history.append({
                 "type": "delete_selection",
                 "text": deleted,
-                "range": (self.selection_start, self.selection_end)
+                "range": (self.selection_start, self.selection_end) 
             })
             self.undone_actions.clear()
-            self.cursor_y, self.cursor_x = self.selection_start
+            # Устанавливаем курсор в начало удаленного выделения
+            self.cursor_y, self.cursor_x = sel_start_coords 
             self.is_selecting = False
             self.selection_start = self.selection_end = None
 
         # ── 4. honour Replace‑mode for single‑line paste ───────────────
         if not self.insert_mode:
             # Count printable cells (≈ columns) in first line only
-            repl_cells = sum(max(wcwidth(c), 0) for c in text.split("\n", 1)[0])
+            repl_cells = sum(max(wcwidth(c), 0) for c in text_to_paste.split("\n", 1)[0])
             for _ in range(repl_cells):
                 if self.cursor_x < len(self.text[self.cursor_y]):
-                    self.delete_char_internal(self.cursor_y, self.cursor_x)
+                    self.delete_char_internal(self.cursor_y, self.cursor_x) 
 
         # ── 5. insert text (insert_text handles history & undo stack) ─
-        self.insert_text(text)
+        self.insert_text(text_to_paste)
 
         # ── 6. finalisation ────────────────────────────────────────────
         self._set_status_message(f"Pasted from {src} clipboard")
         logging.debug("paste() finished: %d chars inserted, cursor at (%s,%s)",
-                    len(text), self.cursor_y, self.cursor_x)
+                    len(text_to_paste), self.cursor_y, self.cursor_x)
 
 
     def extend_selection_right(self):
@@ -1274,8 +1268,6 @@ class SwayEditor:
                          self._set_status_message(f"Redo failed: Position out of bounds for delete_selection")
                          return
 
-                    # Повторяем логику удаления текста из delete_selected_text_internal
-                    # Нормализация для redo не нужна, берем start/end как они были в undo
                     # Удаляем текст
                     if start_y == end_y:
                         # Убедимся, что индексы колонки в пределах строки
@@ -1371,6 +1363,56 @@ class SwayEditor:
         logging.debug("cursor now at (y=%s, x=%s)", self.cursor_y, self.cursor_x)
 
 
+    def insert_text(self, text: str) -> None:
+        """Main public text insertion method: handles selection, writes to history."""
+        if not text:
+            logging.debug("insert_text: empty text, nothing to insert")
+            return
+
+        # 1. If there is a selection, cut it and save to undo
+        if self.is_selecting and self.selection_start and self.selection_end:
+            logging.debug(f"insert_text: deleting selection {self.selection_start}..{self.selection_end}")
+            deleted = self.delete_selected_text_internal(*self.selection_start, *self.selection_end)
+            self.action_history.append({
+                "type": "delete_selection",
+                "text": deleted,
+                "start": self.selection_start,
+                "end": self.selection_end,
+            })
+            self.undone_actions.clear()
+            self.cursor_y, self.cursor_x = self.selection_start
+            self.is_selecting = False
+            self.selection_start = self.selection_end = None
+
+        # 2. Save position before insertion
+        start_y, start_x = self.cursor_y, self.cursor_x
+
+        # 3. Logging BEFORE insertion
+        if 0 <= start_y < len(self.text):
+            logging.debug(f"insert_text: BEFORE insert, line[{start_y}] = {self.text[start_y]!r}")
+        else:
+            logging.debug(f"insert_text: BEFORE insert, invalid start_y={start_y}")
+
+        # 4. Perform insertion
+        self.insert_text_at_position(text, start_y, start_x)
+
+        # 5. Logging AFTER insertion
+        if 0 <= self.cursor_y < len(self.text):
+            logging.debug(f"insert_text: AFTER insert, line[{self.cursor_y}] = {self.text[self.cursor_y]!r}")
+        else:
+            logging.debug(f"insert_text: AFTER insert, invalid cursor_y={self.cursor_y}")
+
+        # 6. Write to history
+        self.action_history.append({
+            "type": "insert",
+            "text": text,
+            "position": (start_y, start_x)
+        })
+        self.undone_actions.clear()
+        self._set_status_message("Text inserted")
+
+
+
     def delete_text_internal(self, start_row: int, start_col: int, end_row: int, end_col: int) -> None:
         """Удаляет текст в диапазоне [start_row, start_col) .. [end_row, end_col)."""
         # Нормализация
@@ -1396,178 +1438,109 @@ class SwayEditor:
             # Обновляем первую строку
             self.text[start_row] = new_first
 
-        self.modified = True
-        # Курсор перемещается вызывающим кодом
+        self.modified = True # Обновляем статус модификации
 
 
-    def insert_text(self, text: str) -> None:
-        """Основная публичная вставка: учитывает выделение, пишет историю."""
-        if not text:
-            return
-
-        # 1. Если есть выделение — вырезаем и запоминаем его для undo
-        if self.is_selecting and self.selection_start and self.selection_end:
-            deleted = self.delete_selected_text_internal(*self.selection_start, *self.selection_end)
-            self.action_history.append({
-                "type": "delete_selection",
-                "text": deleted,
-                "start": self.selection_start,
-                "end": self.selection_end,
-            })
-            self.undone_actions.clear()
-            self.cursor_y, self.cursor_x = self.selection_start
-            self.is_selecting = False
-            self.selection_start = self.selection_end = None
-
-        # 2. Собираем данные для истории ДО вставки
-        start_y, start_x = self.cursor_y, self.cursor_x
-
-        # 3. Выполняем вставку
-        self.insert_text_at_position(text, start_y, start_x)
-
-        # 4. Записываем в историю
-        self.action_history.append({
-            "type": "insert",
-            "text": text,
-            "position": (start_y, start_x)
-        })
-        self.undone_actions.clear()
-        self._set_status_message("Text inserted")
-
-
-
-    def apply_syntax_highlighting_with_pygments(self, lines, line_indices):
+    def apply_syntax_highlighting_with_pygments(self, lines: list[str], line_indices: list[int]):
         """
         Применяет подсветку синтаксиса к списку видимых строк с использованием Pygments.
         Сохраняет кэширование результатов для каждой строки.
-
-        Args:
-            lines (list[str]): Список строк для подсветки (видимые строки).
-            line_indices (list[int]): Индексы строк в self.text для кэширования.
-
-        Returns:
-            list: Список подсвеченных строк, каждая — список кортежей (текст, цвет).
-            Возвращает пустой список для строк, для которых нет кеша.
         """
-        # Инициализируем лексер, если он еще не установлен
         if self._lexer is None:
-             self.detect_language()
-             logging.debug(f"Pygments: Initialized lexer: {self._lexer.name if self._lexer else 'None'}")
+            self.detect_language()
+            logging.debug(f"Pygments apply_syntax: Initialized lexer: {self._lexer.name if self._lexer else 'None'}")
 
+        if self._lexer is None:
+            self.detect_language()
+            logging.debug(f"Pygments apply_syntax: Initialized lexer: {self._lexer.name if self._lexer else 'None'}")
 
+        # (Ваша карта token_color_map остается здесь)
         token_color_map = {
-            # Map Pygments tokens to curses color pairs.
-            # Pair 0 is default (no highlighting). Pairs 1-8 are initialized in init_colors.
-            Token.Keyword: curses.color_pair(2),
-            Token.Keyword.Constant: curses.color_pair(2),
-            Token.Keyword.Declaration: curses.color_pair(2),
-            Token.Keyword.Namespace: curses.color_pair(2),
-            Token.Keyword.Pseudo: curses.color_pair(2),
-            Token.Keyword.Reserved: curses.color_pair(2),
-            Token.Keyword.Type: curses.color_pair(2), # Типы могут быть как Keyword, так и Name
-            Token.Name.Builtin: curses.color_pair(7), # Встроенные функции/константы
-            Token.Name.Function: curses.color_pair(3), # Имена функций
-            Token.Name.Class: curses.color_pair(4),    # Имена классов
-            Token.Name.Decorator: curses.color_pair(5),# Декораторы
-            Token.Name.Exception: curses.color_pair(8) | curses.A_BOLD, # Исключения с жирным шрифтом
-            Token.Name.Variable: curses.color_pair(6), # Имена переменных
-            # Token.Name.Namespace: curses.color_pair(2), # Уже покрыто Keyword.Namespace?
-            Token.Name.Attribute: curses.color_pair(6),# Атрибуты объектов/классов
-            Token.Name.Tag: curses.color_pair(5),      # Теги в HTML/XML
-            Token.Literal.String: curses.color_pair(3),
-            Token.Literal.String.Doc: curses.color_pair(1), # Строки документации (как комментарии?)
-            Token.Literal.String.Interpol: curses.color_pair(3), # Интерполированные строки
-            Token.Literal.String.Escape: curses.color_pair(5), # Экранированные символы
-            Token.Literal.String.Backtick: curses.color_pair(3),
-            Token.Literal.String.Delimiter: curses.color_pair(3),
-            Token.Literal.Number: curses.color_pair(4),
-            # Подтипы чисел могут использовать тот же цвет
-            Token.Literal.Number.Float: curses.color_pair(4),
-            Token.Literal.Number.Hex: curses.color_pair(4),
-            Token.Literal.Number.Integer: curses.color_pair(4),
-            Token.Literal.Number.Oct: curses.color_pair(4),
-            Token.Comment: curses.color_pair(1),
-            Token.Comment.Multiline: curses.color_pair(1),
-            Token.Comment.Preproc: curses.color_pair(1), # Препроцессорные директивы
-            Token.Comment.Special: curses.color_pair(1) | curses.A_BOLD, # Специальные комментарии
-            Token.Operator: curses.color_pair(6),
-            Token.Operator.Word: curses.color_pair(2), # Операторы-слова (and, or, not)
-            Token.Punctuation: curses.color_pair(6),   # Знаки пунктуации
-            Token.Text: curses.color_pair(0),          # Обычный текст (дефолт)
-            Token.Text.Whitespace: curses.color_pair(0), # Пробелы (дефолт)
-            Token.Error: curses.color_pair(8) | curses.A_BOLD, # Ошибки с красным фоном и жирным шрифтом
-            Token.Generic.Heading: curses.color_pair(5) | curses.A_BOLD,
-            Token.Generic.Subheading: curses.color_pair(5),
-            Token.Generic.Deleted: curses.color_pair(8), # Удаленный код (например, в diff)
-            Token.Generic.Inserted: curses.color_pair(4),# Вставленный код
-            Token.Generic.Emph: curses.color_pair(3) | curses.A_BOLD, # Выделенный текст (курсив)
-            Token.Generic.Strong: curses.color_pair(2) | curses.A_BOLD, # Жирный текст
-            Token.Generic.Prompt: curses.color_pair(7),# Промпт в интерактивных сессиях
-            Token.Generic.Output: curses.color_pair(0), # Вывод (дефолт)
+            Token.Keyword: curses.color_pair(2), Token.Keyword.Constant: curses.color_pair(2),
+            Token.Keyword.Declaration: curses.color_pair(2), Token.Keyword.Namespace: curses.color_pair(2),
+            Token.Keyword.Pseudo: curses.color_pair(2), Token.Keyword.Reserved: curses.color_pair(2),
+            Token.Keyword.Type: curses.color_pair(2), Token.Name.Builtin: curses.color_pair(7),
+            Token.Name.Function: curses.color_pair(3), Token.Name.Class: curses.color_pair(4),
+            Token.Name.Decorator: curses.color_pair(5), Token.Name.Exception: curses.color_pair(8) | curses.A_BOLD,
+            Token.Name.Variable: curses.color_pair(6), Token.Name.Attribute: curses.color_pair(6),
+            Token.Name.Tag: curses.color_pair(5), Token.Literal.String: curses.color_pair(3),
+            Token.Literal.String.Doc: curses.color_pair(1), Token.Literal.String.Interpol: curses.color_pair(3),
+            Token.Literal.String.Escape: curses.color_pair(5), Token.Literal.String.Backtick: curses.color_pair(3),
+            Token.Literal.String.Delimiter: curses.color_pair(3), Token.Literal.Number: curses.color_pair(4),
+            Token.Literal.Number.Float: curses.color_pair(4), Token.Literal.Number.Hex: curses.color_pair(4),
+            Token.Literal.Number.Integer: curses.color_pair(4), Token.Literal.Number.Oct: curses.color_pair(4),
+            Token.Comment: curses.color_pair(1), Token.Comment.Multiline: curses.color_pair(1),
+            Token.Comment.Preproc: curses.color_pair(1), Token.Comment.Special: curses.color_pair(1) | curses.A_BOLD,
+            Token.Operator: curses.color_pair(6), Token.Operator.Word: curses.color_pair(2),
+            Token.Punctuation: curses.color_pair(6), Token.Text: curses.color_pair(0),
+            Token.Text.Whitespace: curses.color_pair(0), Token.Error: curses.color_pair(8) | curses.A_BOLD,
+            Token.Generic.Heading: curses.color_pair(5) | curses.A_BOLD, Token.Generic.Subheading: curses.color_pair(5),
+            Token.Generic.Deleted: curses.color_pair(8), Token.Generic.Inserted: curses.color_pair(4),
+            Token.Generic.Emph: curses.color_pair(3) | curses.A_BOLD, Token.Generic.Strong: curses.color_pair(2) | curses.A_BOLD,
+            Token.Generic.Prompt: curses.color_pair(7), Token.Generic.Output: curses.color_pair(0),
         }
-        default_color = curses.color_pair(0) # Дефолтный цвет
+ 
+        default_color = curses.color_pair(0)
+        highlighted_lines_result = []
 
-        highlighted_lines = []
+        for line_content, line_idx_val in zip(lines, line_indices):
+            line_hash = hash(line_content)
+            is_text_lexer_special_case = isinstance(self._lexer, TextLexer)
+            cache_key = (line_idx_val, line_hash, id(self._lexer), is_text_lexer_special_case)
 
-        for line, line_idx in zip(lines, line_indices):
-            # Кэширование результата. Ключ кэша должен учитывать и сам текст строки, и лексер.
-            # Используем sha256 или похожий хеш для надежности, но hash() проще и быстрее.
-            # Добавим versioning/timestamp для кэша, чтобы сбрасывать его при изменении файла?
-            # Пока ограничимся хешем строки и id лексера.
-            line_hash = hash(line)
-            cache_key = (line_idx, line_hash, id(self._lexer)) # Используем line_idx для уникальности даже пустых строк
-
-            # Проверяем кэш
             if cache_key in self._token_cache:
-                highlighted_lines.append(self._token_cache[cache_key])
-                # logging.debug(f"Pygments: Cache hit for line {line_idx}")
+                cached_segments = self._token_cache[cache_key] # Это должно быть list[tuple[str, int]]
+                highlighted_lines_result.append(cached_segments)
+                # Исправляем логгирование для кэша, чтобы соответствовать формату ниже
+                logging.debug(f"Pygments apply_syntax: Cache HIT for line {line_idx_val}. Segments: {[(s[0].replace(chr(9),'/t/'), s[1]) for s in cached_segments if isinstance(s, tuple) and len(s) == 2 and isinstance(s[0], str)]}")
                 continue
-            # logging.debug(f"Pygments: Cache miss for line {line_idx}")
+            
+            logging.debug(f"Pygments apply_syntax: Cache MISS for line {line_idx_val}. Line content: '{line_content}'")
+            current_line_highlighted_segments = [] # Это будет list[tuple[str, int]]
 
-            # Токенизация строки
-            # Добавим обработку исключений на случай проблем с лексером
-            try:
-                tokens = list(lex(line, self._lexer))
-                highlighted = []
+            if isinstance(self._lexer, TextLexer):
+                logging.debug(f"Pygments apply_syntax: Using TextLexer direct passthrough for line {line_idx_val}.")
+                if not line_content:
+                    current_line_highlighted_segments.append(("", default_color))
+                else:
+                    current_line_highlighted_segments.append((line_content, default_color))
+            else: 
+                try:
+                    logging.debug(f"Pygments apply_syntax: Lexing line {line_idx_val} with lexer '{self._lexer.name}': '{line_content}'")
+                    # Убираем stripnl и ensurenl, они не стандартные аргументы lex()
+                    raw_tokens_from_pygments = list(lex(line_content, self._lexer))
+                    logging.debug(f"Pygments apply_syntax: Raw tokens for line {line_idx_val}: {raw_tokens_from_pygments}")
 
-                for token, text_val in tokens:
-                    color = default_color # Начинаем с дефолтного цвета
-                    # Ищем наиболее специфичный токен в мапе
-                    # Итерируем по классам токенов от самого специфичного до общего
-                    ttype = token
-                    while ttype:
-                        if ttype in token_color_map:
-                            color = token_color_map[ttype]
-                            break
-                        ttype = ttype.parent # Переходим к родительскому классу токенов
-                    # Если не нашли в мапе, используем дефолтное color = curses.color_pair(0)
-
-                    highlighted.append((text_val, color))
-
-                # Сохраняем в кэш
-                self._token_cache[cache_key] = highlighted
-                # Ограничение размера кэша. Простейший способ - удалять самый старый (FIFO).
-                # dict в Python 3.7+ сохраняет порядок вставки.
-                if len(self._token_cache) > 2000: # Увеличим размер кэша
-                    # logging.debug("Pygments: Cache size limit reached, clearing oldest entry.")
-                    # Удаляем первый (самый старый) элемент
-                    try:
-                        del self._token_cache[next(iter(self._token_cache))]
-                    except StopIteration:
-                         pass # Словарь пуст
-
-                highlighted_lines.append(highlighted)
-
-            except Exception as e:
-                # Если токенизация упала, логируем ошибку и возвращаем строку без подсветки
-                logging.error(f"Pygments: Error tokenizing line {line_idx}: {e}. Lexer: {self._lexer.name}", exc_info=True)
-                # Возвращаем строку как обычный текст
-                highlighted_lines.append([(line, default_color)])
-                # Возможно, стоит сбросить лексер или попытаться угадать заново?
-                # Для надежности, оставим текущий лексер, чтобы избежать каскадных ошибок.
-
-
-        return highlighted_lines
+                    if not raw_tokens_from_pygments and line_content:
+                        logging.warning(f"Pygments apply_syntax: No tokens returned for non-empty line {line_idx_val}: '{line_content}'. Using default color.")
+                        current_line_highlighted_segments.append((line_content, default_color))
+                    elif not line_content:
+                        current_line_highlighted_segments.append(("", default_color))
+                    else:
+                        for token_type, text_value in raw_tokens_from_pygments:
+                            color_attr = default_color
+                            current_token_type_for_map = token_type
+                            while current_token_type_for_map:
+                                if current_token_type_for_map in token_color_map:
+                                    color_attr = token_color_map[current_token_type_for_map]
+                                    break
+                                current_token_type_for_map = current_token_type_for_map.parent
+                            current_line_highlighted_segments.append((text_value, color_attr))
+                except Exception as e: # Ловим все исключения от lex()
+                    logging.error(f"Pygments apply_syntax: Error tokenizing line {line_idx_val}: '{line_content}'. Error: {e}", exc_info=True)
+                    # При ошибке, вся строка получает дефолтный цвет
+                    current_line_highlighted_segments = [(line_content, default_color)] # Гарантируем list[tuple[str,int]]
+            
+            # Логгируем обработанные сегменты
+            logging.debug(f"Pygments apply_syntax: Processed segments for line {line_idx_val} (lexer '{self._lexer.name if self._lexer else 'None'}'): {[(s[0].replace(chr(9),'/t/'), s[1]) for s in current_line_highlighted_segments if isinstance(s, tuple) and len(s) == 2 and isinstance(s[0], str)]}")
+            
+            self._token_cache[cache_key] = current_line_highlighted_segments # Сохраняем list[tuple[str,int]]
+            if len(self._token_cache) > 2000:
+                try: del self._token_cache[next(iter(self._token_cache))]
+                except StopIteration: pass
+            highlighted_lines_result.append(current_line_highlighted_segments)
+        
+        return highlighted_lines_result
 
 
     def set_initial_cursor_position(self):
@@ -1710,7 +1683,7 @@ class SwayEditor:
 
                 # ── 2. Горячая клавиша из action_map ───────────────────────
                 if isinstance(key, int) and key in self.action_map:
-                    self.action_map[key]()
+                    self.action_map[key]() # Если key = 27, вызовется cancel_operation
                     return
 
                 # ── 3. Спец‑клавиши и навигация ────────────────────────────
@@ -1756,11 +1729,16 @@ class SwayEditor:
                     self.handle_resize()
                 elif key == 268:  # F4 stub
                     self._set_status_message("F4 not implemented")
-                elif isinstance(key, str) and key.startswith("\x1b"):
+                elif isinstance(key, str) and key.startswith("\x1b"): # \x1b это Esc
                     if key == "\x1b[Z":  # Shift-Tab
                         self.handle_smart_tab()
                     else:
-                        self._set_status_message(f"Unhandled escape: {key!r}")
+                        # Если get_wch() вернул "\x1b" как строку (а не int 27),
+                        # то action_map[27] не сработает.
+                        # Сюда попадет одиночный Esc, если он пришел как строка "\x1b"
+                        self._set_status_message(f"Unhandled escape: {key!r}") 
+                elif key == 27: # Это условие может быть избыточным, если 27 уже есть в action_map
+                    self.cancel_operation()
                 elif isinstance(key, int) and 32 <= key < 1114112 and key not in self.action_map:
                     try:
                         ch = chr(key)
@@ -2267,18 +2245,49 @@ class SwayEditor:
         with self._state_lock: # Блокировка для безопасного изменения текста и истории
             if self.is_selecting and self.selection_start and self.selection_end:
                 logging.debug("Delete handling: Deleting selection")
-                # Если есть выделение, удаляем его
-                self.delete_selected_text_internal(*self.selection_start, *self.selection_end)
+                
+                # Сохраняем координаты выделения, так как selection_start может измениться
+                # или быть использовано для установки курсора.
+                # Важно взять их *до* вызова delete_selected_text_internal, если он их меняет,
+                # или если self.selection_start будет сброшен до того, как мы установим курсор.
+                current_selection_start = self.selection_start
+                current_selection_end = self.selection_end
 
-                    # <--- вставить сюда
+                # Если есть выделение, удаляем его
+                deleted_text_lines = self.delete_selected_text_internal(
+                    *current_selection_start, *current_selection_end # Используем сохраненные
+                )
+
+                # Добавляем действие в историю
+                self.action_history.append({
+                    "type": "delete_selection", # или "delete_block"
+                    "text": deleted_text_lines, # Удаленный текст
+                    "start": current_selection_start, # Начало удаленного диапазона
+                    "end": current_selection_end    # Конец удаленного диапазона
+                })
+                self.modified = True
+                
+                # <<< ИСПРАВЛЕНИЕ ЗДЕСЬ >>>
+                # Устанавливаем курсор в начало удаленного выделения
+                self.cursor_y, self.cursor_x = current_selection_start[0], current_selection_start[1]
+                
+                # Сбрасываем состояние выделения
                 self.is_selecting    = False
                 self.selection_start = None
                 self.selection_end   = None
-                self.undone_actions.clear()
-                 # Курсор и выделение уже сброшены и установлены в internal методе
+                self.undone_actions.clear() # Очищаем историю redo
+                self._set_status_message("Selection deleted")
+                logging.debug(f"Deleted selection. Cursor set to {self.cursor_y}, {self.cursor_x}")
+
             else:
                 # Нет выделения, обычный Delete
                 y, x = self.cursor_y, self.cursor_x
+                
+                # Убедимся, что строка существует, прежде чем получать ее длину
+                if y >= len(self.text):
+                    logging.warning(f"Delete: cursor_y {y} is out of bounds for text length {len(self.text)}")
+                    return # Нечего делать
+
                 current_line_len = len(self.text[y])
 
                 if x < current_line_len:
@@ -2294,45 +2303,34 @@ class SwayEditor:
                         "text": deleted_char,
                         "position": (y, x) # Позиция удаленного символа (где стоял курсор)
                     })
+                    self.undone_actions.clear() # Очищаем историю redo
                     logging.debug(f"Delete: Deleted char '{deleted_char}' at ({y}, {x})")
 
 
                 elif y < len(self.text) - 1:
                     # Курсор в конце строки, удаляем перенос строки и объединяем с следующей строкой
                     next_line_idx = y + 1
-                    current_line = self.text[y]
-                    next_line = self.text[next_line_idx]
-
-                    # Сохраняем содержимое следующей строки
-                    content_to_move = next_line
+                    # current_line = self.text[y] # Не используется
+                    next_line_content = self.text[next_line_idx] # Сохраняем содержимое для истории
 
                     # Объединяем строки
-                    self.text[y] += next_line
-                    # Удаляем следующую строку
-                    del self.text[next_line_idx]
+                    self.text[y] += self.text.pop(next_line_idx) # pop удаляет и возвращает элемент
 
                     self.modified = True
-                    # Курсор не сдвигается (остается в конце объединенной строки)
+                    # Курсор не сдвигается (остается в конце объединенной строки y, на позиции x)
 
                     # Добавляем действие в историю (тип delete_newline)
                     self.action_history.append({
                         "type": "delete_newline",
-                        "text": content_to_move, # Сохраняем содержимое удаленной строки
+                        "text": next_line_content, # Содержимое присоединенной строки
                         "position": (y, x) # Позиция, где произошло объединение (конец первой строки)
                     })
+                    self.undone_actions.clear() # Очищаем историю redo
                     logging.debug(f"Delete: Deleted newline and merged line {next_line_idx} into {y}")
                 else:
                     # Последняя строка, курсор в конце - Delete ничего не делает
                     logging.debug("Delete: Cursor at end of file, doing nothing.")
-
-
-            # После любой операции Delete сбрасываем undone_actions
-            # (Если выделение было удалено, internal метод уже сбросил undone_actions)
-            # Убедимся, что сброс происходит один раз
-            if not self.is_selecting:
-                 self.undone_actions.clear()
-                 logging.debug("Delete: Cleared undone_actions")
-
+   
 
     def delete_selected_text_internal(
         self,
@@ -2393,18 +2391,31 @@ class SwayEditor:
         )
         return deleted_lines
 
-
     def handle_tab(self):
-            """Inserts spaces or a tab character depending on configuration."""
-            tab_size = self.config.get("editor", {}).get("tab_size", 4)
-            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
-            current_line = self.text[self.cursor_y]
+        """Inserts spaces or a tab character depending on configuration."""
+        tab_size = self.config.get("editor", {}).get("tab_size", 4)
+        use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+        # current_line = self.text[self.cursor_y] # Не используется, можно убрать
 
-            # Текст для вставки
-            insert_text = " " * tab_size if use_spaces else "\t"
+        # Текст для вставки
+        # Переименована переменная, чтобы не совпадать с именем метода self.insert_text
+        text_to_insert_val = " " * tab_size if use_spaces else "\t" 
 
-            # Используем insert_text для корректного добавления в историю и сброса выделения
-            self.insert_text(insert_text)
+        # Используем insert_text для корректного добавления в историю и сброса выделения
+        self.insert_text(text_to_insert_val)
+        logging.debug(f"handle_tab: Inserted {text_to_insert_val!r} into line {self.cursor_y}, text now: {self.text[self.cursor_y]!r}")
+
+    # def handle_tab(self):
+    #         """Inserts spaces or a tab character depending on configuration."""
+    #         tab_size = self.config.get("editor", {}).get("tab_size", 4)
+    #         use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+    #         current_line = self.text[self.cursor_y]
+
+    #         # Текст для вставки
+    #         insert_text = " " * tab_size if use_spaces else "\t"
+
+    #         # Используем insert_text для корректного добавления в историю и сброса выделения
+    #         self.insert_text(insert_text)
 
 
     def handle_smart_tab(self):
@@ -2461,6 +2472,7 @@ class SwayEditor:
         # Вставляем текст отступа. Используем insert_text для корректной обработки undo
         # insert_text сам добавит действие в историю и сбросит undone_actions
         self.insert_text(insert_text)
+        logging.debug(f"handle_smart_tab: Inserted {insert_text!r} into line {self.cursor_y}, text now: {self.text[self.cursor_y]!r}")
         # Курсор уже установлен в конец вставленного текста в insert_text
 
         logging.debug(f"Smart tab: Inserted indentation {insert_text!r} at line start")
@@ -2593,104 +2605,6 @@ class SwayEditor:
             raise ValueError(f"cannot parse hotkey: {key_str}")
 
 
- 
-    # def parse_key(self, key_str: str) -> int:
-    #     """
-    #     Преобразует строку-описание горячей клавиши в curses-код.
-    #     Поддерживает F1–F12, стрелки, Home/End, PgUp/PgDn, Insert/Delete, Backspace,
-    #     Ctrl+<буква>, Ctrl+Shift+<буква>, Alt+<ключ>, и кириллицу в одиночных символах.
-    #     """
-
-    #     if isinstance(key_str, int):
-    #         return key_str  # поддержка цифрового кода напрямую (например: 19)
-    #     key_str = key_str.strip().lower()
-        
-    #     if not key_str:
-    #         raise ValueError("empty hotkey string")
-    #     key_str = key_str.strip().lower()
-
-    #     # Поддержка terminal_key_mappings
-    #     term = os.environ.get("TERM", "xterm")
-    #     term_mappings = self.config.get("terminal_key_mappings", {}).get(term, {})
-    #     if key_str in term_mappings:
-    #         return self.parse_key(term_mappings[key_str])  # Рекурсивный вызов
-
-    #     # Фиксированные имена curses
-    #     named = {
-    #         "del": getattr(curses, 'KEY_DC', 330),
-    #         "delete": getattr(curses, 'KEY_DC', 330),
-    #         "backspace": getattr(curses, 'KEY_BACKSPACE', 127),
-    #         "tab": ord("\t"),
-    #         "enter": ord("\n"),
-    #         "space": ord(" "),
-    #         "esc": 27,
-    #         "escape": 27,
-    #         "up": getattr(curses, 'KEY_UP', 259),
-    #         "down": getattr(curses, 'KEY_DOWN', 258),
-    #         "left": getattr(curses, 'KEY_LEFT', 260),
-    #         "right": getattr(curses, 'KEY_RIGHT', 261),
-    #         "home": getattr(curses, 'KEY_HOME', 262),
-    #         "end": getattr(curses, 'KEY_END', 360),
-    #         "pageup": getattr(curses, 'KEY_PPAGE', 339),
-    #         "pgup": getattr(curses, 'KEY_PPAGE', 339),
-    #         "pagedown": getattr(curses, 'KEY_NPAGE', 338),
-    #         "pgdn": getattr(curses, 'KEY_NPAGE', 338),
-    #         "insert": getattr(curses, 'KEY_IC', 331),
-    #         "shift+pgup": 337,
-    #         "shift+pgdn": 336,
-    #     }
-    #     named.update({f"f{i}": getattr(curses, f"KEY_F{i}", 265 + i - 1) for i in range(1, 13)})
-    #     named = {k: v for k, v in named.items() if v is not None}
-
-    #     # Alt+<ключ>
-    #     if key_str.startswith("alt+"):
-    #         try:
-    #             base_key = self.parse_key(key_str[4:])
-    #             if isinstance(base_key, int) and (base_key < 256 or base_key in named.values()):
-    #                 return base_key | 0x200
-    #             raise ValueError(f"unsupported base key for Alt combination: {key_str[4:]}")
-    #         except ValueError as e:
-    #             raise ValueError(f"cannot parse Alt combination '{key_str}': {e}")
-
-    #     # Ctrl и Ctrl+Shift
-    #     parts = key_str.split("+")
-    #     if len(parts) >= 2 and parts[0] == "ctrl":
-    #         is_shift = parts[1].lower() == "shift"
-    #         char_part_index = 2 if is_shift else 1
-
-    #         if len(parts) != (3 if is_shift else 2):
-    #             raise ValueError(f"incorrect format for Ctrl/Ctrl+Shift combination: {key_str}")
-
-    #         if char_part_index >= len(parts):
-    #             raise ValueError(f"missing character part in Ctrl/Ctrl+Shift combination: {key_str}")
-
-    #         ch_str = parts[char_part_index]
-    #         if len(ch_str) == 1:
-    #             # Поддержка кириллицы и латиницы
-    #             if ch_str.isalpha() or ('а' <= ch_str <= 'я') or ('А' <= ch_str <= 'Я'):
-    #                 ch_ord = ord(ch_str.lower())
-    #                 # Для кириллицы используем нестандартные коды (например, 0x400 + offset)
-    #                 if 'а' <= ch_str.lower() <= 'я':
-    #                     base_code = 0x400 + (ch_ord - ord('а'))
-    #                 else:
-    #                     base_code = ch_ord - ord('a') + 1
-    #                 return base_code | (0x100 if is_shift else 0)
-    #             raise ValueError(f"unsupported Ctrl/Ctrl+Shift combination character: {ch_str}")
-
-    #     # Именованные клавиши
-    #     if key_str in named:
-    #         return named[key_str]
-
-    #     # Одиночные символы (включая кириллицу)
-    #     if len(key_str) == 1:
-    #         ch_ord = ord(key_str)
-    #         if 32 <= ch_ord <= 126 or ('а' <= key_str <= 'я') or ('А' <= key_str <= 'Я'):
-    #             return ch_ord
-    #         raise ValueError(f"unsupported single character: {key_str}")
-
-    #     raise ValueError(f"cannot parse hotkey: {key_str}")
-
-
     def get_char_width(self, char):
         """
         Calculates the display width of a character using wcwidth.
@@ -2769,34 +2683,36 @@ class SwayEditor:
             logging.error(f"Failed to safe_open file {filename!r} in mode {mode!r}: {e}")
             raise
 
-
-    def open_file(self, filename=None):
+#=============== Open file ============================
+    def open_file(self, filename: str = None) -> None:
         """
-        Открывает файл, определяет его кодировку и загружает содержимое.
-        Отображает сообщение об ошибке в статус-баре при неудаче.
-        Предлагает сохранить изменения перед открытием, если файл изменен.
+        Opens a file, detects its encoding, and loads its contents.
+        Shows an informative status message on error.
+        Prompts to save unsaved changes before opening a new file.
         """
         logging.debug("open_file called")
-        try:      
-            # ── 0. Проверяем, есть ли несохраненные изменения ─────────────
+
+        try:
+            # 1. Prompt to save unsaved changes
             if self.modified:
-                if (ans := self.prompt("Save changes? (y/n): ")).lower().startswith("y"):
+                ans = self.prompt("Save changes? (y/n): ")
+                if ans and ans.lower().startswith("y"):
                     self.save_file()
 
-                if self.modified and not (ans.lower().startswith("y") if ans else False):
-                    self._set_status_message("Open cancelled")
+                if self.modified and not (ans and ans.lower().startswith("y")):
+                    self._set_status_message("Open cancelled due to unsaved changes")
                     logging.debug("Open file cancelled due to unsaved changes")
                     return
 
-            # ── 1. Запрашиваем имя файла, если не задано ─────────────────────
+            # 2. Get filename if not provided
             if not filename:
                 filename = self.prompt("Enter file name to open: ")
-            if not filename: # Пользователь отменил ввод (нажал Esc или Enter без ввода)
+            if not filename:
                 self._set_status_message("Open cancelled")
                 logging.debug("Open file cancelled: no filename provided")
                 return
 
-            # ── 2. Санк-проверки имени файла и его существования ───────────
+            # 3. Validate filename and permissions
             if not self.validate_filename(filename):
                 self._set_status_message("Invalid filename or path")
                 logging.warning(f"Open file failed: invalid filename {filename}")
@@ -2814,126 +2730,103 @@ class SwayEditor:
                 logging.warning(f"Open file failed: no read permissions {filename}")
                 return
 
-            # ── 3. Читаем файл и определяем кодировку ────────────────────
+            # 4. Try to detect encoding and read file
+            sample_size = 1024 * 10  # 10KB
             try:
-                # Читаем немного данных в бинарном режиме для определения кодировки
-                # Читаем больше данных для более точного определения
-                sample_size = 1024 * 10 # 10KB
-                raw_data = b""
                 with self.safe_open(filename, mode="rb") as f:
-                    raw_data = f.read(sample_size) # Читаем только часть для определения
-
-                # Определяем кодировку
+                    raw_data = f.read(sample_size)
                 detected = chardet.detect(raw_data)
-                encoding = detected["encoding"]
-                confidence = detected["confidence"]
+                encoding = detected.get("encoding")
+                confidence = detected.get("confidence", 0)
                 logging.debug(f"Chardet detected encoding '{encoding}' with confidence {confidence} for {filename}")
-
-                # Если уверенность низкая или кодировка None, пытаемся угадать или используем UTF-8
-                if not encoding or confidence < 0.5:
-                    logging.warning(f"Low confidence ({confidence}) or None encoding detected for {filename}. Trying utf-8 then latin-1.")
-                    # Попытка прочитать как UTF-8, затем как Latin-1, затем fallback на errors='replace'
-                    tried_encodings = ["utf-8", "latin-1"] # Порядок имеет значение
-                    decoded_success = False
-                    for enc in tried_encodings:
-                        try:
-                            with self.safe_open(filename, mode="r", encoding=enc, errors="strict") as f:
-                                lines = f.read().splitlines()
-                                self.text = lines if lines else [""]
-                            encoding = enc # Успешно прочитали с этой кодировкой
-                            decoded_success = True
-                            logging.debug(f"Successfully read {filename} with encoding {enc}")
-                            break # Выходим из цикла по кодировкам
-                        except (UnicodeDecodeError, OSError) as e:
-                            logging.debug(f"Failed to read {filename} with encoding {enc}: {e}")
-                            lines = None # Очищаем lines на случай ошибки
-
-                    if not decoded_success:
-                        # Если все строгие попытки провалились, читаем с errors='replace'
-                        logging.warning(f"Strict decoding failed for {filename}. Reading with errors='replace'.")
-                        try:
-                            with self.safe_open(filename, mode="r", encoding="utf-8", errors="replace") as f:
-                                lines = f.read().splitlines()
-                                self.text = lines if lines else [""]
-                            encoding = "utf-8" # Считаем, что использовали UTF-8 (с заменой ошибок)
-                        except Exception as e_fallback:
-                            # Даже с errors='replace' может быть ошибка (например, проблемы с файлом)
-                            self._set_status_message(f"Error reading {filename}: {str(e_fallback)[:80]}...")
-                            logging.exception(f"Final fallback read failed for {filename}")
-                            self.text = [""] # Пустой текст при ошибке
-                            self.filename = None # Не смогли открыть, сбрасываем имя
-                            self._lexer = TextLexer() # Сбрасываем лексер
-                            self.set_initial_cursor_position()
-                            self.modified = False
-                            return # Не удалось открыть, выходим
-                else: # Если chardet уверен, читаем с определенной кодировкой
-                    try:
-                        with self.safe_open(filename, mode="r", encoding=encoding, errors="replace") as f:
-                            lines = f.read().splitlines()
-                            self.text = lines if lines else [""]
-                        logging.debug(f"Successfully read {filename} with detected encoding {encoding}")
-                    except Exception as e_detected:
-                        # Если чтение с определенной кодировкой упало, пробуем UTF-8 с replace
-                        logging.warning(f"Failed to read {filename} with detected encoding {encoding}: {e_detected}. Trying utf-8 with errors='replace'.")
-                        try:
-                            with self.safe_open(filename, mode="r", encoding="utf-8", errors="replace") as f:
-                                lines = f.read().splitlines()
-                                self.text = lines if lines else [""]
-                            encoding = "utf-8" # Используем UTF-8 с заменой
-                            logging.debug(f"Successfully read {filename} with utf-8 errors='replace'")
-                        except Exception as e_fallback2:
-                            self._set_status_message(f"Error reading {filename}: {str(e_fallback2)[:80]}...")
-                            logging.exception(f"Final fallback read failed for {filename}")
-                            self.text = [""]
-                            self.filename = None
-                            self._lexer = TextLexer()
-                            self.set_initial_cursor_position()
-                            self.modified = False
-                            return
-
-                # ── 4. Обновляем состояние редактора ────────────────────────
-                self.filename = filename
-                self.modified = False
-                self.encoding = encoding # Сохраняем фактически использованную кодировку
-                self.set_initial_cursor_position() # Сброс курсора, прокрутки, выделения, поиска
-                # self.is_selecting = False # Уже в set_initial_cursor_position
-                # self.selection_start = self.selection_end = None # Уже в set_initial_cursor_position
-                self.action_history.clear() # Очищаем историю undo для нового файла
-                self.undone_actions.clear() # Очищаем историю redo
-                self._set_status_message(f"Opened {os.path.basename(filename)} (Encoding: {encoding})")
-                logging.debug(f"Opened file: {filename}, encoding: {encoding}, lines: {len(self.text)}")
-
-                # Обновляем подсветку и Git инфо для нового файла
-                self._lexer = None # Сбрасываем лексер, чтобы он определился заново по имени файла
-                self.detect_language()
-                # Асинхронно обновляем Git информацию
-                self.update_git_info()
-                # Запускаем асинхронный линтинг (если применимо)
-                if self._lexer and self._lexer.name in ['python', 'python3']: # Ограничиваем линтинг Python
-                    self.run_lint_async(os.linesep.join(self.text)) # Передаем текст как строку
-
-                # Включаем автосохранение, если файл открыт (и если оно разрешено в конфиге)
-                # toggle_auto_save сам проверит конфиг и запустит поток
-                self.toggle_auto_save()
-
             except Exception as e:
-                # Любая другая неожиданная ошибка при открытии файла
-                self._set_status_message(f"Error opening {os.path.basename(filename)}: {str(e)[:80]}...")
-                logging.exception(f"Unexpected error opening file: {filename}")
-                # Сбрасываем состояние, как при неудачном чтении
-                self.text = [""]
-                self.filename = None
-                self._lexer = TextLexer()
-                self.set_initial_cursor_position()
-                self.modified = False
+                self._set_status_message(f"Failed to read file sample: {e}")
+                logging.exception(f"Failed to read file sample for encoding detection: {filename}")
+                return
 
-            self._set_status_message("File opened")
+            # 5. Try to open file with detected or fallback encoding
+            lines = None
+            if not encoding or confidence < 0.5:
+                logging.warning(
+                    f"Low confidence ({confidence}) or unknown encoding detected for {filename}. Trying UTF-8 then Latin-1."
+                )
+                tried_encodings = ["utf-8", "latin-1"]
+                for enc in tried_encodings:
+                    try:
+                        with self.safe_open(filename, mode="r", encoding=enc, errors="strict") as f:
+                            lines = f.read().splitlines()
+                            encoding = enc
+                            logging.debug(f"Successfully read {filename} with encoding {enc}")
+                            break
+                    except (UnicodeDecodeError, OSError) as e:
+                        logging.debug(f"Failed to read {filename} with encoding {enc}: {e}")
+                if lines is None:
+                    try:
+                        with self.safe_open(filename, mode="r", encoding="utf-8", errors="replace") as f:
+                            lines = f.read().splitlines()
+                            encoding = "utf-8"
+                            logging.warning(f"Read {filename} with utf-8 and errors='replace'")
+                    except Exception as e_fallback:
+                        self._set_status_message(f"Error reading {filename}: {e_fallback}")
+                        logging.exception(f"Final fallback read failed for {filename}")
+                        self.text = [""]
+                        self.filename = None
+                        self._lexer = TextLexer()
+                        self.set_initial_cursor_position()
+                        self.modified = False
+                        return
+            else:
+                try:
+                    with self.safe_open(filename, mode="r", encoding=encoding, errors="replace") as f:
+                        lines = f.read().splitlines()
+                    logging.debug(f"Successfully read {filename} with detected encoding {encoding}")
+                except Exception as e_detected:
+                    logging.warning(f"Failed to read {filename} with detected encoding {encoding}: {e_detected}. Trying utf-8 with errors='replace'.")
+                    try:
+                        with self.safe_open(filename, mode="r", encoding="utf-8", errors="replace") as f:
+                            lines = f.read().splitlines()
+                            encoding = "utf-8"
+                            logging.debug(f"Successfully read {filename} with utf-8 errors='replace'")
+                    except Exception as e_fallback2:
+                        self._set_status_message(f"Error reading {filename}: {e_fallback2}")
+                        logging.exception(f"Final fallback read failed for {filename}")
+                        self.text = [""]
+                        self.filename = None
+                        self._lexer = TextLexer()
+                        self.set_initial_cursor_position()
+                        self.modified = False
+                        return
+
+            # 6. Update editor state after successful file opening
+            self.text = lines if lines else [""]
+            self.filename = filename
+            self.modified = False
+            self.encoding = encoding or "utf-8"
+            self.set_initial_cursor_position()
+            self.action_history.clear()
+            self.undone_actions.clear()
+            self._set_status_message(f"Opened {os.path.basename(filename)} (encoding: {self.encoding})")
+            logging.debug(f"Opened file: {filename}, encoding: {self.encoding}, lines: {len(self.text)}")
+
+            # Reset lexer, language, git info, and trigger async lint if needed
+            self._lexer = None
+            self.detect_language()
+            self.update_git_info()
+            if self._lexer and getattr(self._lexer, "name", "").lower() in ['python', 'python3']:
+                self.run_lint_async(os.linesep.join(self.text))
+            self.toggle_auto_save()
+
         except Exception as e:
-            logging.error(f"Error in open_file: {e}", exc_info=True)
-            self._set_status_message("Open file error (see log)")     
+            self._set_status_message(f"Error opening file: {e}")
+            logging.exception(f"Unexpected error opening file: {filename}")
+            self.text = [""]
+            self.filename = None
+            self._lexer = TextLexer()
+            self.set_initial_cursor_position()
+            self.modified = False
 
 
-    #================= SAVE_FILE ================================= 
+#================= SAVE_FILE ================================= 
     def save_file(self):
         """
         Сохраняет текущий документ.
@@ -3401,15 +3294,22 @@ class SwayEditor:
 
                 try:
                     key = self.stdscr.get_wch()
+                    logging.debug(f"Prompt: get_wch() returned: {repr(key)} (type: {type(key)})")
                 except curses.error as e:
-                    logging.error(f"Ошибка ввода (get_wch()): {e}")
+                    logging.error(f"Ошибка ввода (get_wch()) в prompt: {e}") # Было "Ошибка ввода (get_wch()): {e}"
+                    if 'no input' in str(e).lower() or (isinstance(key, int) and key == curses.ERR): # Добавил isinstance для key
+                        logging.warning(f"Prompt: get_wch() timed out or returned ERR. Message: '{message}'")
+                        return None 
                     return None
 
-                if key in ("\n", "\r", curses.KEY_ENTER):
+                if key == 27 or key == '\x1b': # Проверяем и int 27, и строку '\x1b'
+                    logging.debug(f"Prompt: Esc detected (key={repr(key)}). Cancelling.")
+                    return None
+                
+                if key in ("\n", "\r", curses.KEY_ENTER, 10, 13): # Добавил 10 и 13 для надежности
+                    logging.debug(f"Prompt: Enter detected (key={repr(key)}). Returning buffer.")
                     return "".join(buf).strip()
-                if key == 27:
-                    return None
-
+                
                 if key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
                     if pos > 0:
                         pos -= 1; buf.pop(pos)
@@ -3563,15 +3463,7 @@ class SwayEditor:
         # Используем блокировку только для доступа к self.text
         with self._state_lock:
             # Делаем копию ссылок на строки, чтобы блокировка не держалась долго
-            # Но сами строки могут измениться, если другой поток получит блокировку
-            # в короткий промежуток времени.
-            # Лучше работать с текстом под блокировкой, но быстро.
-            # Или сделать копию текста, но это может занять много памяти.
-            # При текущей архитектуре, where only main thread modifies text directly,
-            # access under the lock should be fine for a quick read.
-            # If async modification was allowed, a copy would be needed.
             text_snapshot = list(self.text) # Копируем список строк
-
         # Выполняем поиск на снапшоте без блокировки
         for row_idx, line in enumerate(text_snapshot):
             start_col_idx = 0
@@ -4910,79 +4802,116 @@ class DrawScreen:
     def _draw_text_with_syntax_highlighting(self):
         """Рисует текст с синтаксической подсветкой."""
         height, width = self.stdscr.getmaxyx()
-        # Ширина области текста, рассчитанная в _draw_line_numbers
-        text_area_width = max(1, width - self._text_start_x)
+        # text_area_width не используется напрямую в этой версии, но полезен для понимания
+        # text_area_width = max(1, width - self._text_start_x) 
 
         start_line = self.editor.scroll_top
         end_line = min(start_line + self.editor.visible_lines, len(self.editor.text))
-        visible_lines = self.editor.text[start_line:end_line]
+
+        if start_line >= end_line:
+            logging.debug("DrawScreen draw_text: No visible lines to draw.")
+            return
+
+        visible_lines_content = self.editor.text[start_line:end_line]
         line_indices = list(range(start_line, end_line))
 
-        # Получаем подсвеченные токены для видимых строк
-        highlighted_lines_tokens = self.editor.apply_syntax_highlighting_with_pygments(visible_lines, line_indices)
+        logging.debug(
+            f"DrawScreen draw_text: Drawing lines {start_line}-{end_line-1}. "
+            f"scroll_left={self.editor.scroll_left}, text_start_x={self._text_start_x}, total_window_width={width}"
+        )
 
-        # Итерируем по видимым строкам и их токенам
-        for screen_row, (text_line_index, highlighted_tokens) in enumerate(zip(line_indices, highlighted_lines_tokens)):
-            current_screen_x = self._text_start_x # Начальная позиция по X для текста (после номеров строк)
-            char_col_index = 0 # Индекс символа в оригинальной строке (для горизонтальной прокрутки)
+        # highlighted_lines_tokens это list[list[tuple[str, int]]]
+        # Внешний список - по строкам, внутренний - по токенам в строке, кортеж - (текст_токена, атрибут_цвета)
+        highlighted_lines_tokens = self.editor.apply_syntax_highlighting_with_pygments(visible_lines_content, line_indices)
 
-            # Итерируем по токенам в строке
-            for text_val, color in highlighted_tokens:
-                 # Итерируем по символам в токене, учитывая их ширину и горизонтальную прокрутку
-                token_chars = list(text_val)
-                token_display_width = self.editor.get_string_width(text_val)
+        for screen_row, (text_line_index, tokens_for_this_line) in enumerate(zip(line_indices, highlighted_lines_tokens)):
+            
+            original_line_text_for_log = self.editor.text[text_line_index]
+            logging.debug(
+                f"  DrawScreen draw_text: Line {text_line_index} (screen_row {screen_row}), "
+                f"Original content: '{original_line_text_for_log[:70].replace(chr(9), '/t/')}{'...' if len(original_line_text_for_log)>70 else ''}'"
+            )
+            # Логгируем токены, которые пришли для этой строки
+            logging.debug(
+                f"    DrawScreen draw_text: Tokens for line {text_line_index}: "
+                f"{[(token_text.replace(chr(9), '/t/'), token_attr) for token_text, token_attr in tokens_for_this_line if isinstance(token_text, str)]}"
+            )
+            # logical_char_col_abs - суммарная *логическая ширина* (от wcwidth) символов от начала строки
+            logical_char_col_abs = 0 
+            
+            for token_index, (token_text_content, token_color_attribute) in enumerate(tokens_for_this_line):
+                logging.debug(
+                    f"      DrawScreen draw_text: Token {token_index}: text='{token_text_content.replace(chr(9),'/t/')}', attr={token_color_attribute}"
+                )
+                if not token_text_content: # Пропускаем пустые токены, если такие есть
+                    logging.debug("        DrawScreen draw_text: Skipping empty token.")
+                    continue
 
-                # Рассчитываем, какая часть токена видна после горизонтальной прокрутки
-                visible_token_chars = ""
-                chars_to_skip = 0 # Количество символов токена, которые нужно пропустить из-за scroll_left
+                for char_index_in_token, char_to_render in enumerate(token_text_content):
+                    char_printed_width = self.editor.get_char_width(char_to_render)
+                    
+                    # Логгируем информацию о символе ДО обработки его ширины
+                    logging.debug(
+                        f"        DrawScreen draw_text: Char '{char_to_render.replace(chr(9),'/t/')}' (idx_in_token {char_index_in_token}), "
+                        f"current_logical_col_abs_BEFORE_this_char={logical_char_col_abs}, char_width={char_printed_width}"
+                    )
 
-                # Определяем, с какого символа токена начинать отрисовку, учитывая scroll_left
-                current_char_check_index = 0
-                while current_char_check_index < len(token_chars):
-                     char = token_chars[current_char_check_index]
-                     char_width = self.editor.get_char_width(char)
+                    if char_printed_width == 0: 
+                        logging.debug("          DrawScreen draw_text: Skipping zero-width char.")
+                        continue # logical_char_col_abs не увеличивается
 
-                     # Если текущая позиция символа (char_col_index) меньше scroll_left,
-                     # пропускаем этот символ и его ширину.
-                     if char_col_index + char_width <= self.editor.scroll_left:
-                         chars_to_skip += 1
-                         char_col_index += char_width # Сдвигаем индекс колонки на ширину символа
-                         current_char_check_index += 1
-                     else:
-                         break # Нашли первый видимый символ или находимся до scroll_left
+                    char_ideal_screen_start_x = self._text_start_x + (logical_char_col_abs - self.editor.scroll_left)
+                    char_ideal_screen_end_x = char_ideal_screen_start_x + char_printed_width
 
-                # Оставшиеся символы токена, которые потенциально видны
-                remaining_token_chars = token_chars[chars_to_skip:]
-                # Рассчитываем сдвиг по X на экране из-за неполного отображения первого символа токена
-                # (если первый видимый символ токена начинается до scroll_left, но его часть видна)
-                partial_char_width = max(0, self.editor.scroll_left - char_col_index)
-                current_screen_x += (char_col_index - self.editor.scroll_left) # Сдвиг начала отрисовки из-за scroll_left
+                    is_char_visible_on_screen = (char_ideal_screen_end_x > self._text_start_x and
+                                                 char_ideal_screen_start_x < width)
 
-                # Теперь отрисовываем оставшиеся символы, пока они помещаются на экране
-                buffer_to_draw = ""
-                buffer_display_width = 0
-                buffer_start_screen_x = current_screen_x # Начальная X для текущего куска отрисовки
+                    if is_char_visible_on_screen:
+                        actual_draw_x = max(self._text_start_x, char_ideal_screen_start_x)
 
-                for char in remaining_token_chars:
-                     char_width = self.editor.get_char_width(char)
-
-                     # Если текущая позиция отрисовки + ширина символа выходит за правый край области текста, останавливаемся
-                     if current_screen_x + char_width > width:
-                         break # Символ или его часть не помещаются, прерываем отрисовку токена
-
-                     buffer_to_draw += char
-                     buffer_display_width += char_width
-                     current_screen_x += char_width # Сдвигаем позицию отрисовки
-
-                # Рисуем собранный буфер символов токена
-                if buffer_to_draw:
-                    try:
-                        # Убедимся, что координаты находятся в пределах окна
-                        draw_x = max(self._text_start_x, buffer_start_screen_x)
-                        draw_width_chars = len(buffer_to_draw) # Количество символов для отрисовки
-                        self.stdscr.addstr(screen_row, buffer_start_screen_x, buffer_to_draw, color)
-                    except curses.error as e:
-                        logging.error(f"Curses error drawing text token part at ({screen_row}, {buffer_start_screen_x}): {e}")
+                        if actual_draw_x < width:
+                            try:
+                                logging.debug(
+                                    f"          DrawScreen draw_text: DRAWING Char '{char_to_render.replace(chr(9),'/t/')}' "
+                                    f"at screen ({screen_row}, {actual_draw_x}), "
+                                    f"ideal_X={char_ideal_screen_start_x}, "
+                                    f"final_attr={token_color_attribute}"
+                                )
+                                self.stdscr.addch(screen_row, actual_draw_x, char_to_render, token_color_attribute)
+                            except curses.error as e:
+                                logging.warning(
+                                    f"          DrawScreen draw_text: CURSES ERROR drawing char '{char_to_render.replace(chr(9),'/t/')}' (ord: {ord(char_to_render)}) "
+                                    f"at ({screen_row}, {actual_draw_x}) with attr {token_color_attribute}. Error: {e}"
+                                )
+                                break 
+                        else:
+                            logging.debug(
+                                f"          DrawScreen draw_text: Char '{char_to_render.replace(chr(9),'/t/')}' not drawn, actual_draw_x={actual_draw_x} >= width={width}."
+                            )
+                    else:
+                        logging.debug(
+                            f"          DrawScreen draw_text: Char '{char_to_render.replace(chr(9),'/t/')}' not visible. "
+                            f"Ideal screen X range: [{char_ideal_screen_start_x} - {char_ideal_screen_end_x}). "
+                            f"Visible text area X range: [{self._text_start_x} - {width-1}]."
+                        )
+                    
+                    logical_char_col_abs += char_printed_width
+                    
+                    # Проверка, не вышли ли мы за правую границу окна по логической ширине
+                    next_char_ideal_screen_start_x = self._text_start_x + (logical_char_col_abs - self.editor.scroll_left)
+                    if next_char_ideal_screen_start_x >= width:
+                        logging.debug(
+                            f"        DrawScreen draw_text: Next char would start at or beyond window width ({next_char_ideal_screen_start_x} >= {width}). "
+                            f"Breaking inner char loop."
+                        )
+                        break 
+                
+                # Если внутренний цикл (по символам) был прерван (break), то прерываем и внешний (по токенам)
+                else: # Этот 'else' относится к 'for char_index_in_token...'
+                    continue 
+                logging.debug(f"      DrawScreen draw_text: Broken from char loop, breaking token loop as well.")
+                break 
+            logging.debug(f"    DrawScreen draw_text: Finished processing tokens for line {text_line_index}. Final logical_char_col_abs = {logical_char_col_abs}")
 
 
     def _draw_search_highlights(self):
@@ -5257,6 +5186,7 @@ class DrawScreen:
 
         # --- 5. Перемещаем курсор ----------------------------------------------------
         try:
+            logging.debug(f"Positioning cursor: screen_y={screen_y}, draw_cursor_x={draw_cursor_x}. Logical: ({self.editor.cursor_y}, {self.editor.cursor_x}). Line: '{current_line}'")
             self.stdscr.move(screen_y, draw_cursor_x)
         except curses.error:
             # запасной вариант – ставим в начало строки, если что-то пошло не так
@@ -5321,8 +5251,7 @@ def main(stdscr):
         logging.warning(f"Couldn't ignore SIGTSTP/SIGINT: {e}")
     
     # Установка локали важна для корректной работы с UTF-8 и wcwidth
-    # os.environ["LANG"] = "en_US.UTF-8" # Может быть переопределено системными настройками
-      
+    # os.environ["LANG"] = "en_US.UTF-8" # Может быть переопределено системными настройками     
     try:
         # Используем пустую строку для установки локали на основе переменных среды
         locale.setlocale(locale.LC_ALL, "")
