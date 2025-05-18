@@ -449,6 +449,28 @@ class SwayEditor:
         self.last_window_size = (0, 0)
         self.drawer = DrawScreen(self)
 
+        try:
+            # Отладочная печать перед вызовом _load_keybindings
+            print(f"DEBUG: About to call _load_keybindings. self.parse_key exists: {hasattr(self, 'parse_key')}")
+            if hasattr(self, 'parse_key'):
+                print(f"DEBUG: self.parse_key is: {self.parse_key}")
+            else:
+                print(f"DEBUG: self.parse_key DOES NOT EXIST before _load_keybindings!")
+                # Дополнительно, можно посмотреть все атрибуты self, чтобы понять, что там есть
+                # print(f"DEBUG: dir(self) before _load_keybindings: {dir(self)}")
+
+
+            self.keybindings = self._load_keybindings() # Строка 452 в вашем логе
+            print("DEBUG: _load_keybindings called successfully.")
+
+        except Exception as e_init_kb:
+            print(f"CRITICAL DEBUG: Error during keybinding setup in __init__: {e_init_kb}")
+            import traceback
+            traceback.print_exc() # Напечатает traceback прямо в консоль
+            # Это поможет увидеть ошибку, даже если curses еще не инициализирован полностью
+            # или если логгирование еще не работает как надо для этой стадии.
+            raise # Перевыбрасываем ошибку, чтобы программа завершилась
+
         self.keybindings = self._load_keybindings()
         self.action_map = self._setup_action_map()
 
@@ -517,11 +539,31 @@ class SwayEditor:
             if not key_str:
                 logging.debug("Keybinding for %s disabled by user", action)
                 continue
-
+            # NEW    
             try:
-                kb[action] = self.parse_key(key_str)      # str → int|str
+                # Отладочная печать перед вызовом parse_key
+                print(f"DEBUG: In _load_keybindings, for action '{action}'. self.parse_key exists: {hasattr(self, 'parse_key')}")
+                if hasattr(self, 'parse_key'):
+                    print(f"DEBUG: self.parse_key is: {self.parse_key}")
+                else:
+                    print(f"DEBUG: self.parse_key DOES NOT EXIST in _load_keybindings!")
+                    # print(f"DEBUG: dir(self) in _load_keybindings: {dir(self)}")
+
+                kb[action] = self.parse_key(key_str)      # str → int|str # Строка 522 в вашем логе
+
+
             except ValueError as e:
                 logging.error("Keybinding [%s]=%r skipped: %s", action, key_str, e)
+            except AttributeError as ae: # Явно ловим AttributeError здесь для отладки
+                print(f"CRITICAL DEBUG: AttributeError in _load_keybindings for action '{action}', key_str '{key_str}': {ae}")
+                traceback.print_exc()
+                raise    
+
+
+            # try:
+            #     kb[action] = self.parse_key(key_str)      # str → int|str
+            # except ValueError as e:
+            #     logging.error("Keybinding [%s]=%r skipped: %s", action, key_str, e)
 
         # ── 2. «неизменяемые» Shift‑стрелки, Home/End и т.п. ───────────────────
         kb.update({
@@ -643,8 +685,9 @@ class SwayEditor:
             "undo": self.undo,
             "redo": self.redo,
             # курсор / выделение
-            "go_to_top":     self.go_to_top,
-            "go_to_bottom":  self.go_to_bottom,
+            "handle_home":     self.handle_home,
+            "handle_end":      self.handle_end,
+            
             "extend_selection_right": self.extend_selection_right,
             "extend_selection_left":  self.extend_selection_left,
             "select_to_home": self.select_to_home,
@@ -690,10 +733,10 @@ class SwayEditor:
             curses.KEY_DOWN:    self.handle_down,
             curses.KEY_LEFT:    self.handle_left,
             curses.KEY_RIGHT:   self.handle_right,
-            curses.KEY_HOME:    self.go_to_top,
-            curses.KEY_END:     self.go_to_bottom,
-            curses.KEY_PPAGE:   self.page_up,
-            curses.KEY_NPAGE:   self.page_down,
+            curses.KEY_HOME:    self.handle_home,
+            curses.KEY_END:     self.handle_end,
+            curses.KEY_PPAGE:   self.handle_page_up,
+            curses.KEY_NPAGE:   self.handle_page_down,
             curses.KEY_BACKSPACE: self.handle_backspace,
             curses.KEY_DC:      self.handle_delete,
             curses.KEY_ENTER:   self.handle_enter,
@@ -1702,13 +1745,13 @@ class SwayEditor:
                 elif key in (curses.KEY_DC, 330, 462):
                     self.handle_delete()
                 elif key in (curses.KEY_HOME, 262, 449):
-                    self.go_to_top()
+                    self.handle_home()
                 elif key in (curses.KEY_END, 360, 455):
-                    self.go_to_bottom()
+                    self.handle_end()
                 elif key in (curses.KEY_PPAGE, 339, 451):
-                    self.page_up()
+                    self.handle_page_up()
                 elif key in (curses.KEY_NPAGE, 338, 457):
-                    self.page_down()
+                    self.handle_page_down()
                 elif key == curses.ascii.TAB:
                     self.handle_smart_tab()
                 elif key == curses.KEY_SRIGHT:
@@ -1857,6 +1900,7 @@ class SwayEditor:
     # ===================== Курсор: страничные и домашние клавиши ======================
 
     # ────────── Курсор: базовое перемещение ──────────
+    # `array left (<-) `
     def handle_left(self) -> None:
         """
         Move cursor one position to the left.
@@ -1871,7 +1915,7 @@ class SwayEditor:
         self._clamp_scroll()                       # корректируем scroll_top / scroll_left
         logging.debug("cursor ← (%d,%d)", self.cursor_y, self.cursor_x)
 
-
+    # `array right (->)`
     def handle_right(self) -> None:
         """
         Move cursor one position to the right.
@@ -1903,7 +1947,7 @@ class SwayEditor:
             logging.exception("Error in handle_right")
             self._set_status_message("Cursor error (see log)")
 
-
+    # `array up`
     def handle_up(self) -> None:
         """
         Move cursor one line up.
@@ -1920,7 +1964,7 @@ class SwayEditor:
         self._clamp_scroll()
         logging.debug("cursor ↑ (%d,%d)", self.cursor_y, self.cursor_x)
 
-
+    # `array down`
     def handle_down(self) -> None:
         """
         Move cursor one line down.
@@ -1935,21 +1979,6 @@ class SwayEditor:
 
         self._clamp_scroll()
         logging.debug("cursor ↓ (%d,%d)", self.cursor_y, self.cursor_x)
-
-
-    def page_up(self) -> None:
-        """
-        Scroll up by one visible page (height‑1 lines) and move cursor accordingly.
-        """
-        step = self.height - 1
-        self.cursor_y = max(0, self.cursor_y - step)
-        self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
-        self.scroll_top = max(0, self.scroll_top - step)
-
-        self._clamp_scroll()
-        self._set_status_message("Page ↑")
-        logging.debug("page_up: cursor=(%d,%d) scroll_top=%d", 
-                    self.cursor_y, self.cursor_x, self.scroll_top)
 
 
     def _clamp_scroll(self) -> None:
@@ -1980,67 +2009,6 @@ class SwayEditor:
         self.scroll_left = max(0, self.scroll_left)
 
 
-    def page_down(self) -> None:
-        """
-        Scroll down by one visible page (height‑1 lines) and move cursor accordingly.
-        """
-        step = self.height - 1
-        max_top = max(len(self.text) - step, 0)
-
-        self.scroll_top = min(self.scroll_top + step, max_top)
-        self.cursor_y = min(self.cursor_y + step, len(self.text) - 1)
-        self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
-
-        self._clamp_scroll()
-        self._set_status_message("Page ↓")
-        logging.debug("page_down: cursor=(%d,%d) scroll_top=%d",
-                    self.cursor_y, self.cursor_x, self.scroll_top)
-
-
-    def go_to_top(self) -> None:
-        """
-        Move cursor to the very first line/column and reset vertical scroll.
-
-        • Устанавливает `cursor_y = 0`, `cursor_x = 0`, `scroll_top = 0`;  
-        • Корректирует прокрутку через `_clamp_scroll()` — на случай,
-        если логику изменят в будущем;  
-        • Обновляет статус‑бар и пишет координаты в лог.
-        """
-        self.cursor_y = 0
-        self.cursor_x = 0
-        self.scroll_top = 0
-
-        self._clamp_scroll()               # гарантируем консистентность
-        self._set_status_message("Top of file")
-        logging.debug("go_to_top: cursor=(0,0) scroll_top=0")
-    
-    
-    def go_to_bottom(self) -> None:
-        """
-        Move cursor to the very last line/column and scroll view to show it.
-
-        • `cursor_y` → индекс последней строки;  
-        • `cursor_x` → конец этой строки;  
-        • `scroll_top` → так, чтобы последняя строка оказалась внизу окна
-        (или 0, если файл короче высоты экрана).  
-        Метод завершает работу вызовом `_clamp_scroll()`, выводит сообщение
-        в строке статуса и пишет координаты в лог.
-        """
-        # 1. позиционируем курсор
-        self.cursor_y = len(self.text) - 1
-        self.cursor_x = len(self.text[self.cursor_y])
-
-        # 2. вычисляем верхнюю строку окна
-        self.scroll_top = max(0, len(self.text) - self.height)
-
-        # 3. финальная корректировка и отчёт
-        self._clamp_scroll()
-        self._set_status_message("End of file")
-        logging.debug("go_to_bottom: cursor=(%d,%d) scroll_top=%d",
-                    self.cursor_y, self.cursor_x, self.scroll_top)
-
-
-
     def get_display_width(self, text: str) -> int:
         """
         Return the printable width of *text* in terminal cells.
@@ -2059,7 +2027,6 @@ class SwayEditor:
                 w = wcwidth(ch)
                 width += max(w, 0)   # non‑printables add 0
         return width
-
 
     def _ensure_cursor_in_bounds(self) -> None:
         """
@@ -2085,6 +2052,8 @@ class SwayEditor:
                     self.cursor_y, self.cursor_x, max_x)
 
 
+    # # ────────── Курсор: Home/End , pUp/pDown ──────────
+    # key home
     def handle_home(self):
         """Moves the cursor to the beginning of the current line (after leading whitespace)."""
         # "Умный" Home: если курсор не в начале отступа, перемещает в начало отступа;
@@ -2097,16 +2066,15 @@ class SwayEditor:
             self.cursor_x = indent_end
         else:
             self.cursor_x = 0
-
         # Горизонтальная прокрутка будет скорректирована в _position_cursor
-
-
+    
+    # key end
     def handle_end(self):
         """Moves the cursor to the end of the current line."""
         self.cursor_x = len(self.text[self.cursor_y])
         # Горизонтальная прокрутка будет скорректирована в _position_cursor
 
-
+    # key page-up
     def handle_page_up(self):
         """Moves the cursor up by one screen height."""
         # Получаем текущий размер окна, чтобы определить высоту области текста
@@ -2125,7 +2093,7 @@ class SwayEditor:
 
         # Горизонтальная прокрутка будет скорректирована в _position_cursor
 
-
+    # ###  key page-down
     def handle_page_down(self):
         """Moves the cursor down by one screen height."""
         # Получаем текущий размер окна
@@ -2331,7 +2299,6 @@ class SwayEditor:
                     # Последняя строка, курсор в конце - Delete ничего не делает
                     logging.debug("Delete: Cursor at end of file, doing nothing.")
    
-
     def delete_selected_text_internal(
         self,
         start_row: int,
@@ -2391,6 +2358,7 @@ class SwayEditor:
         )
         return deleted_lines
 
+    # для key TAB вспомогательный метод
     def handle_tab(self):
         """Inserts spaces or a tab character depending on configuration."""
         tab_size = self.config.get("editor", {}).get("tab_size", 4)
@@ -2404,20 +2372,8 @@ class SwayEditor:
         # Используем insert_text для корректного добавления в историю и сброса выделения
         self.insert_text(text_to_insert_val)
         logging.debug(f"handle_tab: Inserted {text_to_insert_val!r} into line {self.cursor_y}, text now: {self.text[self.cursor_y]!r}")
-
-    # def handle_tab(self):
-    #         """Inserts spaces or a tab character depending on configuration."""
-    #         tab_size = self.config.get("editor", {}).get("tab_size", 4)
-    #         use_spaces = self.config.get("editor", {}).get("use_spaces", True)
-    #         current_line = self.text[self.cursor_y]
-
-    #         # Текст для вставки
-    #         insert_text = " " * tab_size if use_spaces else "\t"
-
-    #         # Используем insert_text для корректного добавления в историю и сброса выделения
-    #         self.insert_text(insert_text)
-
-
+    
+    # key TAB - основной метод
     def handle_smart_tab(self):
         """
         Если курсор в начале строки (cursor_x == 0),
