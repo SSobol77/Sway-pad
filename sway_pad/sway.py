@@ -208,13 +208,14 @@ def load_config() -> dict:
             "copy": "ctrl+c",
             "cut": "ctrl+x",
             "undo": "ctrl+z",
+            "redo": "shift+z", 
+            "lint": "f4",
             "new_file": "f2",       
             "open_file": "ctrl+o",
             "save_file": "ctrl+s",
             "save_as": "f5",         
             "select_all": "ctrl+a",
             "quit": "ctrl+q",
-            "redo": "ctrl+shift+z",  
             "goto_line": "ctrl+g",   
             "git_menu": "f9",
             "cancel_operation": "esc",
@@ -343,27 +344,35 @@ else:
 
 # --- Класс редактора --------------------------------------------------------
 class SwayEditor:
-    """Основной класс редактора Sway-Pad."""
-
-    def _set_status_message(self, message):
+    """The main class of the Sway-Pad editor."""
+       
+    def _set_status_message(self, message, is_lint=False):
         """
-        Ставит статусное сообщение в очередь, избегая дубликатов.
+        Puts the status message in the queue, avoiding duplicates.
         """
-        if not hasattr(self, "_last_status_msg_sent"):
-            self._last_status_msg_sent = None
-        if message == self._last_status_msg_sent:
-            return
-        try:
-            self._msg_q.put_nowait(str(message))
-            self._last_status_msg_sent = message
-            logging.debug(f"Queued status message: {message}")
-        except queue.Full:
-            logging.error("Status message queue is full")
-        except Exception as e:
-            logging.error(f"Failed to queue status message: {e}")
+        if is_lint:
+            self.lint_panel_message = message
+            self.lint_panel_active = True
+            logging.debug(f"Lint panel message set: {message}")
+        else:
+            if not hasattr(self, "_last_status_msg_sent"):
+                self._last_status_msg_sent = None
+            if message == self._last_status_msg_sent:
+                return
+            try:
+                self._msg_q.put_nowait(str(message))
+                self._last_status_msg_sent = message
+                logging.debug(f"Queued status message: {message}")
+            except queue.Full:
+                logging.error("Status message queue is full")
+            except Exception as e:
+                logging.error(f"Failed to queue status message: {e}")
 
 
     def __init__(self, stdscr):
+        """
+        Initialize the editor. Called from curses.wrapper().
+        """
         # ─────────────── Настройка терминала: отключаем IXON/IXOFF и canonical mode ───────────────
         try:
             fd = sys.stdin.fileno()
@@ -416,6 +425,8 @@ class SwayEditor:
         self.insert_mode = True
         self.status_message = ""
         self._msg_q = queue.Queue()
+        self.lint_panel_message = None   # Сообщение панели линтера
+        self.lint_panel_active = False   # Флаг активности панели линтера
         self.action_history = []
         self.undone_actions = []
         self._state_lock = threading.RLock()
@@ -511,7 +522,7 @@ class SwayEditor:
             "copy":          "ctrl+c",
             "cut":           "ctrl+x",
             "undo":          "ctrl+z",
-            "redo":          "ctrl+shift+z",
+            "redo":          "shift+z",
             "new_file":      "f2",
             "open_file":     "ctrl+o",
             "save_file":     "ctrl+s",
@@ -526,6 +537,7 @@ class SwayEditor:
             "search_and_replace": "f6",
             "cancel_operation": "esc",
             "tab":           "tab",
+            "lint":          "f4"
         }
 
         cfg = self.config.get("keybindings", {})
@@ -558,12 +570,6 @@ class SwayEditor:
                 print(f"CRITICAL DEBUG: AttributeError in _load_keybindings for action '{action}', key_str '{key_str}': {ae}")
                 traceback.print_exc()
                 raise    
-
-
-            # try:
-            #     kb[action] = self.parse_key(key_str)      # str → int|str
-            # except ValueError as e:
-            #     logging.error("Keybinding [%s]=%r skipped: %s", action, key_str, e)
 
         # ── 2. «неизменяемые» Shift‑стрелки, Home/End и т.п. ───────────────────
         kb.update({
@@ -687,7 +693,7 @@ class SwayEditor:
             # курсор / выделение
             "handle_home":     self.handle_home,
             "handle_end":      self.handle_end,
-            
+            "show_lint_panel": self.show_lint_panel, 
             "extend_selection_right": self.extend_selection_right,
             "extend_selection_left":  self.extend_selection_left,
             "select_to_home": self.select_to_home,
@@ -751,7 +757,9 @@ class SwayEditor:
             19:                 self.save_file,
             24:                 self.exit_editor,    # Ctrl+X
             26:                 self.undo, # Ctrl+Z
+            90:                 self.redo, # Shift+Z
             17:                 self.exit_editor,
+            curses.KEY_F4:      self.show_lint_panel,  # F4 – открыть панель линтера
             27:                 self.cancel_operation, # Esc
             331:                self.toggle_insert_mode,   # Insert
             410:                self.handle_resize,        # KEY_RESIZE
@@ -762,18 +770,18 @@ class SwayEditor:
         logging.debug("Final action map: %s", final_map)
         return final_map
 
-
+    # ─────────────────────  Запуск flake8 в отдельном потоке  ─────────────────────
     def run_flake8_on_code(self, code_string: str, filename: Optional[str] = "<buffer>") -> None:
         """
         Запускает анализ Python-кода с помощью Flake8 в отдельном потоке.
-        Результат помещается в очередь self._msg_q для отображения в статус-баре.
-        
+        Результат помещается во всплывающую панель линтера для пользователя.
+
         :param code_string: Исходный код Python для проверки.
         :param filename: Имя файла (опционально, только для логирования).
         """
         # Ограничение для больших файлов — для производительности
         if len(code_string.encode('utf-8', errors='replace')) > 1_000_000:
-            self._set_status_message("File is too large for flake8 analysis (max 1MB)")
+            self._set_status_message("File is too large for flake8 analysis (max 1MB)", is_lint=True)
             return
 
         tmp_name: Optional[str] = None
@@ -784,7 +792,7 @@ class SwayEditor:
                 tmp.write(code_string)
         except Exception as e:
             logging.exception(f"Failed to create temp file for flake8: {e}")
-            self._set_status_message("Error creating temp file for flake8")
+            self._set_status_message("Error creating temp file for flake8", is_lint=True)
             return
 
         def _run():
@@ -803,7 +811,20 @@ class SwayEditor:
                 )
 
                 output = process.stdout.strip()
+                if process.returncode == 0:
+                    output = ""  # Flake8 не нашел ошибок
+                elif process.returncode == 1:
+                    output = "Flake8: No issues found."
+                elif process.returncode == 2:
+                    output = "Flake8: Error occurred during analysis."
+                else:
+                    output = f"Flake8: Unknown error (code {process.returncode})"
+                
+                # Формируем сообщение для панели линтера
+                self.lint_panel_message = output  # сохранили полный вывод Flake8
+                self._set_status_message(message)  # отображение краткого статуса:contentReference[oaicite:4]{index=4}
                 stderr = process.stderr.strip()
+
 
                 if stderr:
                     logging.warning(f"Flake8 stderr for {tmp_name}: {stderr}")
@@ -812,20 +833,25 @@ class SwayEditor:
                     message = "Flake8: No issues found."
                 else:
                     lines = output.splitlines()
-                    message = f"Flake8 results ({len(lines)}): {lines[0]}"
-                    if len(lines) > 1:
-                        message += f" (+ {len(lines) - 1} more...)"
+                    # Формируем полный вывод для панели (можно увеличить лимит строк)
+                    preview_lines = 10
+                    message = f"Flake8 results ({len(lines)} issues):\n" + "\n".join(lines[:preview_lines])
+                    if len(lines) > preview_lines:
+                        message += f"\n(+ {len(lines) - preview_lines} more...)"
 
-                # Передача результата в очередь сообщений редактора
-                self._set_status_message(message)
+                # Передача результата во всплывающую панель линтера
+                self._set_status_message(message, is_lint=True)
 
             except FileNotFoundError:
-                self._set_status_message("Flake8: Executable not found (install with 'pip install flake8')")
+                self._set_status_message(
+                    "Flake8: Executable not found (install with 'pip install flake8')",
+                    is_lint=True
+                )
             except subprocess.TimeoutExpired:
-                self._set_status_message("Flake8: Command timed out.")
+                self._set_status_message("Flake8: Command timed out.", is_lint=True)
             except Exception as e:
                 logging.exception(f"Error running flake8 on code for {tmp_name}: {e}")
-                self._set_status_message(f"Flake8 error: {str(e)[:80]}...")
+                self._set_status_message(f"Flake8 error: {str(e)[:80]}...", is_lint=True)
             finally:
                 # Удаление временного файла
                 if tmp_name and os.path.exists(tmp_name):
@@ -839,15 +865,22 @@ class SwayEditor:
         threading.Thread(target=_run, daemon=True).start()
 
 
+    def show_lint_panel(self):
+        logging.debug("show_lint_panel called")
+        if not self.lint_panel_message:
+            return  # нечего показывать
+        self.lint_panel_active = True
+        # Панель будет нарисована при следующей перерисовке экрана в Drawer.draw()
+
+
     def run_lint_async(self, code: str) -> None:
         """
         Асинхронно запускает flake8-анализ для переданного кода.
-        Результат передаётся в очередь сообщений редактора через self._set_status_message.
-        
+        Результат отображается во всплывающей панели линтера.
         :param code: Исходный код Python для проверки.
         """
         self.run_flake8_on_code(code, self.filename)
-        
+
 
     def _check_pyclip_availability(self):
         """Проверяет доступность pyperclip и системных утилит для буфера обмена."""
@@ -1149,6 +1182,7 @@ class SwayEditor:
             last_action = self.action_history.pop()
             action_type = last_action.get("type")
             logging.debug(f"Performing undo for action type: {action_type}")
+            logging.debug(f"Current state before undo: len(self.text)={len(self.text)}, cursor=({self.cursor_y},{self.cursor_x})")
 
             try:
                 if action_type == "insert":
@@ -1196,24 +1230,19 @@ class SwayEditor:
                 elif action_type == "delete_selection":
                     deleted_lines = last_action["text"]
                     start_y, start_x = last_action["start"]
-                    if not deleted_lines:
-                        self.cursor_y = min(start_y, len(self.text) - 1)
-                        self.cursor_x = start_x
-                        logging.debug("Undo delete_selection: no text to restore.")
-                        return
-
-                    if not (0 <= start_y < len(self.text)):
-                        raise IndexError(f"Invalid start_y: {start_y}")
-
-                    current_line_suffix = self.text[start_y][start_x:]
-                    self.text[start_y] = self.text[start_y][:start_x] + deleted_lines[0]
-
-                    for i in range(1, len(deleted_lines)):
-                        self.text.insert(start_y + i, deleted_lines[i])
-
-                    self.text[start_y + len(deleted_lines) - 1] += current_line_suffix
-                    self.cursor_y, self.cursor_x = start_y, start_x
-                    logging.debug(f"Undid delete_selection at ({start_y}, {start_x})")
+                    end_y, end_x = last_action["end"]
+                    logging.debug(f"Undo delete_selection: restoring {len(deleted_lines)} lines at ({start_y}, {start_x})")
+                    logging.debug(f"Current len(self.text)={len(self.text)}")
+                    # Исправление: Удаляем строки в диапазоне и вставляем восстановленные
+                    num_lines_to_replace = end_y - start_y + 1
+                    while len(self.text) < end_y + 1:
+                        self.text.append("")
+                    del self.text[start_y:start_y + num_lines_to_replace]
+                    self.text[start_y:start_y] = deleted_lines
+                    # Устанавливаем курсор
+                    self.cursor_y = min(start_y, len(self.text) - 1)
+                    self.cursor_x = min(start_x, len(self.text[self.cursor_y]) if len(self.text) > self.cursor_y else 0)
+                    logging.debug(f"Undid delete_selection at ({self.cursor_y}, {self.cursor_x})")
 
                 else:
                     logging.warning(f"Unknown action type in undo: {action_type}")
@@ -1236,7 +1265,6 @@ class SwayEditor:
             self._set_status_message("Undo performed")
             logging.debug(f"Undo completed for action: {action_type}")
 
-
     def redo(self):
         """
         Повторяет действие, отмененное последней операцией undo.
@@ -1252,101 +1280,67 @@ class SwayEditor:
 
             try:
                 if action_type == "insert":
-                    # Повтор вставки текста
                     text_to_insert = last_undone["text"]
                     row, col = last_undone["position"]
-                    self.insert_text_at_position(text_to_insert, row, col) # Этот метод также двигает курсор
+                    self.insert_text_at_position(text_to_insert, row, col)
                     logging.debug(f"Redid insert at ({row}, {col}), text: {text_to_insert!r}")
 
                 elif action_type == "delete_char":
-                    # Повтор удаления символа
                     y, x = last_undone["position"]
-                    # Для повтора удаления символа, мы просто двигаем курсор в нужную позицию
-                    # и выполняем удаление символа после курсора (эквивалент KEY_DC)
-                    # или символа перед курсором (эквивалент BACKSPACE), в зависимости от исходного действия.
-                    # Исходное delete_char в handle_delete удаляет символ *под* курсором.
-                    # Значит, для Redo мы двигаем курсор в saved_position и вызываем handle_delete.
-                    self.cursor_y, self.cursor_x = y, x
-                    # Мы должны удалить тот же символ, который был удален.
-                    # Проще повторить логику удаления, зная позицию.
                     if 0 <= y < len(self.text) and x < len(self.text[y]):
-                         self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
-                         # Курсор остается на x после удаления символа на x+1
-                         # Позиция курсора уже установлена в saved_position (y, x) перед удалением.
-                         logging.debug(f"Redid delete_char at ({y}, {x})")
+                        self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
+                        self.cursor_y, self.cursor_x = y, x
+                        logging.debug(f"Redid delete_char at ({y}, {x})")
                     else:
-                         logging.warning(f"Redo delete_char: Position ({y}, {x}) out of bounds.")
-                         # В этом случае действие не может быть повторено, вернуть его обратно
-                         self.undone_actions.append(last_undone)
-                         self._set_status_message(f"Redo failed: Position out of bounds for delete_char")
-                         return
-
+                        logging.warning(f"Redo delete_char: Position ({y}, {x}) out of bounds.")
+                        self.undone_actions.append(last_undone)
+                        self._set_status_message(f"Redo failed: Position out of bounds for delete_char")
+                        return
 
                 elif action_type == "delete_newline":
-                    # Повтор объединения строк (удаления переноса строки)
-                    # Перемещаем курсор в позицию, где был перенос, и вызываем handle_delete
                     y, x = last_undone["position"]
                     self.cursor_y, self.cursor_x = y, x
-                    # Повторяем логику объединения строк из handle_delete
                     if self.cursor_y < len(self.text) - 1:
                         deleted_line = self.text.pop(self.cursor_y + 1)
                         self.text[self.cursor_y] += deleted_line
-                        # Курсор остается на y, x (в конце строки)
                         logging.debug(f"Redid delete_newline at ({y}, {x})")
                     else:
-                         logging.warning(f"Redo delete_newline: Cannot merge line {y} and {y+1}.")
-                         self.undone_actions.append(last_undone)
-                         self._set_status_message(f"Redo failed: Cannot merge lines for delete_newline")
-                         return
-
+                        logging.warning(f"Redo delete_newline: Cannot merge line {y} and {y+1}.")
+                        self.undone_actions.append(last_undone)
+                        self._set_status_message(f"Redo failed: Cannot merge lines for delete_newline")
+                        return
 
                 elif action_type == "delete_selection":
-                    # Повтор удаления выделенного текста
                     start_y, start_x = last_undone["start"]
                     end_y, end_x = last_undone["end"]
-                     # Проверяем, что индексы в допустимых пределах
+                    logging.debug(f"Redo delete_selection from ({start_y}, {start_x}) to ({end_y}, {end_x})")
+                    # Проверка границ
                     if not (0 <= start_y < len(self.text) and 0 <= end_y < len(self.text)):
-                         logging.warning(f"Redo delete_selection: Start/End row out of bounds: ({start_y}, {end_y})")
-                         self.undone_actions.append(last_undone)
-                         self._set_status_message(f"Redo failed: Position out of bounds for delete_selection")
-                         return
-
-                    # Удаляем текст
-                    if start_y == end_y:
-                        # Убедимся, что индексы колонки в пределах строки
-                        line = self.text[start_y]
-                        start_x = max(0, min(start_x, len(line)))
-                        end_x = max(0, min(end_x, len(line)))
-                        self.text[start_y] = line[:start_x] + line[end_x:]
-                    else:
-                        # Первая строка
-                        line = self.text[start_y]
-                        start_x = max(0, min(start_x, len(line)))
-                        self.text[start_y] = line[:start_x] + self.text[end_y][end_x:]
-                        # Удаляем промежуточные и последнюю строки
-                        del self.text[start_y + 1:end_y + 1]
-
-                    # Курсор устанавливается в начало удаленного диапазона
-                    self.cursor_y, self.cursor_x = start_y, start_x
+                        logging.warning(f"Redo delete_selection: Start/End row out of bounds: ({start_y}, {end_y})")
+                        self.undone_actions.append(last_undone)
+                        self._set_status_message(f"Redo failed: Position out of bounds for delete_selection")
+                        return
+                    # Выполняем удаление
+                    deleted_text, _ = self.delete_selected_text_internal(start_y, start_x, end_y, end_x)
+                    # Устанавливаем курсор
+                    self.cursor_y = min(start_y, len(self.text) - 1)
+                    self.cursor_x = min(start_x, len(self.text[self.cursor_y]) if len(self.text) > self.cursor_y else 0)
                     logging.debug(f"Redid delete_selection from ({start_y}, {start_x}) to ({end_y}, {end_x})")
 
                 else:
-                    # Неизвестный тип действия
                     logging.warning(f"Unknown action type in redo: {action_type}")
                     self._set_status_message(f"Cannot redo action: {action_type}")
-                    self.undone_actions.append(last_undone)  # Возвращаем действие обратно
+                    self.undone_actions.append(last_undone)
                     return
 
             except Exception as e:
                 logging.exception(f"Error during redo for action type {action_type}: {e}")
                 self._set_status_message(f"Redo failed for {action_type}: {str(e)[:80]}...")
-                self.undone_actions.append(last_undone) # Вернуть действие, если произошла ошибка
-                # Состояние текста может быть нарушено
+                self.undone_actions.append(last_undone)
                 return
 
-
-            self.action_history.append(last_undone) # Возвращаем действие в основную историю
-            self.modified = True # Повтор действия = модификация файла
+            self.action_history.append(last_undone)
+            self.modified = True
             self._set_status_message("Redo performed")
             logging.debug(f"Redo completed for action: {action_type}")
 
@@ -1766,12 +1760,16 @@ class SwayEditor:
                     self.extend_selection_up()
                 elif key in (curses.KEY_SF, 336):
                     self.extend_selection_down()
+                elif key == 26:  # Undo
+                    self.undo()
+                elif key == 90:  # Redo
+                    self.redo()
                 elif key == 331:  # Insert
                     self.toggle_insert_mode()
                 elif key == 410:  # Resize
                     self.handle_resize()
-                elif key == 268:  # F4 stub
-                    self._set_status_message("F4 not implemented")
+                elif key in (curses.KEY_F4, 268):  # F4 lint
+                    self.show_lint_panel() 
                 elif isinstance(key, str) and key.startswith("\x1b"): # \x1b это Esc
                     if key == "\x1b[Z":  # Shift-Tab
                         self.handle_smart_tab()
@@ -2139,7 +2137,7 @@ class SwayEditor:
                     )
                     # фиксируем в истории
                     self.action_history.append({
-                        "type":     "delete_block",
+                        "type":     "delete_selection",   # 1. ex:   delete_block
                         "text":     removed,
                         "start":    self.selection_start,
                         "end":      self.selection_end,
@@ -2210,40 +2208,35 @@ class SwayEditor:
         Удаляет символ под курсором или выделенный текст.
         Добавляет действие в историю для отмены.
         """
-        with self._state_lock: # Блокировка для безопасного изменения текста и истории
+        with self._state_lock:  # Блокировка для безопасного изменения текста и истории
             if self.is_selecting and self.selection_start and self.selection_end:
                 logging.debug("Delete handling: Deleting selection")
                 
-                # Сохраняем координаты выделения, так как selection_start может измениться
-                # или быть использовано для установки курсора.
-                # Важно взять их *до* вызова delete_selected_text_internal, если он их меняет,
-                # или если self.selection_start будет сброшен до того, как мы установим курсор.
+                # Сохраняем координаты выделения
                 current_selection_start = self.selection_start
                 current_selection_end = self.selection_end
 
-                # Если есть выделение, удаляем его
+                # Удаляем выделенный текст
                 deleted_text_lines = self.delete_selected_text_internal(
-                    *current_selection_start, *current_selection_end # Используем сохраненные
+                    *current_selection_start, *current_selection_end
                 )
 
                 # Добавляем действие в историю
-                self.action_history.append({
-                    "type": "delete_selection", # или "delete_block"
-                    "text": deleted_text_lines, # Удаленный текст
-                    "start": current_selection_start, # Начало удаленного диапазона
-                    "end": current_selection_end    # Конец удаленного диапазона
-                })
+                action = {
+                    "type": "delete_selection",  # Стандартизированный тип действия
+                    "text": deleted_text_lines,  # Удаленный текст
+                    "start": current_selection_start,  # Начало удаленного диапазона
+                    "end": current_selection_end  # Конец удаленного диапазона
+                }
+                self.action_history.append(action)
                 self.modified = True
                 
-                # <<< ИСПРАВЛЕНИЕ ЗДЕСЬ >>>
                 # Устанавливаем курсор в начало удаленного выделения
-                self.cursor_y, self.cursor_x = current_selection_start[0], current_selection_start[1]
-                
-                # Сбрасываем состояние выделения
-                self.is_selecting    = False
+                self.cursor_y, self.cursor_x = current_selection_start
+                self.is_selecting = False
                 self.selection_start = None
-                self.selection_end   = None
-                self.undone_actions.clear() # Очищаем историю redo
+                self.selection_end = None
+                self.undone_actions.clear()  # Очищаем историю redo
                 self._set_status_message("Selection deleted")
                 logging.debug(f"Deleted selection. Cursor set to {self.cursor_y}, {self.cursor_x}")
 
@@ -2251,10 +2244,9 @@ class SwayEditor:
                 # Нет выделения, обычный Delete
                 y, x = self.cursor_y, self.cursor_x
                 
-                # Убедимся, что строка существует, прежде чем получать ее длину
                 if y >= len(self.text):
                     logging.warning(f"Delete: cursor_y {y} is out of bounds for text length {len(self.text)}")
-                    return # Нечего делать
+                    return
 
                 current_line_len = len(self.text[y])
 
@@ -2263,42 +2255,35 @@ class SwayEditor:
                     deleted_char = self.text[y][x]
                     self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
                     self.modified = True
-                    # Курсор не сдвигается
 
-                    # Добавляем действие в историю (тип delete_char)
+                    # Добавляем действие в историю
                     self.action_history.append({
                         "type": "delete_char",
                         "text": deleted_char,
-                        "position": (y, x) # Позиция удаленного символа (где стоял курсор)
+                        "position": (y, x)
                     })
-                    self.undone_actions.clear() # Очищаем историю redo
+                    self.undone_actions.clear()
                     logging.debug(f"Delete: Deleted char '{deleted_char}' at ({y}, {x})")
 
-
                 elif y < len(self.text) - 1:
-                    # Курсор в конце строки, удаляем перенос строки и объединяем с следующей строкой
+                    # Курсор в конце строки, удаляем перенос строки
                     next_line_idx = y + 1
-                    # current_line = self.text[y] # Не используется
-                    next_line_content = self.text[next_line_idx] # Сохраняем содержимое для истории
-
-                    # Объединяем строки
-                    self.text[y] += self.text.pop(next_line_idx) # pop удаляет и возвращает элемент
-
+                    next_line_content = self.text[next_line_idx]
+                    self.text[y] += self.text.pop(next_line_idx)
                     self.modified = True
-                    # Курсор не сдвигается (остается в конце объединенной строки y, на позиции x)
 
-                    # Добавляем действие в историю (тип delete_newline)
+                    # Добавляем действие в историю
                     self.action_history.append({
                         "type": "delete_newline",
-                        "text": next_line_content, # Содержимое присоединенной строки
-                        "position": (y, x) # Позиция, где произошло объединение (конец первой строки)
+                        "text": next_line_content,
+                        "position": (y, x)
                     })
-                    self.undone_actions.clear() # Очищаем историю redo
+                    self.undone_actions.clear()
                     logging.debug(f"Delete: Deleted newline and merged line {next_line_idx} into {y}")
                 else:
-                    # Последняя строка, курсор в конце - Delete ничего не делает
                     logging.debug("Delete: Cursor at end of file, doing nothing.")
-   
+                
+
     def delete_selected_text_internal(
         self,
         start_row: int,
@@ -3081,6 +3066,11 @@ class SwayEditor:
         • если есть активная подсветка поиска ‒ снимает ее;
         • иначе сбрасывает строку статуса на стандартную (пустую или информационную).
         """
+        if self.lint_panel_active:
+            self.lint_panel_active = False
+            self.lint_panel_message = ""
+            return
+        
         if self.is_selecting:
             self.is_selecting = False
             self.selection_start = self.selection_end = None
@@ -4343,6 +4333,7 @@ class SwayEditor:
                 "  F1        : Help",
                 "  F2        : New file",
                 "  F3        : Find next",
+                "  F4        : Linter",
                 "  F5        : Save as…",
                 "  F6        : Search/Replace",
                 "  F9        : Git-меню",
@@ -4354,7 +4345,7 @@ class SwayEditor:
                 "  Ctrl+V    : Paste",
 
                 "  Ctrl+Z    : Undo",
-                "  Ctrl+Shift+Z: Redo",
+                "  Shift+Z   : Redo",
 
                 "  Ctrl+F    : Find",
                 "  Ctrl+G    : Go to line",
@@ -4644,60 +4635,114 @@ class DrawScreen:
         self.stdscr = editor.stdscr
         self.colors = editor.colors # Ссылка на словарь цветов редактора
 
+
     def draw(self):
         """Основной метод отрисовки экрана."""
         try:
-            # сначала обрабатываем фоновые очереди (auto-save, shell, git и т.п.)
+            # 1. Обрабатываем фоновые очереди (auto-save, shell, git и т.п.)
             self.editor._process_all_queues()
             height, width = self.stdscr.getmaxyx()
 
-            # Проверяем минимальный размер окна
+            # 2. Проверяем минимальный размер окна
             if height < 5 or width < 20:
-                 self._show_small_window_error(height, width)
-                 self.editor.last_window_size = (height, width) # Обновляем размер
-                 # В случае слишком маленького окна, не пытаемся рисовать остальное
-                 self.stdscr.refresh() # Обновляем экран, чтобы показать сообщение
-                 return
-
-            # Если размер окна изменился, пересчитываем видимые строки
-            if (height, width) != self.editor.last_window_size:
-                self.editor.visible_lines = max(1, height - 2) # Высота текста = высота окна - 1 строка номера - 1 строка статуса
+                self._show_small_window_error(height, width)
                 self.editor.last_window_size = (height, width)
-                # При изменении размера, сбрасываем горизонтальную прокрутку, т.к. ее позиция может стать некорректной
+                self.stdscr.refresh()
+                return
+
+            # 3. Если размер окна изменился, пересчитываем видимые строки
+            if (height, width) != self.editor.last_window_size:
+                self.editor.visible_lines = max(1, height - 2)
+                self.editor.last_window_size = (height, width)
                 self.editor.scroll_left = 0
-                # Также пересчитываем scroll_top, чтобы курсор остался на экране
                 self._adjust_vertical_scroll()
                 logging.debug(f"Window resized to {width}x{height}. Visible lines: {self.editor.visible_lines}. Scroll left reset.")
 
-            # Очищаем экран (или только область текста)
-            self.stdscr.clear() # Полная очистка экрана
-            # Рисуем номер строки
+            # 4. Очищаем экран
+            self.stdscr.clear()
+
+            # 5. Рисуем основной интерфейс
             self._draw_line_numbers()
-            # Рисуем текст, подсветки, поиск, выделение
-            self._draw_text_with_syntax_highlighting()     
-            # Накладываем подсветку поиска поверх текста
+            self._draw_text_with_syntax_highlighting()
             self._draw_search_highlights()
-            # Накладываем подсветку выделения поверх всего
-            self._draw_selection()         
-            # Накладываем подсветку парных скобок поверх всего
-            self._draw_matching_brackets() # NEW
-            # Рисуем статус-бар 
+            self._draw_selection()
+            self._draw_matching_brackets()
             self._draw_status_bar()
-            # Позиционируем курсор
-            self._position_cursor()
-            # Обновляем физический экран
+
+            # 6. Рисуем всплывающую панель линтера (если она активна)
+            self._draw_lint_panel()   # <--- Вставить здесь обязательно!
+
+            # 7. Позиционируем курсор (если панель не активна)
+            if not getattr(self.editor, 'lint_panel_active', False):
+                self._position_cursor()
+
+            # 8. Обновляем экран
             self._update_display()
 
         except curses.error as e:
-             # Ловим ошибки Curses при отрисовке
-             logging.error(f"Curses error in DrawScreen.draw(): {e}", exc_info=True)
-             # Пытаемся установить статус (потокобезопасно)
-             self.editor._set_status_message(f"Draw error: {str(e)[:80]}...")
+            logging.error(f"Curses error in DrawScreen.draw(): {e}", exc_info=True)
+            self.editor._set_status_message(f"Draw error: {str(e)[:80]}...")
 
         except Exception as e:
-            # Ловим другие ошибки, не связанные с Curses, в процессе отрисовки
             logging.exception("Unexpected error in DrawScreen.draw()")
             self.editor._set_status_message(f"Draw error: {str(e)[:80]}...")
+
+
+
+    # def draw(self):
+    #     """Основной метод отрисовки экрана."""
+    #     try:
+    #         # сначала обрабатываем фоновые очереди (auto-save, shell, git и т.п.)
+    #         self.editor._process_all_queues()
+    #         height, width = self.stdscr.getmaxyx()
+
+    #         # Проверяем минимальный размер окна
+    #         if height < 5 or width < 20:
+    #              self._show_small_window_error(height, width)
+    #              self.editor.last_window_size = (height, width) # Обновляем размер
+    #              # В случае слишком маленького окна, не пытаемся рисовать остальное
+    #              self.stdscr.refresh() # Обновляем экран, чтобы показать сообщение
+    #              return
+
+    #         # Если размер окна изменился, пересчитываем видимые строки
+    #         if (height, width) != self.editor.last_window_size:
+    #             self.editor.visible_lines = max(1, height - 2) # Высота текста = высота окна - 1 строка номера - 1 строка статуса
+    #             self.editor.last_window_size = (height, width)
+    #             # При изменении размера, сбрасываем горизонтальную прокрутку, т.к. ее позиция может стать некорректной
+    #             self.editor.scroll_left = 0
+    #             # Также пересчитываем scroll_top, чтобы курсор остался на экране
+    #             self._adjust_vertical_scroll()
+    #             logging.debug(f"Window resized to {width}x{height}. Visible lines: {self.editor.visible_lines}. Scroll left reset.")
+
+    #         # Очищаем экран (или только область текста)
+    #         self.stdscr.clear() # Полная очистка экрана
+    #         # Рисуем номер строки
+    #         self._draw_line_numbers()
+    #         # Рисуем текст, подсветки, поиск, выделение
+    #         self._draw_text_with_syntax_highlighting()     
+    #         # Накладываем подсветку поиска поверх текста
+    #         self._draw_search_highlights()
+    #         # Накладываем подсветку выделения поверх всего
+    #         self._draw_selection()         
+    #         # Накладываем подсветку парных скобок поверх всего
+    #         self._draw_matching_brackets() # NEW
+    #         # Рисуем статус-бар 
+    #         self._draw_status_bar()
+    #         # Позиционируем курсор
+    #         self._position_cursor()
+    #         # Обновляем физический экран
+    #         self._update_display()
+
+    #     except curses.error as e:
+    #          # Ловим ошибки Curses при отрисовке
+    #          logging.error(f"Curses error in DrawScreen.draw(): {e}", exc_info=True)
+    #          # Пытаемся установить статус (потокобезопасно)
+    #          self.editor._set_status_message(f"Draw error: {str(e)[:80]}...")
+
+    #     except Exception as e:
+    #         # Ловим другие ошибки, не связанные с Curses, в процессе отрисовки
+    #         logging.exception("Unexpected error in DrawScreen.draw()")
+    #         self.editor._set_status_message(f"Draw error: {str(e)[:80]}...")
 
 
     def _show_small_window_error(self, height, width):
@@ -4753,6 +4798,50 @@ class DrawScreen:
                     self.stdscr.addstr(screen_row, 0, empty_num_str, line_num_color)
                  except curses.error as e:
                     logging.error(f"Curses error drawing empty line number background at ({screen_row}, 0): {e}")
+
+
+    def _draw_lint_panel(self):
+        """
+        Рисует всплывающую панель с результатом линтера.
+        """
+        if not getattr(self.editor, 'lint_panel_active', False):
+            return
+        msg = self.editor.lint_panel_message
+        if not msg:
+            return
+        h, w = self.stdscr.getmaxyx()
+        panel_height = min(max(6, msg.count('\n') + 4), h - 2)
+        panel_width = min(max(40, max(len(line) for line in msg.splitlines()) + 4), w - 4)
+        start_y = max(1, (h - panel_height) // 2)
+        start_x = max(2, (w - panel_width) // 2)
+
+        # Рамка окна
+        try:
+            for i in range(panel_height):
+                line = ""
+                if i == 0:
+                    line = "┌" + "─" * (panel_width - 2) + "┐"
+                elif i == panel_height - 1:
+                    line = "└" + "─" * (panel_width - 2) + "┘"
+                else:
+                    line = "│" + " " * (panel_width - 2) + "│"
+                self.stdscr.addstr(start_y + i, start_x, line, curses.A_BOLD)
+
+            # Сообщение, разбитое по строкам
+            msg_lines = msg.splitlines()
+            for idx, line in enumerate(msg_lines[:panel_height - 3]):
+                self.stdscr.addnstr(
+                    start_y + idx + 1, start_x + 2,
+                    line.strip(), panel_width - 4, curses.A_NORMAL
+                )
+            # Footer
+            footer = "Press Esc to close"
+            self.stdscr.addnstr(
+                start_y + panel_height - 2, start_x + 2,
+                footer, panel_width - 4, curses.A_DIM
+            )
+        except curses.error:
+            pass
 
 
     def _draw_text_with_syntax_highlighting(self):
