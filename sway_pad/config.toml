@@ -34,7 +34,7 @@ operator = "white"
 escape = "cyan"       
 
 [fonts]
-font_family = "monospace"
+font_family = "monospace"    # Используется системный моноширинный шрифт
 font_size = 12
 
 [keybindings]
@@ -43,7 +43,7 @@ copy                 = "ctrl+c"
 cut                  = "ctrl+x"
 paste                = "ctrl+v"
 undo                 = "ctrl+z"
-redo                 = "ctrl+shift+z"
+redo                 = "shift+z"
 quit                 = 17
 save_file            = 19 
 open_file            = "ctrl+o"
@@ -58,7 +58,8 @@ git_menu     = "f9"
 goto_line = "ctrl+g"
 tab = "tab"
 comment_line = "alt+#"
-toggle_insert_mode = "insert"   
+toggle_insert_mode = "insert"
+lint = "f4"   
 
 # ── перемещение курсора / выделение ───────────────────────────────
 extend_selection_right = "shift+right"
@@ -83,7 +84,8 @@ auto_brackets = true
 
 [settings]
 # Auto-save interval in minutes (0 to disable)
-auto_save_interval = 1
+auto_save_interval = 5
+show_git_info = true
 
 [theme]
 name = "dark"
