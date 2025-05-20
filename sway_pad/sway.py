@@ -346,27 +346,87 @@ else:
 class SwayEditor:
     """The main class of the Sway-Pad editor."""
        
-    def _set_status_message(self, message, is_lint=False):
+    def _set_status_message(self, 
+                            message_for_statusbar: str, 
+                            is_lint_status: bool = False, 
+                            full_lint_output: Optional[str] = None,
+                            activate_lint_panel_if_issues: bool = False):
         """
-        Puts the status message in the queue, avoiding duplicates.
+        Устанавливает статусное сообщение. 
+        Для сообщений линтера также обновляет содержимое панели линтера.
+
+        :param message_for_statusbar: Сообщение для отображения в статус-баре.
+        :param is_lint_status: True, если это статусное сообщение от линтера.
+        :param full_lint_output: Полный вывод линтера для панели (используется, если is_lint_status=True).
+                                 Если None и is_lint_status=True, self.lint_panel_message не изменяется.
+        :param activate_lint_panel_if_issues: Если True и is_lint_status=True, 
+                                              панель линтера будет активирована, если full_lint_output 
+                                              не является сообщением "Нет проблем".
         """
-        if is_lint:
-            self.lint_panel_message = message
-            self.lint_panel_active = True
-            logging.debug(f"Lint panel message set: {message}")
-        else:
+        if is_lint_status:
+            # Обновляем содержимое панели линтера, если предоставлен полный вывод
+            if full_lint_output is not None:
+                self.lint_panel_message = full_lint_output
+                logging.debug(f"Сообщение панели линтера обновлено: '{str(full_lint_output)[:100]}...'")
+            
+            # Сообщение для статус-бара, связанное с линтером
+            # Его можно отображать иначе или в специальном месте, если это предусмотрено
+            # Для простоты, пока будем логировать и предполагать, что статус-бар его как-то учтет
+            # (например, _draw_status_bar() может проверить self.current_lint_statusbar_message)
+            # self.current_lint_statusbar_message = f"[LINT] {message_for_statusbar}" 
+            # Либо просто передаем его в общую очередь, как и обычные сообщения
+            
+            logging.debug(f"Статусное сообщение линтера: {message_for_statusbar}")
+            # Поместим его в обычную очередь, чтобы оно отобразилось в статус-баре
+            # Можно добавить префикс, чтобы визуально отличать
+            try:
+                # Можно добавить префикс, чтобы отличать сообщения линтера в статус-баре
+                # self._msg_q.put_nowait(f"[Линтер] {message_for_statusbar}")
+                self._msg_q.put_nowait(str(message_for_statusbar)) # Или без префикса
+                if not hasattr(self, "_last_status_msg_sent"): self._last_status_msg_sent = None # Инициализация если нет
+                self._last_status_msg_sent = message_for_statusbar # Обновляем последнее отправленное
+            except queue.Full:
+                logging.error("Очередь статусных сообщений переполнена (сообщение линтера).")
+            except Exception as e:
+                logging.error(f"Не удалось добавить статусное сообщение линтера в очередь: {e}")
+
+            # Активируем панель, если есть что показать и activate_lint_panel_if_issues=True
+            # и сообщение не является "Нет проблем"
+            if activate_lint_panel_if_issues and self.lint_panel_message:
+                # Простое условие "нет проблем" - можно сделать более надежным
+                no_issues_messages = [
+                    "Flake8: Нет проблем.", 
+                    "Flake8: No issues found." # Добавим англ. вариант на всякий случай
+                ]
+                if self.lint_panel_message.strip() not in no_issues_messages:
+                    self.lint_panel_active = True
+                    # self.show_lint_panel() # Если show_lint_panel только меняет флаг, то это избыточно.
+                                          # Если он делает что-то еще (например, фокусирует), то нужно.
+                    logging.debug("Панель линтера активирована из-за наличия проблем.")
+                else:
+                    # Если проблем нет, панель можно деактивировать или оставить как есть
+                    # self.lint_panel_active = False 
+                    logging.debug("Проблем линтинга не найдено, панель не активируется (или деактивируется).")
+            elif self.lint_panel_message and not self.lint_panel_active and is_lint_status:
+                # Если это сообщение линтера, и оно не пустое, и панель еще не активна,
+                # но activate_lint_panel_if_issues=False, то панель не активируем автоматически.
+                # Это для случаев, когда мы просто хотим обновить сообщение, но не обязательно сразу показывать.
+                pass
+
+        else: # Обычное статусное сообщение
             if not hasattr(self, "_last_status_msg_sent"):
                 self._last_status_msg_sent = None
-            if message == self._last_status_msg_sent:
-                return
+            # Предотвращаем дублирование подряд идущих одинаковых сообщений
+            if message_for_statusbar == self._last_status_msg_sent:
+                return 
             try:
-                self._msg_q.put_nowait(str(message))
-                self._last_status_msg_sent = message
-                logging.debug(f"Queued status message: {message}")
+                self._msg_q.put_nowait(str(message_for_statusbar))
+                self._last_status_msg_sent = message_for_statusbar # Обновляем для обычных сообщений
+                logging.debug(f"Сообщение в очереди статуса: {message_for_statusbar}")
             except queue.Full:
-                logging.error("Status message queue is full")
+                logging.error("Очередь статусных сообщений переполнена.")
             except Exception as e:
-                logging.error(f"Failed to queue status message: {e}")
+                logging.error(f"Не удалось добавить сообщение в очередь статуса: {e}")
 
 
     def __init__(self, stdscr):
@@ -507,28 +567,26 @@ class SwayEditor:
 
         logging.info("SwayEditor initialized successfully")
 
+
     # ─────────────────────  Инициализация клавиатурных привязок  ─────────────────────
-    def _load_keybindings(self) -> dict[str, int | str]:
+    def _load_keybindings(self) -> dict[str, int | str]: # Возвращаемый тип может быть просто dict[str, int] теперь
         """
         Читает раздел [keybindings] из config.toml и формирует
-        словарь {action: key_code | printable_char}.  Плюс — сразу
-        предупреждает, если TERM/terminfo не отдаёт KEY_Fn, а в конфиге
-        всё‑таки прописан 'fN'.
+        словарь {action: key_code}.
         """
-        # ── 0. значения по умолчанию ─────────────────────────────────────────────
         defaults = {
             "delete":        "del",
             "paste":         "ctrl+v",
             "copy":          "ctrl+c",
             "cut":           "ctrl+x",
             "undo":          "ctrl+z",
-            "redo":          "shift+z",
+            "redo":          "shift+z", # <--- Теперь должно парситься правильно
             "new_file":      "f2",
             "open_file":     "ctrl+o",
             "save_file":     "ctrl+s",
             "save_as":       "f5",
             "select_all":    "ctrl+a",
-            "quit":          "ctrl+q",
+            "quit":          "ctrl+q", # Ctrl+Q может быть занят терминалом (XOFF)
             "goto_line":     "ctrl+g",
             "git_menu":      "f9",
             "help":          "f1",
@@ -537,160 +595,171 @@ class SwayEditor:
             "search_and_replace": "f6",
             "cancel_operation": "esc",
             "tab":           "tab",
-            "lint":          "f4"
+            "lint":          "f4" # Переименовано из show_lint_panel, если действие 'lint'
         }
 
         cfg = self.config.get("keybindings", {})
-        kb: dict[str, int | str] = {}
+        kb: dict[str, int] = {} # Теперь здесь будет только int
 
-        # ── 1. пользовательские + дефолтные бинды ───────────────────────────────
-        for action, def_key in defaults.items():
-            key_str = cfg.get(action, def_key)
+        for action, def_key_str in defaults.items():
+            key_str_config = cfg.get(action, def_key_str)
 
-            # пустая строка / None  → бинд отключён
-            if not key_str:
-                logging.debug("Keybinding for %s disabled by user", action)
+            if not key_str_config:
+                logging.debug(f"Привязка для '{action}' отключена пользователем.")
                 continue
-            # NEW    
+            
             try:
-                # Отладочная печать перед вызовом parse_key
-                print(f"DEBUG: In _load_keybindings, for action '{action}'. self.parse_key exists: {hasattr(self, 'parse_key')}")
-                if hasattr(self, 'parse_key'):
-                    print(f"DEBUG: self.parse_key is: {self.parse_key}")
-                else:
-                    print(f"DEBUG: self.parse_key DOES NOT EXIST in _load_keybindings!")
-                    # print(f"DEBUG: dir(self) in _load_keybindings: {dir(self)}")
-
-                kb[action] = self.parse_key(key_str)      # str → int|str # Строка 522 в вашем логе
-
-
+                # _decode_keystring всегда должен возвращать int или выбрасывать исключение
+                code = self._decode_keystring(key_str_config) 
+                kb[action] = code
             except ValueError as e:
-                logging.error("Keybinding [%s]=%r skipped: %s", action, key_str, e)
-            except AttributeError as ae: # Явно ловим AttributeError здесь для отладки
-                print(f"CRITICAL DEBUG: AttributeError in _load_keybindings for action '{action}', key_str '{key_str}': {ae}")
-                traceback.print_exc()
-                raise    
+                logging.error(f"Ошибка привязки клавиши [{action}]={key_str_config!r}: {e}")
+            # Убрал AttributeError, т.к. _decode_keystring его не должен выбрасывать при правильной работе
 
-        # ── 2. «неизменяемые» Shift‑стрелки, Home/End и т.п. ───────────────────
-        kb.update({
-            "extend_selection_right": curses.KEY_SRIGHT,
-            "extend_selection_left":  curses.KEY_SLEFT,
-            "select_to_home":         curses.KEY_SHOME,
-            "select_to_end":          curses.KEY_SEND,
-            "extend_selection_up":    curses.KEY_SR,
-            "extend_selection_down":  curses.KEY_SF,
-        })
+        # Добавляем неизменяемые Shift-стрелки и т.д.
+        # Эти действия не должны быть в defaults, т.к. они не переопределяются из конфига таким же образом
+        # Либо они должны быть частью action_method_map и их можно переопределить,
+        # либо они жестко задаются в _setup_action_map.
+        # Если они здесь, то они будут int-кодами, что правильно.
+        # kb.update({
+        #     "extend_selection_right": curses.KEY_SRIGHT,
+        #     # ... и так далее
+        # })
+        # Лучше это делать в _setup_action_map, как у вас и было.
 
-        # ── 3. предупреждение о нераспознанных F‑клавишах ──────────────────────
-        wanted = {
-            "F1": curses.KEY_F1,  "F2": curses.KEY_F2,  "F3": curses.KEY_F3,
-            "F4": curses.KEY_F4,  "F5": curses.KEY_F5,  "F6": curses.KEY_F6,
-            "F7": curses.KEY_F7,  "F8": curses.KEY_F8,  "F9": curses.KEY_F9,
-            "F10": curses.KEY_F10,"F11": curses.KEY_F11,"F12": curses.KEY_F12,
-        }
-
-        # превращаем все значения (int | str) в конечные int‑коды
-        used_codes = {
-            code if isinstance(code, int) else self._decode_keystring(code)
-            for code in kb.values()
-        }
-
-        for name, ccode in wanted.items():
-            if ccode in used_codes and ccode <= 255:     # 255 ⇒ curses не знает эту KEY_Fn
-                logging.warning(
-                    "%s (%s) appears in keybindings, but curses doesn't report KEY_%s "
-                    "for this TERM (%s).  Check your $TERM / terminfo.",
-                    name.lower(), ccode, name, os.environ.get("TERM", "?")
-                )
-
-        logging.debug("Loaded keybindings: %s", kb)
+        logging.debug(f"Загруженные пользовательские/дефолтные привязки (действие -> код): {kb}")
         return kb
 
 
-    def draw_screen(self, *a, **kw):
-        """Старое имя метода – делегируем новому DrawScreen."""
-        return self.drawer.draw(*a, **kw)
-
-
-    def _decode_keystring(self, s: str) -> int:
+    def _decode_keystring(self, key_str_config: str) -> int:
         """
-        Convert a human‑readable keybinding (e.g. 'ctrl+o', 'f5', 'shift+left')
-        to the corresponding curses key‑code.
-        Extend this mapper as needed.
+        Преобразует человеко-читаемую привязку клавиши из конфига 
+        (например, 'ctrl+o', 'f5', 'shift+z', 'Z', 'del')
+        в соответствующий curses-код клавиши (int).
         """
-        # если пользователь уже дал числовой код → вернуть как есть
-        if isinstance(s, int):
-            return s
+        if isinstance(key_str_config, int): # Если уже int, возвращаем
+            return key_str_config
 
-        s = s.lower()
-        mods, base = [], s
-        if '+' in s:
-            mods, base = s.split('+', 1)
-            mods = mods.split('+')
+        s_orig = key_str_config # Сохраняем оригинальную строку для сообщений об ошибках
+        key_str_lower = key_str_config.strip().lower() # Работаем с нижним регистром для модификаторов и имен
+        
+        if not key_str_lower:
+            raise ValueError("Пустая строка для горячей клавиши")
 
-        def apply_mod(key: int) -> int:
-            # Ctrl + <ASCII> : key & 0x1F
-            if 'ctrl' in mods and 0 <= key <= 0x7F:
-                key = ord(chr(key).upper()) & 0x1F
-            # Shift для спец‑клавиш обрабатывается отдельной таблицей ниже
-            return key
-
-        special: Dict[str, int] = {
+        # Таблица для основных именованных клавиш и некоторых Shift-комбинаций
+        # Ключи здесь должны быть в нижнем регистре
+        named_keys: dict[str, int] = {
             'f1': curses.KEY_F1,  'f2': curses.KEY_F2,  'f3': curses.KEY_F3,
-            'f4': curses.KEY_F4,  'f5': curses.KEY_F5,  'f6': curses.KEY_F6,
-            'f7': curses.KEY_F7,  'f8': curses.KEY_F8,  'f9': curses.KEY_F9,
-            'f10': curses.KEY_F10,'f11': curses.KEY_F11,'f12': curses.KEY_F12,
+            'f4': getattr(curses, 'KEY_F4', 268),  'f5': getattr(curses, 'KEY_F5', 269),  'f6': getattr(curses, 'KEY_F6', 270),
+            'f7': getattr(curses, 'KEY_F7', 271),  'f8': getattr(curses, 'KEY_F8', 272),  'f9': getattr(curses, 'KEY_F9', 273),
+            'f10': getattr(curses, 'KEY_F10', 274),'f11': getattr(curses, 'KEY_F11', 275),'f12': getattr(curses, 'KEY_F12', 276),
             'left': curses.KEY_LEFT,   'right': curses.KEY_RIGHT,
             'up': curses.KEY_UP,       'down': curses.KEY_DOWN,
-            'home': curses.KEY_HOME,   'end': curses.KEY_END,
-            'pgup': curses.KEY_PPAGE,  'pgdn': curses.KEY_NPAGE,
+            'home': curses.KEY_HOME,   'end': getattr(curses, 'KEY_END', 360),
+            'pageup': curses.KEY_PPAGE,  'pgup': curses.KEY_PPAGE,
+            'pagedown': curses.KEY_NPAGE, 'pgdn': curses.KEY_NPAGE,
             'delete': curses.KEY_DC,   'del': curses.KEY_DC,
             'backspace': curses.KEY_BACKSPACE,
-            'insert': 331,  # not in ncurses < 6.3
-        }
-        shifted_special = {
+            'insert': getattr(curses, 'KEY_IC', 331),
+            'tab': ord('\t'), 
+            'enter': curses.KEY_ENTER, # Обычно 10, но KEY_ENTER более переносим
+            'return': curses.KEY_ENTER,
+            'space': ord(' '),
+            'esc': 27, 
+            'escape': 27,
+            # Явные Shift-комбинации для спец. клавиш, которые curses может возвращать
+            # Эти строки должны быть в нижнем регистре
             'shift+left': curses.KEY_SLEFT,
             'shift+right': curses.KEY_SRIGHT,
-            'shift+up': curses.KEY_SR,
-            'shift+down': curses.KEY_SF,
+            'shift+up': getattr(curses, 'KEY_SR', 337), 
+            'shift+down': getattr(curses, 'KEY_SF', 336), 
             'shift+home': curses.KEY_SHOME,
             'shift+end': curses.KEY_SEND,
+            'shift+pgup': getattr(curses, 'KEY_SPREVIOUS', 337),
+            'shift+pgdn': getattr(curses, 'KEY_SNEXT', 336),
+            'shift+tab': getattr(curses, 'KEY_BTAB', 353),
         }
 
-        if s in shifted_special:
-            return shifted_special[s]
-        if base in special:
-            return apply_mod(special[base])
-        # single printable char
-        if len(base) == 1:
-            return apply_mod(ord(base))
-        raise ValueError(f"Unknown key binding: {s!r}")
+        # Сначала проверяем полное совпадение в named_keys (например, для "shift+left")
+        if key_str_lower in named_keys:
+            return named_keys[key_str_lower]
 
-    # ─────────────────────  Настройка действий по клавишам  ─────────────────────
+        # Разбираем модификаторы и базовую клавишу
+        parts = key_str_lower.split('+')
+        base_key_str = parts[-1]    # Последняя часть - базовая клавиша (в нижнем регистре)
+        modifiers = set(parts[:-1]) # Все, кроме последнего - модификаторы (в нижнем регистре)
+
+        base_code: int
+        # Проверяем, не является ли базовая клавиша уже известной именованной клавишей
+        if base_key_str in named_keys: 
+            base_code = named_keys[base_key_str]
+        elif len(base_key_str) == 1:   # Если базовая клавиша - один символ
+            # Если был Shift и это буква, то берем ord() от ЗАГЛАВНОЙ буквы
+            if "shift" in modifiers and 'a' <= base_key_str <= 'z':
+                base_code = ord(base_key_str.upper()) # 'shift+z' -> ord('Z')
+                modifiers.remove("shift") # Модификатор Shift уже учтен
+            else:
+                base_code = ord(base_key_str) # 'a' -> ord('a'), '1' -> ord('1')
+        else:
+            raise ValueError(f"Неизвестная базовая клавиша '{base_key_str}' в '{s_orig}'")
+
+        # Применение оставшихся модификаторов (Ctrl, Alt)
+        if "ctrl" in modifiers:
+            # Для Ctrl+Буква (a-z или A-Z, base_code уже будет ord('a')-ord('z') или ord('A')-ord('Z'))
+            # Преобразуем в диапазон 1-26
+            # chr(base_code).lower() для обработки и 'a' и 'A'
+            if 'a' <= chr(base_code).lower() <= 'z':
+                char_val_for_ctrl = ord(chr(base_code).lower())
+                base_code = char_val_for_ctrl - ord('a') + 1
+                
+                # Если был еще и Shift (для Ctrl+Shift+Буква)
+                # modifiers уже не содержит "shift", если он был использован для заглавной буквы.
+                # Но если конфиг был "ctrl+shift+Z", то base_key_str="z", modifiers=["ctrl", "shift"]
+                # base_code стал ord('Z'). Теперь применяем Ctrl. ord('Z') & 0x1F = 26.
+                # Это стандартно. Если мы хотим кастомные коды для Ctrl+Shift+Буква,
+                # то нужно было бы base_key_str="z", is_shift=True, is_ctrl=True -> 0x100 | (ord('z') - ord('a') + 1)
+                # Текущая логика `base_code = ord(base_key_str.upper())` если есть shift,
+                # а потом `base_code = ord(chr(base_code).lower()) - ord('a') + 1` для ctrl,
+                # означает, что "ctrl+shift+a" и "ctrl+a" дадут одинаковый код (1).
+                # Это не то, что было в вашем parse_key.
+                # Давайте вернем логику для Ctrl+Shift как было у вас:
+                # Если modifiers содержит "shift" и "ctrl" и base_key_str это буква:
+                if "shift" in parts[:-1] and "ctrl" in parts[:-1] and 'a' <= base_key_str <= 'z': # Проверяем исходные модификаторы
+                    base_code = (ord(base_key_str) - ord('a') + 1) | 0x100 # Например, 257 для Ctrl+Shift+A
+                # else: просто Ctrl+буква (уже сделано выше)
+            # Для других Ctrl-комбинаций (например, Ctrl+[), они должны быть в named_keys
+            # или getch() должен возвращать стандартные коды, которые есть в action_map.
+            # else: # Ctrl + не-буква
+            #    base_code = base_code & 0x1F # Общее правило, но может конфликтовать
+
+        if "alt" in modifiers:
+            # Ваша логика с 0x200 для Alt. Это кастомное решение.
+            # Убедитесь, что ваш handle_input может генерировать/распознавать такие коды.
+            base_code |= 0x200 
+            logging.debug(f"Применен Alt-модификатор к '{s_orig}', результат кода: {base_code}")
+
+        return base_code
+
     def _setup_action_map(self) -> dict[int, Callable[..., Any]]:
         """
         Строит словарь {key_code: bound_method}.
 
         Приоритет:
-        1. user‑config (self.keybindings)            — перебивают всё
-        2. встроенные навигация/редактирование       — только если нет user
+        1. self.keybindings (пользовательские/дефолтные из конфига, уже как int коды)
+        2. Встроенные curses-константы для навигации/редактирования.
         """
-        # --- карта «действие» → «метод» ------------------------------------
         action_method_map: dict[str, Callable] = {
-            # файл / проект
+            # ... (ваш action_method_map остается без изменений) ...
             "open_file":  self.open_file,
             "save_file":  self.save_file,
             "save_as":    self.save_file_as,
             "new_file":   self.new_file,
             "git_menu":   self.integrate_git,
-            # буфер обмена
             "copy": self.copy,
             "cut":  self.cut,
             "paste": self.paste,
-            # undo / redo
             "undo": self.undo,
-            "redo": self.redo,
-            # курсор / выделение
+            "redo": self.redo, # Имя действия
             "handle_home":     self.handle_home,
             "handle_end":      self.handle_end,
             "show_lint_panel": self.show_lint_panel, 
@@ -700,7 +769,6 @@ class SwayEditor:
             "select_to_end":  self.select_to_end,
             "extend_selection_up":   self.extend_selection_up,
             "extend_selection_down": self.extend_selection_down,
-            # поиск, сервис
             "find": self.find_prompt,
             "find_next": self.find_next,
             "search_and_replace": self.search_and_replace,
@@ -713,156 +781,370 @@ class SwayEditor:
             "tab": self.handle_smart_tab,
         }
 
-        # 1. пользовательские бинды  (self.keybindings уже содержит int|str)
         final_map: dict[int, Callable] = {}
-        for action, keystr in self.keybindings.items():
-            if keystr in (None, ""):
-                continue  # пропускаем «выключенные» бинды
 
-            # превращаем строку 'ctrl+o' → int‑код; если уже int – оставляем
-            try:
-                code = keystr if isinstance(keystr, int) else self._decode_keystring(keystr)
-            except ValueError as err:
-                logging.error("Bad keybinding %r for action '%s': %s", keystr, action, err)
-                continue
-
-            method = action_method_map.get(action)
+        # 1. Пользовательские/дефолтные биндинги из self.keybindings
+        # self.keybindings теперь содержит { "action_name_str": key_code_int }
+        for action_name, key_code in self.keybindings.items():
+            method = action_method_map.get(action_name)
             if method:
-                final_map[code] = method
+                if key_code is not None: # Убедимся, что код клавиши не None (если parse_key мог вернуть)
+                    final_map[key_code] = method
+                    logging.debug(f"Сопоставление из конфига: Действие '{action_name}' -> Код {key_code} -> Метод {method.__name__}")
             else:
-                logging.warning("Key '%s' (%r) игнорируется — нет метода '%s'",
-                                keystr, code, action)
+                # Это предупреждение должно было сработать в _load_keybindings, если действие не найдено
+                logging.warning(f"Действие '{action_name}' из keybindings не найдено в action_method_map.")
 
-        # 2. встроённые «по умолчанию» — только если пользователь НЕ переопределил
-        builtin: dict[int, Callable] = {
+        # 2. Встроенные «по умолчанию» curses-константы — только если пользователь НЕ переопределил
+        #    эту КОНКРЕТНУЮ КЛАВИШУ для другого действия.
+        #    Или если мы хотим, чтобы они всегда работали в дополнение.
+        #    setdefault здесь хороший выбор.
+        builtin_key_to_method: dict[int, Callable] = {
             curses.KEY_UP:      self.handle_up,
             curses.KEY_DOWN:    self.handle_down,
             curses.KEY_LEFT:    self.handle_left,
             curses.KEY_RIGHT:   self.handle_right,
-            curses.KEY_HOME:    self.handle_home,
-            curses.KEY_END:     self.handle_end,
+            # curses.KEY_HOME:    self.handle_home, # Уже должно быть через "handle_home" из action_method_map
+            # curses.KEY_END:     self.handle_end,   # Аналогично
             curses.KEY_PPAGE:   self.handle_page_up,
             curses.KEY_NPAGE:   self.handle_page_down,
-            curses.KEY_BACKSPACE: self.handle_backspace,
-            curses.KEY_DC:      self.handle_delete,
+            curses.KEY_BACKSPACE: self.handle_backspace, # Может конфликтовать с Ctrl+H, если терминал так шлет
+            # curses.KEY_DC:      self.handle_delete, # Уже должно быть через "delete"
             curses.KEY_ENTER:   self.handle_enter,
             10:                 self.handle_enter,  # \n
             13:                 self.handle_enter,  # \r
+            # Shift + стрелки и т.д.
             curses.KEY_SLEFT:   self.extend_selection_left,
             curses.KEY_SRIGHT:  self.extend_selection_right,
-            curses.KEY_SR:      self.extend_selection_up,
-            curses.KEY_SF:      self.extend_selection_down,
+            getattr(curses, 'KEY_SR', 337): self.extend_selection_up, # KEY_SR или его код
+            getattr(curses, 'KEY_SF', 336): self.extend_selection_down, # KEY_SF или его код
             curses.KEY_SHOME:   self.select_to_home,
             curses.KEY_SEND:    self.select_to_end,
-            19:                 self.save_file,
-            24:                 self.exit_editor,    # Ctrl+X
-            26:                 self.undo, # Ctrl+Z
-            90:                 self.redo, # Shift+Z
-            17:                 self.exit_editor,
-            curses.KEY_F4:      self.show_lint_panel,  # F4 – открыть панель линтера
+            
+            # Некоторые стандартные Ctrl-комбинации, которые могут не покрываться конфигом
+            # или для которых parse_key не генерирует коды 1-26 (если они не буквы)
+            # 26:                 self.undo, # Ctrl+Z (если parse_key("ctrl+z") дает 26)
+            # 24:                 self.cut,  # Ctrl+X (если parse_key("ctrl+x") дает 24) 
+                                        # Ваш _decode_keystring("ctrl+x") вернет 24
+            
+            # 90: self.redo, # Shift+Z (ord('Z')) - это уже должно прийти из self.keybindings
+                            # если в конфиге redo = "shift+z" или redo = "Z"
+            
             27:                 self.cancel_operation, # Esc
-            331:                self.toggle_insert_mode,   # Insert
-            410:                self.handle_resize,        # KEY_RESIZE
+            getattr(curses, 'KEY_IC', 331): self.toggle_insert_mode,   # Insert
+            curses.KEY_RESIZE:  self.handle_resize, # KEY_RESIZE обычно 410
         }
-        for code, method in builtin.items():
-            final_map.setdefault(code, method)  # не затирает user‑binding
+        # Добавляем KEY_F4, если он не был переопределен
+        f4_code = getattr(curses, 'KEY_F4', 268)
+        if f4_code not in final_map and "show_lint_panel" in action_method_map:
+             final_map[f4_code] = action_method_map["show_lint_panel"]
 
-        logging.debug("Final action map: %s", final_map)
+
+        for code, method in builtin_key_to_method.items():
+            final_map.setdefault(code, method)
+
+        logging.debug(f"Итоговая карта действий (Код -> Метод): { {k: v.__name__ for k,v in final_map.items()} }")
         return final_map
 
+        # ─────────────────────  Обработчик ввода  ─────────────────────
+    def handle_input(self, key: int | str) -> None:
+        """
+        Обработчик всех нажатий клавиш.
+        Поддерживает: Unicode-символы (включая китайский/польский/кириллицу),
+        спец-клавиши, горячие клавиши, стрелки и др.
+        """
+        logging.debug("handle_input → key = %r (%s)", key, type(key).__name__)
+        with self._state_lock:
+            try:
+                logging.debug("Received key code: %r", key)
+
+                # ── 1. Unicode‑строка от get_wch() (печатаемый символ) ─────
+                if isinstance(key, str) and len(key) == 1:
+                    if wcswidth(key) > 0:
+                        self.insert_text(key)
+                    else:
+                        self._set_status_message(f"Ignored zero‑width char: {repr(key)}")
+                    return
+
+                # ── 2. Горячая клавиша из action_map ───────────────────────
+                if isinstance(key, int) and key in self.action_map:
+                    self.action_map[key]() # Если key = 27, вызовется cancel_operation
+                    return
+
+                # ── 3. Спец‑клавиши и навигация ────────────────────────────
+                if key in (curses.KEY_ENTER, 10, 13):
+                    self.handle_enter()
+                elif key in (curses.KEY_UP, 259, 450):
+                    self.handle_up()
+                elif key in (curses.KEY_DOWN, 258, 456):
+                    self.handle_down()
+                elif key in (curses.KEY_LEFT, 260, 452):
+                    self.handle_left()
+                elif key in (curses.KEY_RIGHT, 261, 454):
+                    self.handle_right()
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
+                    self.handle_backspace()
+                elif key in (curses.KEY_DC, 330, 462):
+                    self.handle_delete()
+                elif key in (curses.KEY_HOME, 262, 449):
+                    self.handle_home()
+                elif key in (curses.KEY_END, 360, 455):
+                    self.handle_end()
+                elif key in (curses.KEY_PPAGE, 339, 451):
+                    self.handle_page_up()
+                elif key in (curses.KEY_NPAGE, 338, 457):
+                    self.handle_page_down()
+                elif key == curses.ascii.TAB:
+                    self.handle_smart_tab()
+                elif key == curses.KEY_SRIGHT:
+                    self.extend_selection_right()
+                elif key == curses.KEY_SLEFT:
+                    self.extend_selection_left()
+                elif key == curses.KEY_SHOME:
+                    self.select_to_home()
+                elif key == curses.KEY_SEND:
+                    self.select_to_end()
+                elif key in (curses.KEY_SR, 337):
+                    self.extend_selection_up()
+                elif key in (curses.KEY_SF, 336):
+                    self.extend_selection_down()
+                elif key == 26:  # Undo
+                    self.undo()
+                elif key == 90:  # Redo
+                    self.redo()
+                elif key == 331:  # Insert
+                    self.toggle_insert_mode()
+                elif key == 410:  # Resize
+                    self.handle_resize()
+                elif key in (curses.KEY_F4, 268):  # F4 lint
+                    self.show_lint_panel() 
+                elif isinstance(key, str) and key.startswith("\x1b"): # \x1b это Esc
+                    if key == "\x1b[Z":  # Shift-Tab
+                        self.handle_smart_tab()
+                    else:
+                        # Если get_wch() вернул "\x1b" как строку (а не int 27),
+                        # то action_map[27] не сработает.
+                        # Сюда попадет одиночный Esc, если он пришел как строка "\x1b"
+                        self._set_status_message(f"Unhandled escape: {key!r}") 
+                elif key == 27: # Это условие может быть избыточным, если 27 уже есть в action_map
+                    self.cancel_operation()
+                elif isinstance(key, int) and 32 <= key < 1114112 and key not in self.action_map:
+                    try:
+                        ch = chr(key)
+                        if wcswidth(ch) > 0:
+                            self.insert_text(ch)
+                            return
+                    except Exception:
+                        logging.debug(f"Invalid ordinal: {key}")
+                else:
+                    KEY_LOGGER.debug("Unhandled key: %r", key)
+                    self._set_status_message(f"Unhandled: {repr(key)}")
+
+            except Exception:
+                logging.exception("Input handler error")
+                self._set_status_message("Input handler error (see log)")
+
+
+
+    def draw_screen(self, *a, **kw):
+        """Старое имя метода – делегируем новому DrawScreen."""
+        return self.drawer.draw(*a, **kw)
+
+
     # ─────────────────────  Запуск flake8 в отдельном потоке  ─────────────────────
-    def run_flake8_on_code(self, code_string: str, filename: Optional[str] = "<buffer>") -> None:
+    def run_flake8_on_code(self, code_string: str, filename: Optional[str] = "<буфер>") -> None:
         """
         Запускает анализ Python-кода с помощью Flake8 в отдельном потоке.
-        Результат помещается во всплывающую панель линтера для пользователя.
+        Результаты (ошибки/предупреждения или сообщение об их отсутствии)
+        помещаются в self.lint_panel_message и отображаются в панели линтера.
+        Краткий статус выводится в статус-бар.
 
         :param code_string: Исходный код Python для проверки.
-        :param filename: Имя файла (опционально, только для логирования).
+        :param filename: Имя файла (используется для логирования и Flake8).
         """
+        # Используем <буфер> если имя файла не предоставлено или None
+        effective_filename_for_flake8 = filename if filename and filename != "noname" else "<буфер>"
+        
         # Ограничение для больших файлов — для производительности
-        if len(code_string.encode('utf-8', errors='replace')) > 1_000_000:
-            self._set_status_message("File is too large for flake8 analysis (max 1MB)", is_lint=True)
-            return
+        # Проверяем размер строки, т.к. кодирование может быть тяжелым для очень больших строк
+        if len(code_string) > 750_000: # Примерный лимит по символам, чтобы избежать долгого encode
+            try:
+                if len(code_string.encode('utf-8', errors='ignore')) > 1_000_000: # 1MB
+                    msg = "Flake8: Файл слишком большой для анализа (макс. ~1MB)"
+                    logging.warning(msg + f" (файл: {effective_filename_for_flake8})")
+                    self._set_status_message(
+                        message_for_statusbar=msg, 
+                        is_lint_status=True, 
+                        full_lint_output=msg, 
+                        activate_lint_panel_if_issues=True
+                    )
+                    return
+            except Exception as e:
+                logging.warning(f"Не удалось проверить размер файла для flake8: {e}")
+                # Продолжаем, но с осторожностью
 
-        tmp_name: Optional[str] = None
+        tmp_file_path: Optional[str] = None
 
         try:
+            # Создаем временный файл с суффиксом .py, чтобы flake8 его правильно распознал
+            # delete=False, т.к. flake8 должен иметь возможность открыть его по имени
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', errors='replace') as tmp:
-                tmp_name = tmp.name
+                tmp_file_path = tmp.name
                 tmp.write(code_string)
+            logging.debug(f"Код для flake8 записан во временный файл: {tmp_file_path}")
         except Exception as e:
-            logging.exception(f"Failed to create temp file for flake8: {e}")
-            self._set_status_message("Error creating temp file for flake8", is_lint=True)
+            logging.exception(f"Не удалось создать временный файл для flake8: {e}")
+            msg = "Flake8: Ошибка создания временного файла"
+            self._set_status_message(
+                message_for_statusbar=msg, 
+                is_lint_status=True, 
+                full_lint_output=f"{msg}\n{e}", 
+                activate_lint_panel_if_issues=True
+            )
             return
 
-        def _run():
+        # Внутренняя функция, которая будет выполняться в отдельном потоке
+        def _run_flake8_thread():
+            nonlocal tmp_file_path # Указываем, что tmp_file_path из внешней области видимости
+            
+            full_output_for_panel: str
+            short_message_for_statusbar: str
+            show_panel_on_issues: bool = True # По умолчанию показываем панель, если есть проблемы
+
             try:
-                cmd = [sys.executable, "-m", "flake8", "--isolated", "--max-line-length=88", tmp_name]
-                logging.debug(f"Running flake8 command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
+                # Собираем команду для запуска flake8
+                # Используем sys.executable для запуска модуля flake8 из текущего окружения
+                # Передаем имя временного файла flake8. Если бы мы передавали имя оригинального файла,
+                # flake8 мог бы попытаться найти файлы конфигурации относительно него.
+                # Для анализа содержимого буфера, передача имени временного файла с --isolated лучше.
+                # Если filename реальный, flake8 может его использовать для некоторых правил (например, first-party import)
+                # Но для анализа содержимого, которое может отличаться от сохраненного файла, tmp_file_path надежнее.
+                # Флаг --stdin-display-name можно использовать, если передавать код через stdin,
+                # но раз мы используем файл, то tmp_file_path будет в выводе flake8.
+                
+                # flake8 может использовать filename для отображения, если он передан,
+                # но анализировать будет tmp_file_path.
+                # Чтобы вывод был более понятным, если filename это "<буфер>",
+                # можно использовать --stdin-display-name (если бы читали из stdin).
+                # Для файлового анализа, flake8 сам использует имя файла.
+                # Если мы хотим, чтобы в выводе flake8 было имя нашего файла (или <буфер>),
+                # а не имя временного файла, это сложнее без stdin.
+                # Пока оставим анализ tmp_file_path.
+                
+                flake8_cmd = [
+                    sys.executable, "-m", "flake8",
+                    "--isolated",  # Игнорировать пользовательские/проектные конфиги flake8
+                    f"--max-line-length={self.config.get('flake8', {}).get('max_line_length', 88)}",
+                    # Можно добавить другие настраиваемые параметры flake8 из self.config
+                    # например, --select, --ignore
+                    # select_codes = self.config.get('flake8', {}).get('select')
+                    # if select_codes: flake8_cmd.extend(["--select", select_codes])
+                    # ignore_codes = self.config.get('flake8', {}).get('ignore')
+                    # if ignore_codes: flake8_cmd.extend(["--ignore", ignore_codes])
+                    tmp_file_path  # Файл для анализа
+                ]
+                logging.debug(f"Выполнение команды flake8: {' '.join(shlex.quote(str(c)) for c in flake8_cmd)}")
 
                 process = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=20,
-                    encoding='utf-8',
-                    errors='replace'
+                    flake8_cmd,
+                    capture_output=True, # Захватываем stdout и stderr
+                    text=True,           # Декодируем вывод как текст (обычно utf-8 по умолчанию для text=True)
+                    check=False,         # Не выбрасывать исключение при ненулевом коде возврата
+                    timeout=self.config.get('flake8', {}).get('timeout', 20), # Таймаут для команды
+                    encoding='utf-8',    # Явно указываем кодировку для вывода
+                    errors='replace'     # Как обрабатывать ошибки декодирования
                 )
 
-                output = process.stdout.strip()
+                raw_stdout = process.stdout.strip()
+                raw_stderr = process.stderr.strip()
+
+                if raw_stderr:
+                    logging.warning(f"Flake8 stderr для {tmp_file_path} (файл редактора: {effective_filename_for_flake8}): {raw_stderr}")
+
                 if process.returncode == 0:
-                    output = ""  # Flake8 не нашел ошибок
-                elif process.returncode == 1:
-                    output = "Flake8: No issues found."
-                elif process.returncode == 2:
-                    output = "Flake8: Error occurred during analysis."
+                    # Код 0: flake8 не нашел проблем (или все отфильтровано)
+                    full_output_for_panel = f"Flake8 ({effective_filename_for_flake8}): Нет проблем."
+                    short_message_for_statusbar = "Flake8: Нет проблем."
+                    show_panel_on_issues = False # Не показываем панель, если нет проблем
                 else:
-                    output = f"Flake8: Unknown error (code {process.returncode})"
+                    # Ненулевой код возврата: есть проблемы или ошибка flake8
+                    if raw_stdout: # flake8 вернул список проблем
+                        # Заменяем имя временного файла на имя файла в редакторе для лучшей читаемости
+                        # Flake8 обычно выводит <tmp_file_path>:<line>:<col>: <error_code> <message>
+                        # Мы хотим заменить <tmp_file_path> на effective_filename_for_flake8
+                        # Это нужно делать аккуратно, чтобы не заменить части кода, если они похожи на имя файла.
+                        # Имя tmp_file_path обычно содержит случайные символы.
+                        # Упрощенная замена (может потребовать более надежного regex, если имена файлов сложные):
+                        # Заменяем только если tmp_file_path не None и присутствует в строке
+                        if tmp_file_path:
+                            full_output_for_panel = raw_stdout.replace(tmp_file_path + ":", effective_filename_for_flake8 + ":")
+                        else:
+                            full_output_for_panel = raw_stdout
+                        
+                        lines = full_output_for_panel.splitlines()
+                        num_issues = len(lines)
+                        first_issue_preview = lines[0][:70] + "..." if lines and len(lines[0]) > 70 else (lines[0] if lines else "")
+                        short_message_for_statusbar = f"Flake8: {num_issues} проблем. ({first_issue_preview})"
+                    elif raw_stderr: # Нет stdout, но есть stderr - вероятно, ошибка конфигурации flake8 или самого flake8
+                        full_output_for_panel = f"Flake8 ({effective_filename_for_flake8}) ошибка выполнения:\n{raw_stderr}"
+                        short_message_for_statusbar = "Flake8: Ошибка выполнения."
+                    else: # Ненулевой код, но нет вывода - странная ситуация
+                        full_output_for_panel = f"Flake8 ({effective_filename_for_flake8}): Неизвестная ошибка (код {process.returncode}), вывод пуст."
+                        short_message_for_statusbar = f"Flake8: Неизвестная ошибка (код {process.returncode})."
                 
-                # Формируем сообщение для панели линтера
-                self.lint_panel_message = output  # сохранили полный вывод Flake8
-                self._set_status_message(message)  # отображение краткого статуса:contentReference[oaicite:4]{index=4}
-                stderr = process.stderr.strip()
-
-
-                if stderr:
-                    logging.warning(f"Flake8 stderr for {tmp_name}: {stderr}")
-
-                if not output:
-                    message = "Flake8: No issues found."
-                else:
-                    lines = output.splitlines()
-                    # Формируем полный вывод для панели (можно увеличить лимит строк)
-                    preview_lines = 10
-                    message = f"Flake8 results ({len(lines)} issues):\n" + "\n".join(lines[:preview_lines])
-                    if len(lines) > preview_lines:
-                        message += f"\n(+ {len(lines) - preview_lines} more...)"
-
-                # Передача результата во всплывающую панель линтера
-                self._set_status_message(message, is_lint=True)
-
             except FileNotFoundError:
-                self._set_status_message(
-                    "Flake8: Executable not found (install with 'pip install flake8')",
-                    is_lint=True
-                )
+                # Это произойдет, если sys.executable или flake8 не найдены
+                msg = "Flake8: Не найден (установите 'pip install flake8')"
+                logging.error(msg)
+                full_output_for_panel = msg
+                short_message_for_statusbar = msg
+                show_panel_on_issues = True
             except subprocess.TimeoutExpired:
-                self._set_status_message("Flake8: Command timed out.", is_lint=True)
+                msg = f"Flake8 ({effective_filename_for_flake8}): Превышено время ожидания команды."
+                logging.warning(msg)
+                full_output_for_panel = msg
+                short_message_for_statusbar = msg
+                show_panel_on_issues = True
             except Exception as e:
-                logging.exception(f"Error running flake8 on code for {tmp_name}: {e}")
-                self._set_status_message(f"Flake8 error: {str(e)[:80]}...", is_lint=True)
+                logging.exception(f"Ошибка при выполнении flake8 для {tmp_file_path} (файл редактора: {effective_filename_for_flake8}): {e}")
+                msg_short = f"Flake8 ошибка: {str(e)[:60]}..."
+                msg_full = f"Flake8 ({effective_filename_for_flake8}) внутренняя ошибка:\n{e}"
+                full_output_for_panel = msg_full
+                short_message_for_statusbar = msg_short
+                show_panel_on_issues = True
             finally:
                 # Удаление временного файла
-                if tmp_name and os.path.exists(tmp_name):
+                if tmp_file_path and os.path.exists(tmp_file_path):
                     try:
-                        os.remove(tmp_name)
-                        logging.debug(f"Removed temp file {tmp_name}")
-                    except Exception as e:
-                        logging.warning(f"Failed to remove temp file {tmp_name}: {e}")
+                        os.remove(tmp_file_path)
+                        logging.debug(f"Временный файл {tmp_file_path} удален.")
+                    except Exception as e_remove:
+                        logging.warning(f"Не удалось удалить временный файл {tmp_file_path}: {e_remove}")
+            
+            # Устанавливаем сообщения и решаем, показывать ли панель
+            # Важно: этот вызов должен быть потокобезопасным, если _set_status_message
+            # напрямую меняет UI. Но так как он кладет в очередь или меняет атрибуты,
+            # а отрисовка в основном потоке, это должно быть нормально.
+            # Для большей безопасности, если _set_status_message делает что-то сложное с curses,
+            # лучше передавать результаты в основной поток через очередь.
+            # Но текущая реализация _set_status_message (изменение атрибутов и put_nowait в очередь)
+            # должна быть достаточно безопасной для вызова из потока.
+            self._set_status_message(
+                message_for_statusbar=short_message_for_statusbar, 
+                is_lint_status=True, 
+                full_lint_output=full_output_for_panel,
+                activate_lint_panel_if_issues=show_panel_on_issues
+            )
+            # Если _set_status_message не вызывает show_lint_panel, а только меняет флаг,
+            # то явный вызов show_lint_panel здесь не нужен, т.к. _set_status_message
+            # установит self.lint_panel_active.
+            # if show_panel_on_issues and full_output_for_panel and \
+            #    full_output_for_panel != f"Flake8 ({effective_filename_for_flake8}): Нет проблем.":
+            #     self.show_lint_panel() # Или пусть это делает _set_status_message
 
-        # Запуск анализа в отдельном потоке (не блокирует UI)
-        threading.Thread(target=_run, daemon=True).start()
+        # Запуск анализа в отдельном потоке
+        lint_thread = threading.Thread(target=_run_flake8_thread, daemon=True)
+        lint_thread.start()
 
 
     def show_lint_panel(self):
@@ -873,13 +1155,58 @@ class SwayEditor:
         # Панель будет нарисована при следующей перерисовке экрана в Drawer.draw()
 
 
-    def run_lint_async(self, code: str) -> None:
+    def run_lint_async(self, code: Optional[str] = None) -> None:
         """
-        Асинхронно запускает flake8-анализ для переданного кода.
+        Асинхронно запускает flake8-анализ для текущего содержимого буфера,
+        если определен язык Python.
         Результат отображается во всплывающей панели линтера.
-        :param code: Исходный код Python для проверки.
+
+        :param code: Опционально, исходный код Python для проверки. 
+                     Если None, используется текущее содержимое self.text.
         """
-        self.run_flake8_on_code(code, self.filename)
+        # 1. Убедимся, что лексер определен. Если нет, попытаемся определить.
+        if self._lexer is None:
+            self.detect_language() 
+            # После detect_language() self._lexer должен быть установлен (хотя бы в TextLexer)
+
+        # 2. Проверяем, является ли текущий язык Python
+        #    Можно проверять по имени лексера или по его типу.
+        #    Имена могут варьироваться ('python', 'python3', 'py', 'ipython', 'cython', etc.)
+        #    Проверка типа может быть более надежной, если вы используете стандартные лексеры Pygments.
+        is_python_language = False
+        if self._lexer: # Если лексер вообще определен
+            lexer_name_lower = self._lexer.name.lower()
+            # Распространенные имена для Python лексеров
+            python_lexer_names = {'python', 'python3', 'py', 'cython', 'ipython', 'sage'} 
+            if lexer_name_lower in python_lexer_names:
+                is_python_language = True
+            # Альтернативно или дополнительно, можно проверить тип:
+            # from pygments.lexers.python import PythonLexer, Python3Lexer, CythonLexer # и т.д.
+            # if isinstance(self._lexer, (PythonLexer, Python3Lexer, ...)):
+            #     is_python_language = True
+        
+        if not is_python_language:
+            message = "Flake8: Анализ доступен только для Python файлов."
+            logging.info(f"run_lint_async: Пропуск линтинга, текущий лексер: {self._lexer.name if self._lexer else 'None'}")
+            # Отображаем сообщение в панели линтера, чтобы пользователь знал, почему ничего не происходит
+            self._set_status_message(message_for_statusbar=message, is_lint_status=True, full_lint_output=message)
+            if self.lint_panel_message: # Показать панель с сообщением
+                self.show_lint_panel()
+            return
+
+        # 3. Если код не передан, берем текущее содержимое буфера
+        if code is None:
+            code_to_lint = "\n".join(self.text)
+        else:
+            code_to_lint = code
+
+        # 4. Запускаем flake8
+        logging.debug(f"run_lint_async: Запуск flake8 для файла '{self.filename or "<буфер без имени>"}'")
+        self._set_status_message("Flake8: Запуск анализа...", is_lint_status=True, full_lint_output="Flake8: Анализ выполняется...")
+        if self.lint_panel_message: # Показать панель с сообщением о запуске
+                self.show_lint_panel()
+
+        self.run_flake8_on_code(code_to_lint, self.filename)
 
 
     def _check_pyclip_availability(self):
@@ -971,119 +1298,166 @@ class SwayEditor:
 
     def cut(self):
         """Вырезает выделенный текст в буфер обмена."""
-        logging.debug(
-            f"CUT CALLED. is_selecting: {self.is_selecting}, "
-            f"selection_start: {self.selection_start}, selection_end: {self.selection_end}"
-        )
-        selected_text_to_cut = self.get_selected_text()
-        
-        logging.debug(
-            f"Cut: get_selected_text() returned: '{selected_text_to_cut}' (len: {len(selected_text_to_cut)}). "
-            f"Selection was: start: {self.selection_start}, end: {self.selection_end}, is_selecting: {self.is_selecting}"
-        )
+        with self._state_lock: # Добавляем блокировку
+            logging.debug(
+                f"CUT CALLED. is_selecting: {self.is_selecting}, "
+                f"selection_start: {self.selection_start}, selection_end: {self.selection_end}"
+            )
 
-        if not selected_text_to_cut:
-            self._set_status_message("Nothing to cut")
-            return
+            if not self.is_selecting:
+                self._set_status_message("Нечего вырезать (нет выделения)")
+                return
 
-        # Копируем во внутренний буфер
-        self.internal_clipboard = selected_text_to_cut # Используем новое имя
-        message = "Cut to internal clipboard"
+            normalized_range = self._get_normalized_selection_range()
+            if not normalized_range:
+                self._set_status_message("Нечего вырезать (ошибка выделения)")
+                return
+                
+            norm_start_coords, norm_end_coords = normalized_range
 
-        # Попытка копирования в системный буфер
-        if self.use_system_clipboard and self.pyclip_available:
-            try:
-                pyperclip.copy(selected_text_to_cut) # Используем новое имя
-                message = "Cut to system clipboard"
-                logging.debug("Cut to system clipboard successfully")
-            except pyperclip.PyperclipException as e:
-                logging.error(f"Failed to cut to system clipboard: {str(e)}")
-                message = "Cut to internal clipboard (system clipboard error)"
-            except Exception as e:
-                 logging.error(f"Unexpected error cutting to system clipboard: {e}")
-                 message = "Cut to internal clipboard (system clipboard error)"
+            # Получаем текст для вырезания ДО его фактического удаления
+            # Это можно сделать с помощью отдельного метода get_text_in_range(norm_start, norm_end)
+            # или адаптировать delete_selected_text_internal, чтобы он сначала вернул текст, потом удалил.
+            # Для примера, используем существующий get_selected_text(), но он должен быть адаптирован
+            # для работы с нормализованными координатами или мы должны передать ему self.selection_start/end.
+            # Идеально, если бы delete_selected_text_internal возвращал удаленный текст.
 
-        # Удаляем текст (эта логика перенесена в handle_delete для унификации)
-        self.handle_delete() # handle_delete теперь вызовется, так как selected_text_to_cut не был пуст
-        self._set_status_message(message)
+            # Сначала получим текст, соответствующий нормализованному выделению.
+            # Это потребует метода, который извлекает текст по нормализованным координатам.
+            # Например, self.get_text_from_normalized_range(norm_start_coords, norm_end_coords)
+            # Для простоты, предположим, что deleted_segments из delete_selected_text_internal и есть то, что нужно.
 
+            # Удаляем выделенный текст, используя НОРМАЛИЗОВАННЫЕ координаты
+            # delete_selected_text_internal должен возвращать удаленные сегменты
+            deleted_text_segments = self.delete_selected_text_internal(
+                norm_start_coords[0], norm_start_coords[1],
+                norm_end_coords[0], norm_end_coords[1]
+            )
+
+            if not deleted_text_segments: # Если ничего не было удалено (например, пустой диапазон)
+                self._set_status_message("Нечего вырезать")
+                # Курсор и состояние выделения уже должны были быть обработаны delete_selected_text_internal
+                self.is_selecting = False 
+                self.selection_start = None
+                self.selection_end = None
+                return
+
+            # Собираем удаленный текст в одну строку для буфера обмена
+            text_for_clipboard = "\n".join(deleted_text_segments)
+
+            # Копируем во внутренний буфер
+            self.internal_clipboard = text_for_clipboard
+            message = "Вырезано во внутренний буфер"
+
+            # Попытка копирования в системный буфер
+            if self.use_system_clipboard and self.pyclip_available:
+                try:
+                    pyperclip.copy(text_for_clipboard)
+                    message = "Вырезано в системный буфер"
+                    logging.debug("Вырезано в системный буфер успешно")
+                except pyperclip.PyperclipException as e:
+                    logging.error(f"Не удалось вырезать в системный буфер: {str(e)}")
+                    message = "Вырезано во внутренний буфер (ошибка системного буфера)"
+                except Exception as e:
+                    logging.error(f"Непредвиденная ошибка при вырезании в системный буфер: {e}")
+                    message = "Вырезано во внутренний буфер (ошибка системного буфера)"
+
+            # Добавляем действие в историю, используя НОРМАЛИЗОВАННЫЕ координаты
+            action = {
+                "type": "delete_selection",
+                "text": deleted_text_segments,      # list[str]
+                "start": norm_start_coords,
+                "end": norm_end_coords
+            }
+            self.action_history.append(action)
+            self.undone_actions.clear()
+            
+            # self.modified = True # Должен быть установлен в delete_selected_text_internal
+            # Курсор должен быть установлен в delete_selected_text_internal (в norm_start_coords)
+            
+            self.is_selecting = False # Сбрасываем состояние выделения
+            self.selection_start = None
+            self.selection_end = None
+            
+            self._set_status_message(message)
+            logging.debug(f"cut: Завершено. Курсор в ({self.cursor_y}, {self.cursor_x})")
 
     def paste(self) -> None:
-        """
-        Paste text from system or internal clipboard.
+        with self._state_lock: # Добавляем блокировку
+            logging.debug(f"paste() вызван – use_system_clipboard={self.use_system_clipboard}, pyclip_available={self.pyclip_available}")
 
-        • Prefers system clipboard (pyperclip) when доступно и включено.
-        • Gracefully degrades to internal clipboard.
-        • Normalises line‑endings to '\n'.
-        • Honour *Replace* mode: в режиме Replace удаляет столько символов,
-        сколько печатных колонок занимает вставляемый текст (как в Vim «R»).
-        • Полностью поддерживает выделение: если есть активный selection,
-        сначала удаляет его (одно действие «delete_selection» в history),
-        затем вставляет (одно действие «insert»).
+            text_to_paste = self.internal_clipboard 
+            source_of_paste = "внутреннего" 
 
-        Result: cursor ends **after** pasted text; action history ready for undo/redo.
-        """
-        # ── 0. sanity check ────────────────────────────────────────────────
-        logging.debug("paste() called – use_system_clipboard=%s, pyclip_available=%s",
-                    self.use_system_clipboard, self.pyclip_available)
+            if self.use_system_clipboard and self.pyclip_available:
+                try:
+                    system_clipboard_text = pyperclip.paste()
+                    if system_clipboard_text: 
+                        text_to_paste = system_clipboard_text
+                        source_of_paste = "системного"
+                        logging.debug(f"Вставлено {len(text_to_paste)} символов из системного буфера обмена.")
+                    else:
+                        logging.debug("Системный буфер обмена пуст, используется внутренний.")
+                except pyperclip.PyperclipException as e:
+                    logging.error(f"Ошибка системного буфера обмена: {e} – используется внутренний.")
+                except Exception as e: 
+                    logging.exception(f"Непредвиденная ошибка буфера обмена: {e} – используется внутренний.")
 
-        text_to_paste, src = self.internal_clipboard, "internal" # Переименовали text
+            if not text_to_paste:
+                self._set_status_message("Буфер обмена пуст")
+                return
 
-        # ── 1. system clipboard ─────────────────────────────────────────
-        if self.use_system_clipboard and self.pyclip_available:
-            try:
-                sys_text = pyperclip.paste()
-                if sys_text:
-                    text_to_paste, src = sys_text, "system" # Переименовали text
-                    logging.debug("Pasted %s chars from system clipboard", len(text_to_paste))
-                else:
-                    logging.debug("System clipboard empty → fallback to internal")
-            except pyperclip.PyperclipException as e:
-                logging.error("System clipboard error: %s – fallback to internal", e)
-            except Exception:      # any unforeseen error
-                logging.exception("Unexpected clipboard error – fallback to internal")
-
-        if not text_to_paste: # Переименовали text
-            self._set_status_message("Clipboard is empty")
-            return
-
-        # ── 2. normalise new‑lines ─────────────────────────────────────
-        text_to_paste = text_to_paste.replace("\r\n", "\n").replace("\r", "\n")
-
-        # ── 3. handle active selection (delete + history) ─────────────
-        if self.is_selecting and self.selection_start and self.selection_end:
-            # Сохраняем координаты выделения перед их возможным изменением или сбросом
-            sel_start_coords = self.selection_start 
+            text_to_paste = text_to_paste.replace("\r\n", "\n").replace("\r", "\n")
             
-            deleted = self.delete_selected_text_internal(
-                *self.selection_start, *self.selection_end
-            )
-            self.action_history.append({
-                "type": "delete_selection",
-                "text": deleted,
-                "range": (self.selection_start, self.selection_end) 
-            })
-            self.undone_actions.clear()
-            # Устанавливаем курсор в начало удаленного выделения
-            self.cursor_y, self.cursor_x = sel_start_coords 
-            self.is_selecting = False
-            self.selection_start = self.selection_end = None
+            # Позиция курсора, куда будет происходить вставка текста из буфера.
+            # Изначально это текущая позиция, но она может измениться, если есть выделение.
+            paste_target_y, paste_target_x = self.cursor_y, self.cursor_x
 
-        # ── 4. honour Replace‑mode for single‑line paste ───────────────
-        if not self.insert_mode:
-            # Count printable cells (≈ columns) in first line only
-            repl_cells = sum(max(wcwidth(c), 0) for c in text_to_paste.split("\n", 1)[0])
-            for _ in range(repl_cells):
-                if self.cursor_x < len(self.text[self.cursor_y]):
-                    self.delete_char_internal(self.cursor_y, self.cursor_x) 
+            if self.is_selecting:
+                normalized_selection = self._get_normalized_selection_range()
+                if normalized_selection:
+                    norm_start_coords, norm_end_coords = normalized_selection
+                    paste_target_y, paste_target_x = norm_start_coords # Вставка будет сюда
 
-        # ── 5. insert text (insert_text handles history & undo stack) ─
-        self.insert_text(text_to_paste)
+                    logging.debug(f"paste(): Удаление активного выделения с {norm_start_coords} по {norm_end_coords} перед вставкой.")
+                    
+                    deleted_segments = self.delete_selected_text_internal(
+                        norm_start_coords[0], norm_start_coords[1],
+                        norm_end_coords[0], norm_end_coords[1]
+                    )
+                    
+                    self.action_history.append({
+                        "type": "delete_selection",
+                        "text": deleted_segments,
+                        "start": norm_start_coords, 
+                        "end": norm_end_coords,     
+                    })
+                    self.undone_actions.clear()
+                    
+                    # delete_selected_text_internal устанавливает курсор, обновляем paste_target_y/x
+                    paste_target_y, paste_target_x = self.cursor_y, self.cursor_x
 
-        # ── 6. finalisation ────────────────────────────────────────────
-        self._set_status_message(f"Pasted from {src} clipboard")
-        logging.debug("paste() finished: %d chars inserted, cursor at (%s,%s)",
-                    len(text_to_paste), self.cursor_y, self.cursor_x)
+                    self.is_selecting = False
+                    self.selection_start = None
+                    self.selection_end = None
+            
+            # Обработка режима Замены (если он есть и активен)
+            # Этот блок требует careful consideration для undo/redo.
+            # Если insert_mode == False (т.е. режим замены)
+            #   - Посчитать ширину первой строки text_to_paste
+            #   - Удалить соответствующее количество символов/ячеек от (paste_target_y, paste_target_x)
+            #   - Это удаление должно быть частью действия "вставить с заменой" или
+            #     записано как отдельное действие "replace_N_chars".
+            #   - Пока пропущено для простоты, т.к. это отдельная сложная задача для undo.
+
+            # Вставляем текст, используя self.insert_text.
+            # insert_text сам обработает запись "insert" действия в историю.
+            # Он будет использовать текущее self.cursor_y, self.cursor_x, которые
+            # являются paste_target_y, paste_target_x.
+            self.insert_text(text_to_paste) 
+
+            self._set_status_message(f"Вставлено из {source_of_paste} буфера обмена")
+            logging.debug(f"paste(): Вставка завершена. Вставлено {len(text_to_paste)} символов. Курсор в ({self.cursor_y}, {self.cursor_x}).")
 
 
     def extend_selection_right(self):
@@ -1175,95 +1549,177 @@ class SwayEditor:
         """
         with self._state_lock:
             if not self.action_history:
-                self._set_status_message("Nothing to undo")
-                logging.debug("Undo attempted, but action_history is empty")
+                self._set_status_message("Нечего отменять")
+                logging.debug("Undo: Стек action_history пуст.")
                 return
 
             last_action = self.action_history.pop()
             action_type = last_action.get("type")
-            logging.debug(f"Performing undo for action type: {action_type}")
-            logging.debug(f"Current state before undo: len(self.text)={len(self.text)}, cursor=({self.cursor_y},{self.cursor_x})")
+            logging.debug(f"Undo: Выполнение undo для типа действия: {action_type}")
+            logging.debug(f"Undo: Текущее состояние перед undo: len(self.text)={len(self.text)}, cursor=({self.cursor_y},{self.cursor_x})")
+            
+            original_cursor_y, original_cursor_x = -1, -1 # Для восстановления в случае ошибки
 
             try:
                 if action_type == "insert":
+                    # Отмена вставки - это удаление ранее вставленного текста.
                     text_to_remove = last_action["text"]
-                    row, col = last_action["position"]
-                    lines_to_remove = text_to_remove.split('\n')
-                    num_lines_removed = len(lines_to_remove) - 1
+                    row, col = last_action["position"] # Позиция, где началась оригинальная вставка
+
+                    original_cursor_y, original_cursor_x = self.cursor_y, self.cursor_x # Сохраняем на случай ошибки
+
+                    lines_to_remove_list = text_to_remove.split('\n')
+                    num_lines_in_removed_text = len(lines_to_remove_list)
 
                     if not (0 <= row < len(self.text)):
-                        raise IndexError(f"Invalid row index: {row}")
-
-                    if num_lines_removed == 0:
-                        self.text[row] = self.text[row][:col] + self.text[row][col + len(text_to_remove):]
+                        # Эта ситуация не должна возникать, если история консистентна.
+                        raise IndexError(f"Undo insert: Невалидный индекс строки {row} для отмены вставки.")
+                    
+                    # Логика удаления текста, вставленного insert_text_at_position
+                    if num_lines_in_removed_text == 1:
+                        # Удаление однострочного текста
+                        current_line_content = self.text[row]
+                        # Убедимся, что удаляемый текст находится на месте
+                        # Это важно, так как col - это начало вставленного текста.
+                        # Длина удаляемой части равна len(text_to_remove).
+                        if current_line_content[col : col + len(text_to_remove)] == text_to_remove:
+                            self.text[row] = current_line_content[:col] + current_line_content[col + len(text_to_remove):]
+                        else:
+                            # Попытка восстановления, если текст не совпадает (например, из-за ошибки)
+                            logging.warning(f"Undo insert: Несовпадение текста. Ожидалось '{text_to_remove}' в [{row},{col}]. Найдено '{current_line_content[col : col + len(text_to_remove)]}'. Попытка удаления по длине.")
+                            self.text[row] = current_line_content[:col] + current_line_content[col + len(text_to_remove):]
                     else:
-                        end_line = row + num_lines_removed
-                        if end_line >= len(self.text):
-                            raise IndexError(f"Invalid end line index: {end_line}")
-                        self.text[row] = self.text[row][:col] + self.text[end_line][len(lines_to_remove[-1]):]
-                        del self.text[row + 1:end_line + 1]
+                        # Удаление многострочного текста
+                        # Часть строки ДО начала удаляемого текста на первой строке (row)
+                        prefix_on_first_line = self.text[row][:col]
+                        
+                        # Индекс последней строки, затронутой вставкой, в self.text
+                        # Оригинальная вставка добавила (num_lines_in_removed_text - 1) новых строк.
+                        # Значит, контент, который был после вставки на последней строке,
+                        # теперь находится на self.text[row + num_lines_in_removed_text - 1]
+                        # после текста lines_to_remove_list[-1].
+                        end_row_affected_by_insert = row + num_lines_in_removed_text - 1
+                        if end_row_affected_by_insert >= len(self.text):
+                             raise IndexError(f"Undo insert: Невалидный конечный индекс строки {end_row_affected_by_insert} при многострочной отмене вставки.")
+                        
+                        len_last_inserted_line_segment = len(lines_to_remove_list[-1])
+                        suffix_on_last_line = self.text[end_row_affected_by_insert][len_last_inserted_line_segment:]
 
-                    self.cursor_y, self.cursor_x = row, col
-                    logging.debug(f"Undid insert at ({row}, {col}), text: {text_to_remove!r}")
+                        # Соединяем префикс первой строки с суффиксом последней затронутой строки
+                        self.text[row] = prefix_on_first_line + suffix_on_last_line
+                        
+                        # Удаляем промежуточные строки, которые были добавлены операцией insert
+                        # Это строки с (row + 1) по (end_row_affected_by_insert) включительно.
+                        # В Python `del slice` правая граница не включается, поэтому +1.
+                        del self.text[row + 1 : end_row_affected_by_insert + 1]
+
+                    self.cursor_y, self.cursor_x = row, col # Курсор в начало удаленного (ранее вставленного) текста
+                    logging.debug(f"Undo: Отменена вставка в ({row}, {col}), текст: {text_to_remove!r}")
 
                 elif action_type == "delete_char":
-                    y, x = last_action["position"]
-                    deleted_char = last_action["text"]
+                    # Отмена удаления символа - это вставка этого символа обратно.
+                    y, x = last_action["position"] # Позиция, куда был вставлен курсор после удаления символа
+                    deleted_char = last_action["text"] # Удаленный символ
+
+                    original_cursor_y, original_cursor_x = self.cursor_y, self.cursor_x
+
                     if not (0 <= y < len(self.text)):
-                        raise IndexError(f"Invalid row index: {y}")
-                    line = self.text[y]
-                    self.text[y] = line[:x] + deleted_char + line[x:]
-                    self.cursor_y, self.cursor_x = y, x
-                    logging.debug(f"Undid delete_char at ({y}, {x}), char: {deleted_char!r}")
+                        raise IndexError(f"Undo delete_char: Невалидный индекс строки {y}.")
+                    # Позиция x для вставки должна быть валидной
+                    if not (0 <= x <= len(self.text[y])): # x может быть len(self.text[y]) если вставляем в конец
+                         raise IndexError(f"Undo delete_char: Невалидный индекс колонки {x} для строки {y} (длина {len(self.text[y])}).")
+                    
+                    current_line = self.text[y]
+                    self.text[y] = current_line[:x] + deleted_char + current_line[x:]
+                    # Курсор после отмены должен быть в той же позиции, что и перед оригинальным удалением,
+                    # т.е. ПЕРЕД восстановленным символом, если удаление было "вперед" (delete key),
+                    # или ПОСЛЕ, если это был backspace. Обычно "position" сохраняет позицию КУДА СТАЛ КУРСОР.
+                    # Если курсор стал на место удаленного символа, то для undo он должен быть там же (перед символом).
+                    # Если курсор сместился влево (backspace), то для undo он должен быть на позиции удаленного символа + 1.
+                    # Предположим, что last_action["position"] - это (y,x) КУДА курсор встал.
+                    # Для undo delete_char, курсор обычно ставится на начало восстановленного символа.
+                    self.cursor_y, self.cursor_x = y, x 
+                    logging.debug(f"Undo: Отменено удаление символа в ({y}, {x}), символ: {deleted_char!r}")
 
                 elif action_type == "delete_newline":
-                    y, x = last_action["position"]
-                    deleted_content = last_action["text"]
+                    # Отмена delete_newline - это вставка newline и перенос текста.
+                    # last_action["position"] (y,x) - это позиция курсора ПОСЛЕ объединения строк,
+                    # т.е. место в строке y, где раньше был разрыв.
+                    # last_action["text"] - это содержимое строки, которая была присоединена (бывшая y+1).
+                    y, x = last_action["position"] 
+                    moved_up_content = last_action["text"] 
+
+                    original_cursor_y, original_cursor_x = self.cursor_y, self.cursor_x
+
                     if not (0 <= y < len(self.text)):
-                        raise IndexError(f"Invalid row index: {y}")
-                    line1 = self.text[y]
-                    self.text[y] = line1[:x]
-                    self.text.insert(y + 1, deleted_content)
-                    self.cursor_y, self.cursor_x = y, x
-                    logging.debug(f"Undid delete_newline at ({y}, {x}), restored line: {deleted_content!r}")
+                        raise IndexError(f"Undo delete_newline: Невалидный индекс строки {y}.")
+                    if not (0 <= x <= len(self.text[y])): 
+                         raise IndexError(f"Undo delete_newline: Невалидный индекс колонки {x} для строки {y} (длина {len(self.text[y])}).")
+
+                    current_line_content = self.text[y]
+                    self.text[y] = current_line_content[:x] # Оставляем часть строки y до бывшего разрыва
+                    self.text.insert(y + 1, moved_up_content) # Вставляем бывшую (y+1) строку как новую строку
+
+                    # Курсор ставится на место, где был восстановлен newline.
+                    # Оригинальное действие delete_newline ставило курсор в (y,x) на объединенной строке.
+                    # Отмена должна поставить курсор в (y,x) на первой из разделенных строк.
+                    self.cursor_y, self.cursor_x = y, x 
+                    logging.debug(f"Undo: Отменено удаление newline в ({y}, {x}), восстановлена строка: {moved_up_content!r}")
 
                 elif action_type == "delete_selection":
-                    deleted_lines = last_action["text"]
-                    start_y, start_x = last_action["start"]
-                    end_y, end_x = last_action["end"]
-                    logging.debug(f"Undo delete_selection: restoring {len(deleted_lines)} lines at ({start_y}, {start_x})")
-                    logging.debug(f"Current len(self.text)={len(self.text)}")
-                    # Исправление: Удаляем строки в диапазоне и вставляем восстановленные
-                    num_lines_to_replace = end_y - start_y + 1
-                    while len(self.text) < end_y + 1:
-                        self.text.append("")
-                    del self.text[start_y:start_y + num_lines_to_replace]
-                    self.text[start_y:start_y] = deleted_lines
-                    # Устанавливаем курсор
-                    self.cursor_y = min(start_y, len(self.text) - 1)
-                    self.cursor_x = min(start_x, len(self.text[self.cursor_y]) if len(self.text) > self.cursor_y else 0)
-                    logging.debug(f"Undid delete_selection at ({self.cursor_y}, {self.cursor_x})")
+                    # Отмена удаления выделения - это вставка удаленных сегментов текста.
+                    deleted_text_segments = last_action["text"] # list[str] - удаленные сегменты
+                    # start_y, start_x - это НОРМАЛИЗОВАННЫЕ координаты начала удаленного блока
+                    start_y, start_x = last_action["start"] 
+                    # last_action["end"] здесь не используется для самой операции undo,
+                    # но может быть полезно для отладки или если курсор нужно ставить в конец.
+                    
+                    original_cursor_y, original_cursor_x = self.cursor_y, self.cursor_x
+
+                    # Собираем текст для вставки из сегментов
+                    text_to_restore_str = "\n".join(deleted_text_segments)
+                    
+                    logging.debug(f"Undo: delete_selection: восстановление текста '{text_to_restore_str!r}' в ({start_y}, {start_x})")
+                    
+                    # Используем insert_text_at_position для вставки.
+                    # Если start_y, start_x некорректны (чего не должно быть при правильной нормализации),
+                    # этот метод выбросит IndexError, который будет пойман ниже.
+                    self.insert_text_at_position(text_to_restore_str, start_y, start_x)
+                    
+                    # insert_text_at_position устанавливает курсор в КОНЕЦ вставленного текста.
+                    # Для операции undo (восстановления удаленного) обычно ожидается,
+                    # что курсор будет установлен в НАЧАЛО восстановленного текста.
+                    self.cursor_y, self.cursor_x = start_y, start_x 
+                    
+                    logging.debug(f"Undo: delete_selection отменено. Курсор установлен в ({start_y}, {start_x})")
 
                 else:
-                    logging.warning(f"Unknown action type in undo: {action_type}")
-                    self._set_status_message(f"Cannot undo action: {action_type}")
-                    self.action_history.append(last_action)
+                    logging.warning(f"Undo: Неизвестный тип действия: {action_type}")
+                    self._set_status_message(f"Невозможно отменить действие: {action_type}")
+                    self.action_history.append(last_action) # Вернуть действие, т.к. не смогли отменить
                     return
 
             except Exception as e:
-                logging.exception(f"Error during undo for action type {action_type}: {e}")
-                self._set_status_message(f"Undo failed for {action_type}: {str(e)[:80]}...")
-                self.action_history.append(last_action)
+                logging.exception(f"Undo: Ошибка во время undo для типа действия {action_type}: {e}")
+                self._set_status_message(f"Undo не удалось для {action_type}: {str(e)[:80]}...")
+                self.action_history.append(last_action) # Вернуть действие, если отмена не удалась
+                # Попытка восстановить курсор, если он был сохранен
+                if original_cursor_y != -1:
+                    self.cursor_y, self.cursor_x = original_cursor_y, original_cursor_x
                 return
 
-            self.undone_actions.append(last_action)
-            self.modified = True
-            self.is_selecting = False
+            self.undone_actions.append(last_action) # Перемещаем отмененное действие в стек undone_actions
+            self.modified = True # Состояние изменилось
+            
+            # Сбросить состояние выделения, так как undo мог изменить текст так,
+            # что предыдущее выделение стало невалидным.
+            self.is_selecting = False 
             self.selection_start = None
             self.selection_end = None
 
-            self._set_status_message("Undo performed")
-            logging.debug(f"Undo completed for action: {action_type}")
+            self._set_status_message("Действие отменено")
+            logging.debug(f"Undo: Завершено для действия: {action_type}. Курсор: ({self.cursor_y},{self.cursor_x})")
+
 
     def redo(self):
         """
@@ -1271,183 +1727,307 @@ class SwayEditor:
         """
         with self._state_lock:
             if not self.undone_actions:
-                self._set_status_message("Nothing to redo")
+                self._set_status_message("Нечего повторять")
+                logging.debug("Redo: Стек undone_actions пуст.")
                 return
 
             last_undone = self.undone_actions.pop()
-            action_type = last_undone["type"]
-            logging.debug(f"Performing redo for action type: {action_type}")
+            action_type = last_undone.get("type")
+            logging.debug(f"Redo: Выполнение redo для типа действия: {action_type}")
 
             try:
                 if action_type == "insert":
                     text_to_insert = last_undone["text"]
                     row, col = last_undone["position"]
-                    self.insert_text_at_position(text_to_insert, row, col)
-                    logging.debug(f"Redid insert at ({row}, {col}), text: {text_to_insert!r}")
+                    
+                    # insert_text_at_position сам установит курсор в конец вставленного текста,
+                    # что является корректным поведением для redo insert.
+                    self.insert_text_at_position(text_to_insert, row, col) # Может выбросить IndexError
+                    
+                    logging.debug(f"Redo: Вставка '{text_to_insert!r}' в ({row}, {col}). Курсор: ({self.cursor_y},{self.cursor_x})")
 
                 elif action_type == "delete_char":
                     y, x = last_undone["position"]
-                    if 0 <= y < len(self.text) and x < len(self.text[y]):
-                        self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
-                        self.cursor_y, self.cursor_x = y, x
-                        logging.debug(f"Redid delete_char at ({y}, {x})")
-                    else:
-                        logging.warning(f"Redo delete_char: Position ({y}, {x}) out of bounds.")
-                        self.undone_actions.append(last_undone)
-                        self._set_status_message(f"Redo failed: Position out of bounds for delete_char")
+                    # 'text' в last_undone для delete_char - это удаленный символ, он нам не нужен для redo delete_char.
+                    
+                    # Проверка границ перед удалением символа
+                    if not (0 <= y < len(self.text) and 0 <= x < len(self.text[y])):
+                        logging.warning(f"Redo: delete_char: Позиция ({y}, {x}) вне границ. Строка: '{self.text[y] if 0 <= y < len(self.text) else 'не существует'}'")
+                        self.undone_actions.append(last_undone) # Вернуть действие, если не удалось
+                        self._set_status_message(f"Redo не удалось: Позиция вне границ для delete_char")
                         return
+                    
+                    # char_to_delete = self.text[y][x] # Можно залогировать, если нужно
+                    self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
+                    self.cursor_y, self.cursor_x = y, x # Курсор на месте удаленного символа
+                    logging.debug(f"Redo: Удален символ в ({y}, {x}). Курсор: ({self.cursor_y},{self.cursor_x})")
 
                 elif action_type == "delete_newline":
-                    y, x = last_undone["position"]
-                    self.cursor_y, self.cursor_x = y, x
-                    if self.cursor_y < len(self.text) - 1:
-                        deleted_line = self.text.pop(self.cursor_y + 1)
-                        self.text[self.cursor_y] += deleted_line
-                        logging.debug(f"Redid delete_newline at ({y}, {x})")
-                    else:
-                        logging.warning(f"Redo delete_newline: Cannot merge line {y} and {y+1}.")
+                    # position (y,x) - это место *перед* удаленным newline (т.е. конец строки y),
+                    # куда будет установлен курсор после объединения строк.
+                    # text - это содержимое строки, которая была присоединена (бывшая y+1).
+                    y, x = last_undone["position"] 
+                    
+                    # Для удаления newline (объединения строк) нужна как минимум строка y и y+1.
+                    if not (0 <= y < len(self.text) - 1):
+                        logging.warning(f"Redo: delete_newline: Невозможно объединить строку {y} и {y+1} (недостаточно строк или y - последняя строка).")
                         self.undone_actions.append(last_undone)
-                        self._set_status_message(f"Redo failed: Cannot merge lines for delete_newline")
+                        self._set_status_message(f"Redo не удалось: Невалидные строки для delete_newline")
                         return
+                    
+                    # x должна быть позицией в объединенной строке.
+                    # Стандартно, при удалении newline курсор оказывается в конце бывшей строки y.
+                    # Длина строки self.text[y] перед объединением + длина self.text[y+1]
+                    merged_line_len = len(self.text[y]) + len(self.text[y+1])
+                    if not (0 <= x <= merged_line_len): # x может быть до конца объединенной строки
+                        logging.warning(f"Redo: delete_newline: Позиция курсора x={x} может быть невалидна после объединения. Длина строки {y} была {len(self.text[y])}, длина {y+1} была {len(self.text[y+1])}.")
+                        # Можно скорректировать x, если он выходит за пределы, или просто довериться сохраненному значению.
+                        # Для простоты оставим как есть, но это место для потенциального улучшения.
+
+                    line_to_merge = self.text.pop(y + 1)
+                    self.text[y] += line_to_merge
+                    self.cursor_y, self.cursor_x = y, x # Восстанавливаем курсор на (y,x) объединенной строки
+
+                    logging.debug(f"Redo: delete_newline, объединена строка {y+1} в {y}. Курсор: ({self.cursor_y},{self.cursor_x})")
 
                 elif action_type == "delete_selection":
+                    # Предполагаем, что last_undone["start"] и last_undone["end"]
+                    # являются НОРМАЛИЗОВАННЫМИ координатами, сохраненными при первоначальном действии.
                     start_y, start_x = last_undone["start"]
-                    end_y, end_x = last_undone["end"]
-                    logging.debug(f"Redo delete_selection from ({start_y}, {start_x}) to ({end_y}, {end_x})")
-                    # Проверка границ
-                    if not (0 <= start_y < len(self.text) and 0 <= end_y < len(self.text)):
-                        logging.warning(f"Redo delete_selection: Start/End row out of bounds: ({start_y}, {end_y})")
+                    end_y, end_x = last_undone["end"] 
+                    
+                    logging.debug(f"Redo: delete_selection с ({start_y}, {start_x}) по ({end_y}, {end_x})")
+                    
+                    # Тщательная проверка границ перед вызовом delete_selected_text_internal
+                    if not (0 <= start_y < len(self.text) and \
+                            0 <= end_y < len(self.text) and \
+                            0 <= start_x <= len(self.text[start_y]) and \
+                            # Для end_x, если end_y та же строка, что и start_y, end_x > start_x.
+                            # Если разные строки, end_x может быть любой валидной позицией в строке end_y.
+                            0 <= end_x <= len(self.text[end_y])): 
+                        logging.warning(f"Redo: delete_selection: Начальная/конечная позиция ({start_y},{start_x})-({end_y},{end_x}) вне границ.")
                         self.undone_actions.append(last_undone)
-                        self._set_status_message(f"Redo failed: Position out of bounds for delete_selection")
+                        self._set_status_message(f"Redo не удалось: Позиция вне границ для delete_selection")
                         return
-                    # Выполняем удаление
-                    deleted_text, _ = self.delete_selected_text_internal(start_y, start_x, end_y, end_x)
-                    # Устанавливаем курсор
-                    self.cursor_y = min(start_y, len(self.text) - 1)
-                    self.cursor_x = min(start_x, len(self.text[self.cursor_y]) if len(self.text) > self.cursor_y else 0)
-                    logging.debug(f"Redid delete_selection from ({start_y}, {start_x}) to ({end_y}, {end_x})")
+                    
+                    # delete_selected_text_internal должен:
+                    # 1. Принимать нормализованные start и end.
+                    # 2. Корректно удалять текст.
+                    # 3. (Опционально, но хорошо) Возвращать удаленные сегменты и новую позицию курсора.
+                    #    Для redo нам не нужны возвращаемые значения здесь, но метод должен быть консистентным.
+                    # 4. Не записывать действие в историю (это делает redo).
+                    # 5. Устанавливать self.modified = True.
+                    # 6. Устанавливать self.cursor_y, self.cursor_x в начало удаленного блока (start_y, start_x).
+                    
+                    # Если delete_selected_text_internal сам устанавливает курсор:
+                    _deleted_segments = self.delete_selected_text_internal(start_y, start_x, end_y, end_x)
+                    # Убедимся, что курсор установлен корректно (в начало удаленного блока)
+                    # delete_selected_text_internal должен был это сделать. Если нет, то:
+                    # self.cursor_y = start_y
+                    # self.cursor_x = start_x
+
+                    # Дополнительная проверка и корректировка курсора после удаления,
+                    # на случай если delete_selected_text_internal этого не сделал или сделал не так.
+                    # Курсор должен быть в start_y, start_x, но не выходить за пределы нового текста.
+                    self.cursor_y = min(start_y, len(self.text) - 1 if self.text else 0)
+                    if self.text and 0 <= self.cursor_y < len(self.text): # Проверка, что строка курсора существует
+                        self.cursor_x = min(start_x, len(self.text[self.cursor_y]))
+                    elif not self.text: # Если буфер стал пустым
+                        self.cursor_y = 0
+                        self.cursor_x = 0
+                    else: # Строка курсора не существует (например, start_y была последней строкой и ее удалили)
+                          # Этого не должно быть, если start_y корректна и не последняя удаляемая строка.
+                          # Если start_y указывает на строку, которая была удалена,
+                          # курсор должен сместиться на предыдущую строку или на (0,0) если все удалено.
+                          # Логика выше (min(start_y, len(self.text) - 1)) должна это частично обработать.
+                          # Для простоты, если после удаления start_y стала невалидной,
+                          # но текст еще есть, можно поставить курсор в конец предыдущей строки или начало текущей первой.
+                          # Но обычно delete_selected_text_internal должен оставить курсор в валидной позиции.
+                        pass # Полагаемся на корректировку выше
+
+
+                    logging.debug(f"Redo: delete_selection выполнено. Курсор: ({self.cursor_y},{self.cursor_x})")
 
                 else:
-                    logging.warning(f"Unknown action type in redo: {action_type}")
-                    self._set_status_message(f"Cannot redo action: {action_type}")
-                    self.undone_actions.append(last_undone)
+                    logging.warning(f"Redo: Неизвестный тип действия: {action_type}")
+                    self._set_status_message(f"Невозможно повторить действие: {action_type}")
+                    self.undone_actions.append(last_undone) # Вернуть действие, если не удалось
                     return
 
             except Exception as e:
-                logging.exception(f"Error during redo for action type {action_type}: {e}")
-                self._set_status_message(f"Redo failed for {action_type}: {str(e)[:80]}...")
-                self.undone_actions.append(last_undone)
+                logging.exception(f"Redo: Ошибка во время redo для типа действия {action_type}: {e}")
+                self._set_status_message(f"Redo не удалось для {action_type}: {str(e)[:80]}...")
+                self.undone_actions.append(last_undone) # Вернуть действие, если redo не удалось
                 return
 
-            self.action_history.append(last_undone)
-            self.modified = True
-            self._set_status_message("Redo performed")
-            logging.debug(f"Redo completed for action: {action_type}")
+            self.action_history.append(last_undone) # Перемещаем действие обратно в основную историю
+            self.modified = True # Состояние изменилось
+            self._set_status_message("Действие повторено")
+            logging.debug(f"Redo: Завершено для действия: {action_type}. Курсор: ({self.cursor_y},{self.cursor_x})")
 
+
+    def _get_normalized_selection_range(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        """
+        Вспомогательный метод. Возвращает нормализованные координаты выделения (start_pos, end_pos),
+        где start_pos всегда левее/выше end_pos.
+        Возвращает None, если нет активного выделения.
+        """
+        if not self.is_selecting or not self.selection_start or not self.selection_end:
+            return None
+
+        sy1, sx1 = self.selection_start
+        sy2, sx2 = self.selection_end
+
+        if (sy1 > sy2) or (sy1 == sy2 and sx1 > sx2):
+            norm_start_y, norm_start_x = sy2, sx2
+            norm_end_y, norm_end_x = sy1, sx1
+        else:
+            norm_start_y, norm_start_x = sy1, sx1
+            norm_end_y, norm_end_x = sy2, sx2
+        
+        return (norm_start_y, norm_start_x), (norm_end_y, norm_end_x)
+    
 
     def insert_text_at_position(self, text: str, row: int, col: int) -> None:
         """
-        Low‑level insert of *text* at logical position (row, col).
-        Does **not** push action into history — caller is responsible.
+        Низкоуровневая вставка текста `text` в логическую позицию (row, col).
+        НЕ добавляет действие в историю — вызывающий метод отвечает за это.
 
-        Cursor is placed immediately after the newly inserted text.
+        Курсор устанавливается сразу после вставленного текста.
+        Выбрасывает IndexError, если row или col некорректны для вставки.
         """
         if not text:
-            logging.debug("insert_text_at_position: empty text -> noop")
+            logging.debug("insert_text_at_position: пустой текст -> нет действия")
             return
 
+        # Проверка валидности строки (row)
         if not (0 <= row < len(self.text)):
-            logging.error("insert_text_at_position: invalid row %s (buffer size %s)",
-                        row, len(self.text))
-            return
+            msg = f"insert_text_at_position: невалидный индекс строки {row} (размер буфера {len(self.text)})"
+            logging.error(msg)
+            raise IndexError(msg) # <--- ИЗМЕНЕНИЕ: выбрасываем исключение
 
-        # clamp col to actual line length
-        col = max(0, min(col, len(self.text[row])))
+        # Проверка валидности колонки (col) для вставки
+        # Колонка должна быть в пределах [0, длина_строки]
+        current_line_len = len(self.text[row])
+        if not (0 <= col <= current_line_len):
+            msg = f"insert_text_at_position: невалидный индекс колонки {col} для строки {row} (длина строки {current_line_len})"
+            logging.error(msg)
+            # Если мы хотим быть строгими и не разрешать col > current_line_len даже если потом клэмпим
+            # raise IndexError(msg) # <--- Раскомментировать, если нужна строгая проверка до клэмпинга
+            # Однако, клэмпинг ниже может быть достаточным, если col лишь немного выходит за пределы.
+            # Но для row ошибка точно фатальна.
 
-        logging.debug("insert_text_at_position: text=%r row=%s col=%s", text, row, col)
+        # Ограничиваем col реальной длиной строки (позволяет вставку в конец строки)
+        col = max(0, min(col, current_line_len))
 
-        # Split by newline keeping possible trailing empty segment
-        lines = text.split('\n')
+        logging.debug(f"insert_text_at_position: text={text!r} row={row} col={col}")
 
-        first_part = self.text[row][:col]
-        last_part  = self.text[row][col:]           # tail of original line
+        lines_to_insert = text.split('\n')
 
-        # 1. Replace the current line with first_part + first inserted line
-        self.text[row] = first_part + lines[0]
+        original_line_prefix = self.text[row][:col]
+        original_line_suffix = self.text[row][col:] # "хвост" оригинальной строки
 
-        # 2. Insert intermediate lines (if any)
-        for offset, ln in enumerate(lines[1:-1], start=1):
-            self.text.insert(row + offset, ln)
+        # 1. Заменяем текущую строку: prefix + первая вставляемая строка
+        self.text[row] = original_line_prefix + lines_to_insert[0]
 
-        # 3. Append last inserted line + remainder of original line
-        if len(lines) > 1:
-            self.text.insert(row + len(lines) - 1, lines[-1] + last_part)
+        # 2. Вставляем промежуточные строки (если есть)
+        # lines_to_insert[1:-1] - все строки между первой и последней
+        for offset, line_content in enumerate(lines_to_insert[1:-1], start=1):
+            self.text.insert(row + offset, line_content)
+
+        # 3. Добавляем последнюю вставляемую строку + остаток оригинальной строки
+        if len(lines_to_insert) > 1:
+            # Вставляем как новую строку: последняя вставляемая строка + хвост оригинальной строки
+            self.text.insert(row + len(lines_to_insert) - 1, lines_to_insert[-1] + original_line_suffix)
         else:
-            # single‑line insert – just restore tail
-            self.text[row] += last_part
+            # Вставка одной строки – просто восстанавливаем "хвост"
+            self.text[row] += original_line_suffix
 
-        # 4. Recalculate cursor position
-        if len(lines) == 1:
-            # stayed on the same logical line
+        # 4. Пересчитываем позицию курсора
+        if len(lines_to_insert) == 1:
+            # Остались на той же логической строке
             self.cursor_y = row
-            self.cursor_x = col + len(lines[0])
+            self.cursor_x = col + len(lines_to_insert[0]) # Длина вставленного текста (первой/единственной строки)
         else:
-            # moved to the last inserted logical line
-            self.cursor_y = row + len(lines) - 1
-            self.cursor_x = len(lines[-1])
+            # Переместились на последнюю вставленную логическую строку
+            self.cursor_y = row + len(lines_to_insert) - 1
+            self.cursor_x = len(lines_to_insert[-1]) # Длина последней вставленной строки
 
         self.modified = True
-        logging.debug("cursor now at (y=%s, x=%s)", self.cursor_y, self.cursor_x)
+        logging.debug(f"insert_text_at_position: курсор теперь в (y={self.cursor_y}, x={self.cursor_x})")
 
 
     def insert_text(self, text: str) -> None:
-        """Main public text insertion method: handles selection, writes to history."""
+        """
+        Основной публичный метод вставки текста.
+        Обрабатывает активное выделение, удаляя его сначала (записывает действие 'delete_selection').
+        Затем вставляет новый текст (записывает действие 'insert').
+        Управляет историей действий для undo/redo.
+        Курсор устанавливается после вставленного текста.
+        """
         if not text:
-            logging.debug("insert_text: empty text, nothing to insert")
+            logging.debug("insert_text: пустой текст, нечего вставлять")
             return
 
-        # 1. If there is a selection, cut it and save to undo
-        if self.is_selecting and self.selection_start and self.selection_end:
-            logging.debug(f"insert_text: deleting selection {self.selection_start}..{self.selection_end}")
-            deleted = self.delete_selected_text_internal(*self.selection_start, *self.selection_end)
+        with self._state_lock: # Добавим блокировку и здесь для консистентности
+            effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
+
+            if self.is_selecting:
+                normalized_selection = self._get_normalized_selection_range()
+                if normalized_selection:
+                    norm_start_coords, norm_end_coords = normalized_selection
+                    effective_insert_y, effective_insert_x = norm_start_coords 
+
+                    logging.debug(f"insert_text: Удаление активного выделения с {norm_start_coords} по {norm_end_coords} перед вставкой.")
+                    
+                    deleted_segments = self.delete_selected_text_internal(
+                        norm_start_coords[0], norm_start_coords[1],
+                        norm_end_coords[0], norm_end_coords[1]
+                    )
+                    
+                    self.action_history.append({
+                        "type": "delete_selection",
+                        "text": deleted_segments,
+                        "start": norm_start_coords,
+                        "end": norm_end_coords,
+                    })
+                    self.undone_actions.clear()
+                    
+                    # delete_selected_text_internal должен был установить курсор
+                    effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
+
+                    self.is_selecting = False
+                    self.selection_start = None
+                    self.selection_end = None
+                    logging.debug(f"insert_text: Выделение удалено. Курсор в ({self.cursor_y}, {self.cursor_x}).")
+
+            if 0 <= effective_insert_y < len(self.text):
+                logging.debug(f"insert_text: ПЕРЕД низкоуровневой вставкой в ({effective_insert_y},{effective_insert_x}), строка[{effective_insert_y}] = {self.text[effective_insert_y]!r}")
+            else:
+                logging.debug(f"insert_text: ПЕРЕД низкоуровневой вставкой в ({effective_insert_y},{effective_insert_x}). Длина буфера: {len(self.text)}")
+
+            try:
+                self.insert_text_at_position(text, effective_insert_y, effective_insert_x)
+            except IndexError as e:
+                logging.error(f"insert_text: Ошибка при вызове insert_text_at_position: {e}")
+                self._set_status_message(f"Ошибка вставки: {e}")
+                return
+
+            if 0 <= self.cursor_y < len(self.text):
+                logging.debug(f"insert_text: ПОСЛЕ низкоуровневой вставки, строка[{self.cursor_y}] = {self.text[self.cursor_y]!r}. Курсор в ({self.cursor_y}, {self.cursor_x}).")
+            else:
+                logging.debug(f"insert_text: ПОСЛЕ низкоуровневой вставки. Курсор в ({self.cursor_y}, {self.cursor_x}). Длина буфера: {len(self.text)}")
+
             self.action_history.append({
-                "type": "delete_selection",
-                "text": deleted,
-                "start": self.selection_start,
-                "end": self.selection_end,
+                "type": "insert",
+                "text": text,
+                "position": (effective_insert_y, effective_insert_x) 
             })
             self.undone_actions.clear()
-            self.cursor_y, self.cursor_x = self.selection_start
-            self.is_selecting = False
-            self.selection_start = self.selection_end = None
-
-        # 2. Save position before insertion
-        start_y, start_x = self.cursor_y, self.cursor_x
-
-        # 3. Logging BEFORE insertion
-        if 0 <= start_y < len(self.text):
-            logging.debug(f"insert_text: BEFORE insert, line[{start_y}] = {self.text[start_y]!r}")
-        else:
-            logging.debug(f"insert_text: BEFORE insert, invalid start_y={start_y}")
-
-        # 4. Perform insertion
-        self.insert_text_at_position(text, start_y, start_x)
-
-        # 5. Logging AFTER insertion
-        if 0 <= self.cursor_y < len(self.text):
-            logging.debug(f"insert_text: AFTER insert, line[{self.cursor_y}] = {self.text[self.cursor_y]!r}")
-        else:
-            logging.debug(f"insert_text: AFTER insert, invalid cursor_y={self.cursor_y}")
-
-        # 6. Write to history
-        self.action_history.append({
-            "type": "insert",
-            "text": text,
-            "position": (start_y, start_x)
-        })
-        self.undone_actions.clear()
-        self._set_status_message("Text inserted")
-
+            
+            self.modified = True
+            self._set_status_message("Текст вставлен")
+            logging.debug(f"insert_text: Завершено. Текст '{text!r}' вставлен. Финальный курсор в ({self.cursor_y}, {self.cursor_x}).")
 
 
     def delete_text_internal(self, start_row: int, start_col: int, end_row: int, end_col: int) -> None:
@@ -1483,10 +2063,6 @@ class SwayEditor:
         Применяет подсветку синтаксиса к списку видимых строк с использованием Pygments.
         Сохраняет кэширование результатов для каждой строки.
         """
-        if self._lexer is None:
-            self.detect_language()
-            logging.debug(f"Pygments apply_syntax: Initialized lexer: {self._lexer.name if self._lexer else 'None'}")
-
         if self._lexer is None:
             self.detect_language()
             logging.debug(f"Pygments apply_syntax: Initialized lexer: {self._lexer.name if self._lexer else 'None'}")
@@ -1645,7 +2221,6 @@ class SwayEditor:
         }
 
 
-
     def detect_language(self):
         """
         Определяет язык файла на основе расширения или содержимого и устанавливает лексер для подсветки.
@@ -1697,104 +2272,6 @@ class SwayEditor:
              self._lexer = new_lexer
         # else:
              # logging.debug(f"Pygments: Lexer remained {self._lexer.name if self._lexer else 'None'}.")
-
-
-    def handle_input(self, key: int | str) -> None:
-        """
-        Обработчик всех нажатий клавиш.
-        Поддерживает: Unicode-символы (включая китайский/польский/кириллицу),
-        спец-клавиши, горячие клавиши, стрелки и др.
-        """
-        logging.debug("handle_input → key = %r (%s)", key, type(key).__name__)
-        with self._state_lock:
-            try:
-                logging.debug("Received key code: %r", key)
-
-                # ── 1. Unicode‑строка от get_wch() (печатаемый символ) ─────
-                if isinstance(key, str) and len(key) == 1:
-                    if wcswidth(key) > 0:
-                        self.insert_text(key)
-                    else:
-                        self._set_status_message(f"Ignored zero‑width char: {repr(key)}")
-                    return
-
-                # ── 2. Горячая клавиша из action_map ───────────────────────
-                if isinstance(key, int) and key in self.action_map:
-                    self.action_map[key]() # Если key = 27, вызовется cancel_operation
-                    return
-
-                # ── 3. Спец‑клавиши и навигация ────────────────────────────
-                if key in (curses.KEY_ENTER, 10, 13):
-                    self.handle_enter()
-                elif key in (curses.KEY_UP, 259, 450):
-                    self.handle_up()
-                elif key in (curses.KEY_DOWN, 258, 456):
-                    self.handle_down()
-                elif key in (curses.KEY_LEFT, 260, 452):
-                    self.handle_left()
-                elif key in (curses.KEY_RIGHT, 261, 454):
-                    self.handle_right()
-                elif key in (curses.KEY_BACKSPACE, 127, 8):
-                    self.handle_backspace()
-                elif key in (curses.KEY_DC, 330, 462):
-                    self.handle_delete()
-                elif key in (curses.KEY_HOME, 262, 449):
-                    self.handle_home()
-                elif key in (curses.KEY_END, 360, 455):
-                    self.handle_end()
-                elif key in (curses.KEY_PPAGE, 339, 451):
-                    self.handle_page_up()
-                elif key in (curses.KEY_NPAGE, 338, 457):
-                    self.handle_page_down()
-                elif key == curses.ascii.TAB:
-                    self.handle_smart_tab()
-                elif key == curses.KEY_SRIGHT:
-                    self.extend_selection_right()
-                elif key == curses.KEY_SLEFT:
-                    self.extend_selection_left()
-                elif key == curses.KEY_SHOME:
-                    self.select_to_home()
-                elif key == curses.KEY_SEND:
-                    self.select_to_end()
-                elif key in (curses.KEY_SR, 337):
-                    self.extend_selection_up()
-                elif key in (curses.KEY_SF, 336):
-                    self.extend_selection_down()
-                elif key == 26:  # Undo
-                    self.undo()
-                elif key == 90:  # Redo
-                    self.redo()
-                elif key == 331:  # Insert
-                    self.toggle_insert_mode()
-                elif key == 410:  # Resize
-                    self.handle_resize()
-                elif key in (curses.KEY_F4, 268):  # F4 lint
-                    self.show_lint_panel() 
-                elif isinstance(key, str) and key.startswith("\x1b"): # \x1b это Esc
-                    if key == "\x1b[Z":  # Shift-Tab
-                        self.handle_smart_tab()
-                    else:
-                        # Если get_wch() вернул "\x1b" как строку (а не int 27),
-                        # то action_map[27] не сработает.
-                        # Сюда попадет одиночный Esc, если он пришел как строка "\x1b"
-                        self._set_status_message(f"Unhandled escape: {key!r}") 
-                elif key == 27: # Это условие может быть избыточным, если 27 уже есть в action_map
-                    self.cancel_operation()
-                elif isinstance(key, int) and 32 <= key < 1114112 and key not in self.action_map:
-                    try:
-                        ch = chr(key)
-                        if wcswidth(ch) > 0:
-                            self.insert_text(ch)
-                            return
-                    except Exception:
-                        logging.debug(f"Invalid ordinal: {key}")
-                else:
-                    KEY_LOGGER.debug("Unhandled key: %r", key)
-                    self._set_status_message(f"Unhandled: {repr(key)}")
-
-            except Exception:
-                logging.exception("Input handler error")
-                self._set_status_message("Input handler error (see log)")
 
 
     def delete_char_internal(self, row: int, col: int) -> str:
@@ -2115,92 +2592,128 @@ class SwayEditor:
 
     def handle_backspace(self) -> None:
         """
-        Backspace‑logic with full block support.
+        Логика Backspace с полной поддержкой блочного выделения.
 
-        • Если есть выделение – удалить *весь* диапазон (как Del).  
-        • Иначе:  
-            – курсор не в 0 → удалить символ слева;  
-            – курсор в 0 и строка не первая → склеить текущую с предыдущей.  
+        - Если есть выделение – удалить *весь* диапазон (как Del).
+        - Иначе:
+            – курсор не в 0-й колонке → удалить символ слева;
+            – курсор в 0-й колонке и строка не первая → склеить текущую с предыдущей.
 
         Все изменения заносятся в `action_history`, стек redo (`undone_actions`)
-        очищается.  После операции курсор и прокрутка гарантированно валидны.
+        очищается. После операции курсор и прокрутка гарантированно валидны.
         """
         with self._state_lock:
             try:
-                # ── 1. удаляем выделенный блок ─────────────────────────────
-                if self.is_selecting and self.selection_start and self.selection_end:
-                    logging.debug("Backspace: delete selection %s → %s",
-                                self.selection_start, self.selection_end)
+                # ── 1. Удаляем выделенный блок (если есть) ───────────────────
+                if self.is_selecting: # Проверяем только is_selecting, т.к. start/end должны быть валидны
+                    normalized_range = self._get_normalized_selection_range()
+                    if not normalized_range:
+                        logging.warning("handle_backspace: is_selecting=True, но не удалось получить нормализованный диапазон.")
+                        # Можно сбросить is_selecting, если диапазон невалиден
+                        self.is_selecting = False
+                        self.selection_start = None
+                        self.selection_end = None
+                        return # Или перейти к логике удаления одного символа, если это желаемое поведение
 
-                    removed = self.delete_selected_text_internal(
-                        *self.selection_start, *self.selection_end
+                    norm_start_coords, norm_end_coords = normalized_range
+                    
+                    logging.debug(f"handle_backspace: Удаление выделения с {norm_start_coords} по {norm_end_coords}")
+
+                    # Удаляем выделенный текст, используя НОРМАЛИЗОВАННЫЕ координаты
+                    # delete_selected_text_internal должен устанавливать курсор в norm_start_coords
+                    removed_segments = self.delete_selected_text_internal(
+                        norm_start_coords[0], norm_start_coords[1],
+                        norm_end_coords[0], norm_end_coords[1]
                     )
-                    # фиксируем в истории
+                    
+                    # Записываем действие в историю, используя НОРМАЛИЗОВАННЫЕ координаты
                     self.action_history.append({
-                        "type":     "delete_selection",   # 1. ex:   delete_block
-                        "text":     removed,
-                        "start":    self.selection_start,
-                        "end":      self.selection_end,
+                        "type": "delete_selection",
+                        "text": removed_segments,    # list[str]
+                        "start": norm_start_coords,
+                        "end": norm_end_coords,
                     })
-                    # курсор уже стоит в start_row/start_col
-                    self.is_selecting = False
-                    self.selection_start = self.selection_end = None
-                    self._set_status_message("Block deleted")
+                    
+                    # Курсор должен был быть установлен в norm_start_coords методом delete_selected_text_internal
+                    # self.cursor_y, self.cursor_x = norm_start_coords # Можно продублировать для уверенности или убрать, если метод надежен
 
-                # ── 2. символ слева от курсора ─────────────────────────────
+                    self.is_selecting = False
+                    self.selection_start = None
+                    self.selection_end = None
+                    self._set_status_message("Блок удален")
+                    logging.debug(f"handle_backspace: Блок удален. Курсор в ({self.cursor_y}, {self.cursor_x})")
+
+                # ── 2. Удаляем символ слева от курсора (если нет выделения и курсор не в начале строки) ──
                 elif self.cursor_x > 0:
                     y, x = self.cursor_y, self.cursor_x
+                    
+                    # Проверка, что строка y существует (на всякий случай)
+                    if y >= len(self.text):
+                        logging.warning(f"handle_backspace: cursor_y {y} вне границ для длины текста {len(self.text)}")
+                        return
+
                     line = self.text[y]
                     deleted_char = line[x - 1]
                     self.text[y] = line[:x - 1] + line[x:]
-                    self.cursor_x -= 1
+                    self.cursor_x -= 1 # Смещаем курсор влево
 
                     self.action_history.append({
-                        "type": "delete_char",
+                        "type": "delete_char", # Тип действия для удаления одного символа (backspace)
                         "text": deleted_char,
-                        "position": (y, x - 1),
+                        "position": (y, self.cursor_x), # Позиция КУДА встал курсор (т.е. x-1)
+                                                        # или (y,x) - позиция удаленного символа *относительно начала строки до удаления*?
+                                                        # Для Backspace, 'position' обычно это (y, x-1) - куда курсор встал.
+                                                        # 'text' - это удаленный символ.
+                                                        # undo(delete_char) вставит 'text' в 'position' и поставит курсор в 'position'.
+                                                        # Если position (y,x-1), то вставится line[:x-1] + char + line[x-1:]. Верно.
                     })
-                    self._set_status_message("Deleted")
+                    self._set_status_message("Символ удален")
+                    logging.debug(f"handle_backspace: Символ '{deleted_char}' в ({y},{x-1}) удален (оригинальный x был {x})")
 
-                    logging.debug("Backspace: char '%s' at (%d,%d)", deleted_char, y, x - 1)
+                # ── 3. В начале строки (cursor_x == 0), не первая строка: склеиваем с предыдущей ──
+                elif self.cursor_y > 0: # cursor_x здесь равен 0
+                    current_row_idx = self.cursor_y
+                    prev_row_idx = current_row_idx - 1
 
-                # ── 3. в начале строки, не первой: склеиваем с предыдущей ──
-                elif self.cursor_y > 0:
-                    cur_idx = self.cursor_y
-                    prev_idx = cur_idx - 1
+                    # Содержимое текущей строки, которое будет перемещено
+                    text_moved_up = self.text[current_row_idx]
+                    
+                    # Позиция курсора после объединения будет в конце бывшей предыдущей строки
+                    new_cursor_x = len(self.text[prev_row_idx])
+                    
+                    self.text[prev_row_idx] += text_moved_up
+                    del self.text[current_row_idx]
 
-                    prev_line = self.text[prev_idx]
-                    moved_text = self.text[cur_idx]
-
-                    self.text[prev_idx] += moved_text
-                    del self.text[cur_idx]
-
-                    self.cursor_y = prev_idx
-                    self.cursor_x = len(prev_line)
+                    self.cursor_y = prev_row_idx
+                    self.cursor_x = new_cursor_x
 
                     self.action_history.append({
-                        "type": "delete_newline",
-                        "text": moved_text,
-                        "position": (self.cursor_y, self.cursor_x),
+                        "type": "delete_newline", # Тип действия для объединения строк (backspace на newline)
+                        "text": text_moved_up,    # Текст, который был поднят наверх
+                        "position": (self.cursor_y, self.cursor_x), # Позиция курсора ПОСЛЕ объединения
+                                                                    # (т.е. место, где был newline)
                     })
-                    self._set_status_message("Joined lines")
-
-                    logging.debug("Backspace: join line %d into %d", cur_idx, prev_idx)
+                    self._set_status_message("Строки объединены")
+                    logging.debug(f"handle_backspace: Строка {current_row_idx} объединена с {prev_row_idx}. Курсор в ({self.cursor_y},{self.cursor_x})")
 
                 else:
-                    # top‑left of file
-                    logging.debug("Backspace: at start of file – no action")
-                    self._set_status_message("Start of file")
+                    # Курсор в (0,0) - начало файла
+                    logging.debug("handle_backspace: В начале файла – нет действия")
+                    self._set_status_message("Начало файла")
+                    # Ничего не делаем, modified не меняется, в историю не пишем
 
-                # ── финал ──────────────────────────────────────────────────
-                self.modified = True
-                self.undone_actions.clear()
-                self._ensure_cursor_in_bounds()
-                self._clamp_scroll()
+                # ── Финализация (только если было изменение) ──────────────────
+                if self.modified: # Проверяем, было ли реальное изменение
+                    self.undone_actions.clear()
+                    self._ensure_cursor_in_bounds() # Убедиться, что курсор в допустимых границах
+                    self._clamp_scroll()            # Скорректировать прокрутку, если нужно
+                # Если изменений не было (например, backspace в (0,0)), то modified=False, и эти шаги не нужны.
+                # `self.modified = True` должно устанавливаться внутри каждого блока, где происходит изменение.
+                # В блоке `else` (курсор в (0,0)) `self.modified` не трогаем.
 
-            except Exception:
-                logging.exception("Backspace error")
-                self._set_status_message("Backspace error (see log)")
+            except Exception: # Перехватываем любые неожиданные ошибки
+                logging.exception("handle_backspace: Произошла ошибка")
+                self._set_status_message("Ошибка Backspace (см. лог)")
 
 
     def handle_delete(self):
@@ -2209,43 +2722,54 @@ class SwayEditor:
         Добавляет действие в историю для отмены.
         """
         with self._state_lock:  # Блокировка для безопасного изменения текста и истории
-            if self.is_selecting and self.selection_start and self.selection_end:
-                logging.debug("Delete handling: Deleting selection")
-                
-                # Сохраняем координаты выделения
-                current_selection_start = self.selection_start
-                current_selection_end = self.selection_end
+            if self.is_selecting: # self.selection_start и self.selection_end должны быть не None, если is_selecting=True
+                normalized_range = self._get_normalized_selection_range()
+                if not normalized_range:
+                    # Этого не должно происходить, если is_selecting=True и selection_start/end установлены,
+                    # но это безопасная проверка.
+                    logging.warning("handle_delete: is_selecting=True, но не удалось получить нормализованный диапазон.")
+                    return
 
-                # Удаляем выделенный текст
+                norm_start_coords, norm_end_coords = normalized_range
+                
+                logging.debug(f"handle_delete: Удаление выделения с {norm_start_coords} по {norm_end_coords}")
+                
+                # Удаляем выделенный текст, используя НОРМАЛИЗОВАННЫЕ координаты
+                # delete_selected_text_internal должен быть готов к нормализованным координатам
+                # и, в идеале, сам устанавливать курсор в norm_start_coords.
                 deleted_text_lines = self.delete_selected_text_internal(
-                    *current_selection_start, *current_selection_end
+                    norm_start_coords[0], norm_start_coords[1],
+                    norm_end_coords[0], norm_end_coords[1]
                 )
 
-                # Добавляем действие в историю
+                # Добавляем действие в историю, используя НОРМАЛИЗОВАННЫЕ координаты
                 action = {
-                    "type": "delete_selection",  # Стандартизированный тип действия
-                    "text": deleted_text_lines,  # Удаленный текст
-                    "start": current_selection_start,  # Начало удаленного диапазона
-                    "end": current_selection_end  # Конец удаленного диапазона
+                    "type": "delete_selection",
+                    "text": deleted_text_lines,         # Удаленный текст (list[str])
+                    "start": norm_start_coords,         # Нормализованное начало
+                    "end": norm_end_coords            # Нормализованный конец
                 }
                 self.action_history.append(action)
                 self.modified = True
                 
-                # Устанавливаем курсор в начало удаленного выделения
-                self.cursor_y, self.cursor_x = current_selection_start
+                # Устанавливаем курсор в начало удаленного (нормализованного) выделения.
+                # Это также может делать delete_selected_text_internal. Если так, эта строка дублирует, но не вредит.
+                # Если delete_selected_text_internal НЕ ставит курсор, эта строка КРИТИЧНА.
+                self.cursor_y, self.cursor_x = norm_start_coords
+                
                 self.is_selecting = False
                 self.selection_start = None
                 self.selection_end = None
                 self.undone_actions.clear()  # Очищаем историю redo
-                self._set_status_message("Selection deleted")
-                logging.debug(f"Deleted selection. Cursor set to {self.cursor_y}, {self.cursor_x}")
+                self._set_status_message("Выделение удалено")
+                logging.debug(f"handle_delete: Выделение удалено. Курсор установлен в {self.cursor_y}, {self.cursor_x}")
 
             else:
-                # Нет выделения, обычный Delete
+                # Нет выделения, обычный Delete (удаление символа или объединение строк)
                 y, x = self.cursor_y, self.cursor_x
                 
                 if y >= len(self.text):
-                    logging.warning(f"Delete: cursor_y {y} is out of bounds for text length {len(self.text)}")
+                    logging.warning(f"handle_delete: cursor_y {y} вне границ для длины текста {len(self.text)}")
                     return
 
                 current_line_len = len(self.text[y])
@@ -2256,92 +2780,102 @@ class SwayEditor:
                     self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
                     self.modified = True
 
-                    # Добавляем действие в историю
                     self.action_history.append({
                         "type": "delete_char",
                         "text": deleted_char,
-                        "position": (y, x)
+                        "position": (y, x) # Позиция курсора остается той же
                     })
                     self.undone_actions.clear()
-                    logging.debug(f"Delete: Deleted char '{deleted_char}' at ({y}, {x})")
+                    logging.debug(f"handle_delete: Удален символ '{deleted_char}' в ({y}, {x})")
 
                 elif y < len(self.text) - 1:
-                    # Курсор в конце строки, удаляем перенос строки
+                    # Курсор в конце строки (x == current_line_len), удаляем перенос строки
                     next_line_idx = y + 1
                     next_line_content = self.text[next_line_idx]
+                    
+                    # Сохраняем позицию курсора *перед* объединением для истории
+                    # Для delete_newline, "position" это место, где был newline,
+                    # и куда встанет курсор после объединения.
+                    original_cursor_pos_for_history = (y, x) # x здесь это len(self.text[y])
+
                     self.text[y] += self.text.pop(next_line_idx)
                     self.modified = True
+                    
+                    # Курсор остается в (y,x) на объединенной строке
+                    self.cursor_y = y
+                    self.cursor_x = x 
 
-                    # Добавляем действие в историю
                     self.action_history.append({
                         "type": "delete_newline",
-                        "text": next_line_content,
-                        "position": (y, x)
+                        "text": next_line_content, # Содержимое присоединенной строки
+                        "position": original_cursor_pos_for_history # Позиция, где был newline
                     })
                     self.undone_actions.clear()
-                    logging.debug(f"Delete: Deleted newline and merged line {next_line_idx} into {y}")
+                    logging.debug(f"handle_delete: Удален newline и объединена строка {next_line_idx} в {y}. Курсор в ({self.cursor_y}, {self.cursor_x})")
                 else:
-                    logging.debug("Delete: Cursor at end of file, doing nothing.")
-                
+                    logging.debug("handle_delete: Курсор в конце файла, нет действия.")
 
-    def delete_selected_text_internal(
-        self,
-        start_row: int,
-        start_col: int,
-        end_row:   int,
-        end_col:   int,
-    ) -> list[str]:
+
+    def delete_selected_text_internal(self, start_y: int, start_x: int, end_y: int, end_x: int) -> list[str]:
         """
-        Remove text in *[start_row:start_col] … [end_row:end_col)* **without**
-        touching history/undo stacks and **return** the exact slice that
-        was removed (line‑by‑line).
-
-        This helper is used by high‑level commands (`delete()`, `paste()`, etc.)
-        to implement block operations and later push them onto the undo stack.
-
-        • Диапазон нормализуется: «левый‑верхний» ≤ «правый‑нижний».  
-        • Если координаты выходят за конец файла — обрезаем по фактической длине.  
-        • Возвращаемый список содержит N строк, каждая — точно та часть,
-        которая была удалена из соответствующей строки.  
-        Пример: удалить `"bc\nde"` из  
-        ```
-        abcd
-        efgh
-        ```  
-        вернёт `["bc", "d"]`.
+        Низкоуровневый метод: удаляет текст между нормализованными (start_y, start_x) и (end_y, end_x).
+        Возвращает удаленный текст как список строк (сегментов).
+        Устанавливает курсор в (start_y, start_x).
+        НЕ записывает действие в историю. Устанавливает self.modified = True.
         """
-        # ── 1. нормализуем порядок координат ───────────────────────────────
-        if (start_row, start_col) > (end_row, end_col):
-            start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
-
-        # ── 2. защитные ограничения ───────────────────────────────────────
-        if not self.text:                               # файл мог быть пустым
+        logging.debug(f"delete_selected_text_internal: Удаление с ({start_y},{start_x}) по ({end_y},{end_x})")
+        
+        # Проверка валидности координат (базовая)
+        if not (0 <= start_y < len(self.text) and 0 <= end_y < len(self.text) and \
+                0 <= start_x <= len(self.text[start_y]) and 0 <= end_x <= len(self.text[end_y])):
+            logging.error(f"delete_selected_text_internal: Невалидные координаты для удаления: ({start_y},{start_x}) по ({end_y},{end_x})")
+            # В реальном коде здесь можно выбросить исключение или вернуть пустой список
             return []
 
-        start_row = max(0, min(start_row, len(self.text) - 1))
-        end_row   = max(0, min(end_row,   len(self.text) - 1))
+        deleted_segments = []
 
-        # ── 3. собираем удаляемый фрагмент для undo ───────────────────────
-        deleted_lines: list[str] = []
-        for row in range(start_row, end_row + 1):
-            line = self.text[row]
-            if row == start_row == end_row:             # удаление внутри одной строки
-                deleted_lines.append(line[start_col:end_col])
-            elif row == start_row:                      # первая строка диапазона
-                deleted_lines.append(line[start_col:])
-            elif row == end_row:                        # последняя
-                deleted_lines.append(line[:end_col])
-            else:                                       # промежуточные целиком
-                deleted_lines.append(line)
+        if start_y == end_y:
+            # Удаление в пределах одной строки
+            line_content = self.text[start_y]
+            deleted_segments.append(line_content[start_x:end_x])
+            self.text[start_y] = line_content[:start_x] + line_content[end_x:]
+        else:
+            # Многострочное удаление
+            # Первая строка (частично)
+            line_start_content = self.text[start_y]
+            deleted_segments.append(line_start_content[start_x:])
+            
+            # Сохраняем часть строки start_y, которая останется
+            remaining_prefix_on_start_line = line_start_content[:start_x]
 
-        # ── 4. фактическое удаление (используем низкоуровневый метод) ─────
-        self.delete_text_internal(start_row, start_col, end_row, end_col)
+            # Последняя строка (частично)
+            line_end_content = self.text[end_y]
+            deleted_segments.append(line_end_content[:end_x]) # Это неверно, если start_y+1 == end_y, нужно собирать полные строки между
+            
+            # Сохраняем часть строки end_y, которая останется (и будет присоединена к prefix)
+            remaining_suffix_on_end_line = line_end_content[end_x:]
 
-        logging.debug(
-            "delete_selected_text_internal: (%d,%d) … (%d,%d) – %d line(s) removed",
-            start_row, start_col, end_row, end_col, len(deleted_lines)
-        )
-        return deleted_lines
+            # Удаляем полные строки между start_y и end_y (не включая их сами)
+            # Строки для удаления: от start_y + 1 до end_y - 1
+            # Сначала соберем их для deleted_segments
+            if end_y > start_y + 1:
+                 # Вставляем на вторую позицию, т.к. первый сегмент уже есть
+                deleted_segments[1:1] = self.text[start_y + 1 : end_y]
+
+
+            # Обновляем текст
+            self.text[start_y] = remaining_prefix_on_start_line + remaining_suffix_on_end_line
+            
+            # Удаляем строки, которые были объединены или полностью удалены
+            # Индексы для удаления: от start_y + 1 до end_y включительно
+            del self.text[start_y + 1 : end_y + 1]
+        
+        self.cursor_y = start_y
+        self.cursor_x = start_x
+        self.modified = True
+        logging.debug(f"delete_selected_text_internal: Удалено. Курсор в ({self.cursor_y},{self.cursor_x}). Удаленные сегменты: {deleted_segments!r}")
+        return deleted_segments
+
 
     # для key TAB вспомогательный метод
     def handle_tab(self):
@@ -2474,77 +3008,153 @@ class SwayEditor:
 
         logging.debug("Handled Enter key")
 
-
     def parse_key(self, key_str: str) -> int:
-            """
-            Преобразует строку-описание горячей клавиши в curses-код.
-            Поддерживает F1–F12, стрелки, Home/End, PgUp/PgDn, Insert/Delete, Backspace,
-            Ctrl+<буква>, Ctrl+Shift+<буква>, Alt+<ключ>, и символы из кириллицы, польского и китайского ввода.
-            """
-            if isinstance(key_str, int):
-                return key_str
+        """
+        Преобразует строку-описание горячей клавиши в curses-код.
+        """
+        if isinstance(key_str, int):
+            return key_str
 
-            key_str = key_str.strip().lower()
-            if not key_str:
-                raise ValueError("empty hotkey string")
+        key_str = key_str.strip().lower()
+        if not key_str:
+            raise ValueError("Пустая строка для горячей клавиши")
 
-            term = os.environ.get("TERM", "xterm")
-            term_mappings = self.config.get("terminal_key_mappings", {}).get(term, {})
-            if key_str in term_mappings:
-                return self.parse_key(term_mappings[key_str])
+        # Сначала проверяем на точное совпадение в named, включая shift-комбинации
+        # (они должны быть в нижнем регистре в named)
+        named = {
+            "del": getattr(curses, 'KEY_DC', 330),
+            "delete": getattr(curses, 'KEY_DC', 330),
+            "backspace": getattr(curses, 'KEY_BACKSPACE', 127), # Обычно 263 в keypad(True)
+            "tab": ord("\t"), # curses.KEY_TAB (обычно 9)
+            "enter": ord("\n"), # curses.KEY_ENTER (обычно 10 или 13)
+            "space": ord(" "),
+            "esc": 27, # curses.KEY_EXIT или 27
+            "escape": 27,
+            "up": getattr(curses, 'KEY_UP', 259),
+            "down": getattr(curses, 'KEY_DOWN', 258),
+            "left": getattr(curses, 'KEY_LEFT', 260),
+            "right": getattr(curses, 'KEY_RIGHT', 261),
+            "home": getattr(curses, 'KEY_HOME', 262),
+            "end": getattr(curses, 'KEY_END', 360), # Может быть KEY_LL или специфичный для терминала
+            "pageup": getattr(curses, 'KEY_PPAGE', 339),
+            "pgup": getattr(curses, 'KEY_PPAGE', 339),
+            "pagedown": getattr(curses, 'KEY_NPAGE', 338),
+            "pgdn": getattr(curses, 'KEY_NPAGE', 338),
+            "insert": getattr(curses, 'KEY_IC', 331),
+            # Явные Shift-комбинации для спец. клавиш, которые curses может возвращать
+            "sright": getattr(curses, 'KEY_SRIGHT', 402), # Shift+Right
+            "sleft": getattr(curses, 'KEY_SLEFT', 393),   # Shift+Left
+            "shome": getattr(curses, 'KEY_SHOME', 391),   # Shift+Home
+            "send": getattr(curses, 'KEY_SEND', 386),    # Shift+End
+            "spgup": getattr(curses, 'KEY_SPREVIOUS', 337), # Shift+PgUp (KEY_SR в некоторых системах)
+            "spgdn": getattr(curses, 'KEY_SNEXT', 336),     # Shift+PgDn (KEY_SF в некоторых системах)
+            # Добавим ваши:
+            "shift+pgup": getattr(curses, 'KEY_SPREVIOUS', 337),
+            "shift+pgdn": getattr(curses, 'KEY_SNEXT', 336),
+        }
+        named.update({f"f{i}": getattr(curses, f"KEY_F{i}", 256 + i) for i in range(1, 13)}) # KEY_F(i) обычно > 256
 
-            named = {
-                "del": getattr(curses, 'KEY_DC', 330),
-                "delete": getattr(curses, 'KEY_DC', 330),
-                "backspace": getattr(curses, 'KEY_BACKSPACE', 127),
-                "tab": ord("\t"),
-                "enter": ord("\n"),
-                "space": ord(" "),
-                "esc": 27,
-                "escape": 27,
-                "up": getattr(curses, 'KEY_UP', 259),
-                "down": getattr(curses, 'KEY_DOWN', 258),
-                "left": getattr(curses, 'KEY_LEFT', 260),
-                "right": getattr(curses, 'KEY_RIGHT', 261),
-                "home": getattr(curses, 'KEY_HOME', 262),
-                "end": getattr(curses, 'KEY_END', 360),
-                "pageup": getattr(curses, 'KEY_PPAGE', 339),
-                "pgup": getattr(curses, 'KEY_PPAGE', 339),
-                "pagedown": getattr(curses, 'KEY_NPAGE', 338),
-                "pgdn": getattr(curses, 'KEY_NPAGE', 338),
-                "insert": getattr(curses, 'KEY_IC', 331),
-                "shift+pgup": 337,
-                "shift+pgdn": 336,
-            }
-            named.update({f"f{i}": getattr(curses, f"KEY_F{i}", 265 + i - 1) for i in range(1, 13)})
+        if key_str in named:
+            return named[key_str]
 
-            if key_str.startswith("alt+"):
-                base_key = self.parse_key(key_str[4:])
-                return base_key | 0x200
+        parts = key_str.split('+')
+        modifiers = []
+        base_key_str = ""
 
-            parts = key_str.split("+")
-            if len(parts) >= 2 and parts[0] == "ctrl":
-                is_shift = parts[1] == "shift"
-                ch_index = 2 if is_shift else 1
-                if ch_index >= len(parts):
-                    raise ValueError("missing character after ctrl/ctrl+shift")
-                ch = parts[ch_index]
-                if len(ch) == 1:
-                    ch_ord = ord(ch)
-                    if 'а' <= ch <= 'я' or 'А' <= ch <= 'Я':
-                        return 0x400 + (ord(ch.lower()) - ord('а')) | (0x100 if is_shift else 0)
-                    if 'a' <= ch <= 'z':
-                        return (ord(ch) - ord('a') + 1) | (0x100 if is_shift else 0)
-                    raise ValueError(f"unsupported ctrl key: {ch}")
+        for part in parts:
+            if part in ("ctrl", "alt", "shift"):
+                modifiers.append(part)
+            else:
+                if base_key_str: # Уже нашли одну "базовую" клавишу
+                    raise ValueError(f"Несколько базовых клавиш в хоткее: {key_str}")
+                base_key_str = part
+        
+        if not base_key_str:
+            raise ValueError(f"Не найдена базовая клавиша в хоткее: {key_str}")
 
-            if key_str in named:
-                return named[key_str]
+        # Обработка базовой клавиши
+        base_code: int
+        if base_key_str in named: # Если "z" в "shift+z" это, например, "del"
+            base_code = named[base_key_str]
+        elif len(base_key_str) == 1:
+            base_code = ord(base_key_str) # "z" -> ord('z')
+        else: # Если базовая клавиша не одиночный символ и не в named (напр. "f1")
+            raise ValueError(f"Неизвестная базовая клавиша: {base_key_str} в {key_str}")
 
-            if len(key_str) == 1:
-                return ord(key_str)
+        # Применение модификаторов
+        # curses не имеет универсальных кодов для Alt+<буква> или Shift+<буква> (кроме заглавных).
+        # Ctrl+<буква> обычно это ord(буква) & 0x1F или ord(буква) - ord('a') + 1.
 
-            raise ValueError(f"cannot parse hotkey: {key_str}")
+        is_ctrl = "ctrl" in modifiers
+        is_alt = "alt" in modifiers # Alt часто реализуется через Esc-префикс, get_wch() может вернуть строку
+        is_shift = "shift" in modifiers
 
+        if is_alt:
+            # Alt часто не генерирует один int код, а меняет байтовую последовательность.
+            # Если get_wch() возвращает строку для Alt-комбинаций, этот парсер не сможет
+            # их перевести в int, если только нет спец. кодов от curses (редко).
+            # Можно зарезервировать диапазон для Alt, как вы делали (base_key | 0x200)
+            # но это будет работать, только если ваш input loop генерирует такие int'ы.
+            # Для Alt+X (где X это буква), эмуляторы терминала часто шлют Esc + X.
+            # parse_key здесь должен вернуть то, что ОЖИДАЕТ action_map.
+            # Если action_map ожидает кастомные коды для Alt, то здесь их надо генерировать.
+            # Например, если base_code это ord('x'), то alt+x -> ord('x') | 0x200.
+            # Однако, если base_code это KEY_LEFT, то alt+left может быть другим.
+            # Ваша логика `return base_key | 0x200` была для `alt+...`.
+            # Но она стояла ПЕРЕД разделением на части.
+            # Если key_str был "alt+a", то base_key парсился из "a".
+            # Это можно оставить, но после обработки ctrl/shift.
+            # Либо, ваш get_wch() должен возвращать такие коды.
+            # Для простоты, если Alt, то это скорее всего не одиночный int от getch().
+            # Если вы хотите мапить "alt+x" на что-то, это лучше делать через term_mappings или строки.
+            logging.warning(f"Парсинг Alt-комбинаций ('{key_str}') может быть не универсальным и зависит от терминала/get_wch.")
+            # Если вы определили кастомные коды для Alt, то применяйте их.
+            # base_code |= 0x200 # Пример вашего предыдущего подхода
+
+        if is_ctrl:
+            if 'a' <= base_key_str <= 'z':
+                char_code = ord(base_key_str)
+                # Ctrl+буква (a-z) -> 1-26
+                # Ctrl+Shift+буква (A-Z) -> кастомный диапазон, например 257-282
+                # (ord(ch) - ord('a') + 1)
+                ctrl_val = char_code - ord('a') + 1
+                if is_shift:
+                    # Пример: Ctrl+Shift+A = 257 (0x101)
+                    # Предполагаем, что такие коды не конфликтуют с curses.KEY_*
+                    # Это уже было в вашей логике:
+                    base_code = ctrl_val | 0x100 # 256 + (1..26)
+                else:
+                    base_code = ctrl_val
+            # elif base_key_str == '[': base_code = 27 # Ctrl+[ -> Esc
+            # ... другие специальные Ctrl комбинации ...
+            else:
+                raise ValueError(f"Ctrl можно применять только к буквам a-z в {key_str} (или нужны явные маппинги)")
+        
+        elif is_shift: # Shift без Ctrl
+            if 'a' <= base_key_str <= 'z':
+                # shift+z -> ord('Z')
+                base_code = ord(base_key_str.upper())
+            # Для Shift + спец.клавиша (например, Shift+Tab) - они должны быть в `named` как "shift+tab"
+            # или ваш get_wch() должен возвращать для них спец. код, который вы положите в `named`
+            # или напрямую в `action_map`.
+            # Эта ветка не должна ловить "shift+pgup", т.к. он уже в named.
+            # Если мы здесь, значит это что-то типа "shift+1" или "shift+]"
+            # Для них curses обычно не генерирует спец. коды, а возвращает сами символы ('!', '}')
+            # Если base_key_str это '1', то ord(base_key_str.upper()) даст ошибку.
+            # Значит, `shift+<не_буква>` должен быть явно определен в `named` или `term_mappings`.
+            # Если мы дошли сюда с `shift+<не_буква>`, и его нет в `named`, это ошибка.
+            elif not ('a' <= base_key_str <= 'z'):
+                 # Если это "shift+f1", то "f1" уже должно было быть обработано `named`.
+                 # Если это "shift+enter", то "enter" в `named`, но shift+enter - другой код.
+                 # Это сложно сделать универсально. Лучше явные маппинги.
+                raise ValueError(f"Shift с не-буквенной клавишей '{base_key_str}' должен быть явно определен в 'named_keys' (например, 'shift+tab')")
+
+        # Обработка Alt в конце, если другие модификаторы уже применены
+        if is_alt:
+             base_code |= 0x200 # Ваш предыдущий подход для кастомных Alt кодов
+
+        return base_code
+    
 
     def get_char_width(self, char):
         """
@@ -4840,8 +5450,8 @@ class DrawScreen:
                 start_y + panel_height - 2, start_x + 2,
                 footer, panel_width - 4, curses.A_DIM
             )
-        except curses.error:
-            pass
+        except curses.error as e:
+            logging.error(f"Ошибка curses при отрисовке панели линтера: {e}")
 
 
     def _draw_text_with_syntax_highlighting(self):
