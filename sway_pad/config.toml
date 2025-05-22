@@ -60,6 +60,8 @@ tab = "tab"
 comment_line = "alt+#"
 toggle_insert_mode = "insert"
 lint = "f4"   
+comment_selected_lines = 31
+uncomment_selected_lines = 63
 
 # ── перемещение курсора / выделение ───────────────────────────────
 extend_selection_right = "shift+right"
