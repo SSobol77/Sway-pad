@@ -9231,124 +9231,6 @@ class DrawScreen:
             current_screen_x = actual_draw_x_for_token + self.editor.get_string_width(text_to_draw) # Update screen x for next token
             if current_screen_x >= window_width:
                  break # Reached end of screen
-            
-#     def _draw_single_line(self, screen_row: int, line_data: Tuple[int, List[Tuple[str, int]]], window_width: int):
-#         """
-#         Отрисовывает одну строку текста с подсветкой синтаксиса.
-#         :param screen_row: Экранная строка (y-координата), куда рисовать.
-#         :param line_data: Кортеж (line_index, tokens_for_this_line).
-#                          line_index - индекс строки в self.editor.text.
-#                          tokens_for_this_line - список токенов [(text, attr), ...].
-#         :param window_width: Текущая ширина окна терминала.
-#         """
-#         line_index, tokens_for_this_line = line_data
-        
-#         # Очищаем строку перед отрисовкой (от self._text_start_x до конца)
-#         try:
-#             self.stdscr.move(screen_row, self._text_start_x)
-#             self.stdscr.clrtoeol()
-#         except curses.error as e:
-#             logging.error(f"Curses error clearing line at ({screen_row}, {self._text_start_x}): {e}")
-#             return # Не можем продолжить, если не можем очистить строку
-
-#         original_line_text_for_log = self.editor.text[line_index] if line_index < len(self.editor.text) else "LINE_INDEX_OUT_OF_BOUNDS"
-#         logging.debug(
-#             f"  DrawScreen _draw_single_line: Line {line_index} (screen_row {screen_row}), "
-#             f"Original content: '{original_line_text_for_log[:70].replace(chr(9), '/t/')}{'...' if len(original_line_text_for_log)>70 else ''}'"
-#         )
-#         logging.debug(
-#             f"    DrawScreen _draw_single_line: Tokens: "
-#             f"{[(token_text.replace(chr(9), '/t/'), token_attr) for token_text, token_attr in tokens_for_this_line if isinstance(token_text, str)]}"
-#         )
-
-#         logical_char_col_abs = 0  # Суммарная *логическая ширина* символов от начала строки (с учетом wcwidth)
-        
-#         for token_index, (token_text_content, token_color_attribute) in enumerate(tokens_for_this_line):
-#             logging.debug(
-#                 f"      DrawScreen _draw_single_line: Token {token_index}: text='{token_text_content.replace(chr(9),'/t/')}', attr={token_color_attribute}"
-#             )
-#             if not token_text_content:
-#                 logging.debug("        DrawScreen _draw_single_line: Skipping empty token.")
-#                 continue
-
-#             for char_index_in_token, char_to_render in enumerate(token_text_content):
-#                 char_printed_width = self.editor.get_char_width(char_to_render)
-                
-#                 logging.debug(
-#                     f"        DrawScreen _draw_single_line: Char '{char_to_render.replace(chr(9),'/t/')}' (idx_in_token {char_index_in_token}), "
-#                     f"current_logical_col_abs_BEFORE_this_char={logical_char_col_abs}, char_width={char_printed_width}"
-#                 )
-
-#                 if char_printed_width == 0: 
-#                     logging.debug("          DrawScreen _draw_single_line: Skipping zero-width char.")
-#                     continue # logical_char_col_abs не увеличивается для символов нулевой ширины
-
-#                 # Идеальная стартовая X координата символа на экране (относительно начала окна)
-#                 char_ideal_screen_start_x = self._text_start_x + (logical_char_col_abs - self.editor.scroll_left)
-#                 # Идеальная конечная X координата символа на экране
-#                 char_ideal_screen_end_x = char_ideal_screen_start_x + char_printed_width
-
-#                 # Проверяем, видим ли мы этот символ на экране
-#                 is_char_visible_on_screen = (char_ideal_screen_end_x > self._text_start_x and
-#                                              char_ideal_screen_start_x < window_width)
-
-#                 if is_char_visible_on_screen:
-#                     # Реальная X координата для отрисовки (не левее начала текстовой области)
-#                     actual_draw_x = max(self._text_start_x, char_ideal_screen_start_x)
-
-#                     if actual_draw_x < window_width: # Убедимся, что мы не пытаемся рисовать за пределами окна
-#                         try:
-#                             logging.debug(
-#                                 f"          DrawScreen _draw_single_line: DRAWING Char '{char_to_render.replace(chr(9),'/t/')}' "
-#                                 f"at screen ({screen_row}, {actual_draw_x}), "
-#                                 f"ideal_X={char_ideal_screen_start_x}, "
-#                                 f"final_attr={token_color_attribute}"
-#                             )
-#                             self.stdscr.addch(screen_row, actual_draw_x, char_to_render, token_color_attribute)
-#                         except curses.error as e:
-#                             # Если ошибка при отрисовке символа (например, за пределами экрана справа),
-#                             # прекращаем отрисовку этой строки.
-#                             logging.warning(
-#                                 f"          DrawScreen _draw_single_line: CURSES ERROR drawing char '{char_to_render.replace(chr(9),'/t/')}' (ord: {ord(char_to_render) if len(char_to_render)==1 else 'multi'}) "
-#                                 f"at ({screen_row}, {actual_draw_x}) with attr {token_color_attribute}. Error: {e}. Stopping line draw."
-#                             )
-#                             return # Прерываем отрисовку всей строки
-#                     else:
-#                         # Символ начинается за пределами правой границы окна
-#                         logging.debug(
-#                             f"          DrawScreen _draw_single_line: Char '{char_to_render.replace(chr(9),'/t/')}' not drawn, actual_draw_x={actual_draw_x} >= window_width={window_width}."
-#                         )
-#                         # Если символ уже не помещается, нет смысла продолжать для этой строки
-#                         return 
-#                 else:
-#                     # Символ полностью вне видимой области (слева или справа)
-#                     logging.debug(
-#                         f"          DrawScreen _draw_single_line: Char '{char_to_render.replace(chr(9),'/t/')}' not visible. "
-#                         f"Ideal screen X range: [{char_ideal_screen_start_x} - {char_ideal_screen_end_x}). "
-#                         f"Visible text area X range: [{self._text_start_x} - {window_width-1}]."
-#                     )
-                
-#                 logical_char_col_abs += char_printed_width # Увеличиваем логическую позицию на ширину символа
-                
-#                 # Проверка, не вышли ли мы за правую границу окна по логической ширине
-#                 # Если следующий символ начнется за пределами окна, нет смысла продолжать
-#                 next_char_ideal_screen_start_x_check = self._text_start_x + (logical_char_col_abs - self.editor.scroll_left)
-#                 if next_char_ideal_screen_start_x_check >= window_width:
-#                     logging.debug(
-#                         f"        DrawScreen _draw_single_line: Next char would start at or beyond window width "
-#                         f"({next_char_ideal_screen_start_x_check} >= {window_width}). Breaking inner char loop."
-#                     )
-#                     break # Прерываем цикл по символам в текущем токене
-            
-#             # Если внутренний цикл (по символам) был прерван (break), то прерываем и внешний (по токенам)
-#             else: # Этот 'else' относится к 'for char_index_in_token...'
-#                 continue # Продолжаем со следующим токеном
-#             logging.debug(f"      DrawScreen _draw_single_line: Broken from char loop, breaking token loop as well.")
-#             break # Прерываем цикл по токенам
-            
-#         logging.debug(f"    DrawScreen _draw_single_line: Finished processing tokens for line {line_index}. Final logical_char_col_abs = {logical_char_col_abs}")
-
-# #----
 
     def draw(self):
         """Основной метод отрисовки экрана."""
@@ -9500,9 +9382,6 @@ class DrawScreen:
         except curses.error as e:
             logging.error(f"Ошибка curses при отрисовке панели линтера: {e}")
 
-
-
-
     def _draw_search_highlights(self):
         """Накладывает подсветку найденных совпадений."""
         if not self.editor.highlighted_matches:
@@ -9570,8 +9449,6 @@ class DrawScreen:
                 except curses.error as e:
                     logging.error(f"Curses error applying search highlight: {e}")
  
-
-
     def _draw_selection(self):
         """Накладывает подсветку выделенного текста."""
         # Проверяем, активно ли выделение и заданы ли его границы
@@ -9632,12 +9509,10 @@ class DrawScreen:
 
                 except curses.error as e:
                     logging.error(f"Curses error applying selection highlight at ({screen_y}, {draw_start_x}) with width {highlight_width_on_screen}: {e}")
- 
 
     def _draw_matching_brackets(self):
         """Вызывает highlight_matching_brackets для отрисовки."""
         self.editor.highlight_matching_brackets()
-
 
     def truncate_string(self, s: str, max_width: int) -> str:
         """
@@ -9655,7 +9530,6 @@ class DrawScreen:
             result += ch
             curr += w
         return result
-
 
     def _draw_status_bar(self) -> None:
         """Рисует статус-бар, избегая ERR от addnstr()."""
@@ -9722,7 +9596,6 @@ class DrawScreen:
         except Exception as e:
             logging.error(f"Error in _draw_status_bar: {e}", exc_info=True)
             self.editor._set_status_message("Status bar error (see log)")
-
 
     def _position_cursor(self) -> None:
         """Позиционирует курсор на экране, не позволяя ему «улетать» за Git-статус."""
@@ -9825,8 +9698,6 @@ class DrawScreen:
         except curses.error as e:
             logging.error(f"Curses doupdate error: {e}")
             pass # Продолжаем, надеясь, что главный цикл обработает
-
-
 
 
 def main_curses_function(stdscr): # Renamed from 'main' to avoid conflict with script entry point
