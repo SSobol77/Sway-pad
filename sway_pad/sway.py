@@ -314,11 +314,12 @@ def get_file_icon(filename: Optional[str], config: Dict[str, Any]) -> str:
     """
     file_icons = config.get("file_icons", {})
     default_icon = file_icons.get("default", "❓") # Default if no specific icon is found
-    text_icon = file_icons.get("text", "📝")       # Specific default for text-like or new files
+    text_icon = file_icons.get("text", "📝 ")       # Specific default for text-like or new files
 
     if not filename: # Handles new, unsaved files or None input
-        return text_icon # Use text icon for new/untitled files
-
+        #return text_icon # Use text icon for new/untitled files
+        return default_icon 
+    
     # Normalize filename for matching (lowercase)
     filename_lower = filename.lower()
     base_name_lower = os.path.basename(filename_lower) # e.g., "myfile.txt" from "/path/to/myfile.txt"
@@ -823,169 +824,204 @@ class SwayEditor:
             except Exception as e:
                 logging.error(f"Failed to add status message to queue: '{message_for_statusbar}': {e}", exc_info=True)
 
-    # Add to your imports at the top of the file if you decide to keep self._token_cache as OrderedDict
-    # from collections import OrderedDict 
-    # If you completely remove self._token_cache for Pygments, this import might not be needed for this specific cache.
-    def __init__(self, stdscr):
+
+    def __init__(self, stdscr: "curses.window") -> None:
+        """Create and fully initialise a `SwayEditor` instance.
+
+        The constructor performs *all* one–time setup steps:
+
+        * Configures the underlying terminal and `curses` runtime so that raw
+        key-presses (including Ctrl-S / Ctrl-Q) reach the application.
+        * Loads the user configuration from *config.toml*; falls back to a
+        minimal in-memory default when the file is missing or invalid.
+        * Initialises colour pairs, clipboard integration, auto-save
+        parameters, queues/locks for background threads, and the text buffer.
+        * Creates the :class:`DrawScreen` helper responsible for all
+        `curses` drawing.
+        * Loads key-bindings from the configuration and builds an
+        *action-map* (key-code → bound-method).
+        * Fetches initial Git information (branch / commit count) when the
+        feature is enabled.
+        * Sets `locale` so that `wcwidth` correctly handles the user’s
+        environment.
+
+        Args:
+            stdscr: The root ``curses`` window as received from
+                :pyfunc:`curses.wrapper`.
+
+        Raises:
+            RuntimeError: Re-raises *critical* exceptions that make the editor
+                unusable (e.g. failure to create the action map).
+
+        Side-Effects:
+            * The global terminal mode is changed (`curses.raw`, `noecho`,
+            `curs_set`).
+            * A background auto-save thread is **not** started yet – it will be
+            launched lazily on first save.
+
+        Attributes (excerpt):
+            stdscr (curses.window): Root window.
+            config (dict): Merged editor configuration.
+            text (List[str]): The in-memory document (one string per line).
+            drawer (DrawScreen): Helper object that renders the UI.
+            visible_lines (int): Number of text rows that currently fit.
+            _force_full_redraw (bool): When *True* the next
+                :pymeth:`DrawScreen.draw` will call ``stdscr.erase()`` and then
+                reset the flag to *False*.
+
+        Note:
+            Most attributes are typed explicitly to aid static analysis; see
+            source code below for the complete list.
         """
-        Initialize the editor. Called from curses.wrapper().
-        Sets up terminal, curses, configuration, editor state, and keybindings.
-        """
-        # --- Terminal Setup: Disable IXON/IXOFF and canonical mode ---
-        # This allows Ctrl+S, Ctrl+Q, and other control sequences to be captured by the application.
+        # ───────────────────── Terminal low-level tweaks ─────────────────────
         try:
             fd = sys.stdin.fileno()
-            termios_attrs = termios.tcgetattr(fd)
-            termios_attrs[0] &= ~(termios.IXON | termios.IXOFF)  # Disable Ctrl+S / Ctrl+Q flow control
-            termios_attrs[3] &= ~termios.ICANON                  # Disable canonical mode (line buffering)
-            termios.tcsetattr(fd, termios.TCSANOW, termios_attrs)
-            logging.debug("Terminal IXON/IXOFF and ICANON successfully disabled – Ctrl+S/Q/Z now usable by app.")
-        except Exception as e_termios: # Catch specific termios.error or general Exception
-            logging.warning(f"Could not set terminal attributes (IXON/IXOFF, ICANON): {e_termios}")
+            attrs = termios.tcgetattr(fd)
+            attrs[0] &= ~(termios.IXON | termios.IXOFF)  # disable flow-control
+            attrs[3] &= ~termios.ICANON                  # disable canonical mode
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            logging.debug(
+                "Terminal IXON/IXOFF and ICANON successfully disabled."
+            )
+        except Exception as exc:
+            logging.warning("Could not set terminal attributes: %s", exc)
 
-        # --- Basic Curses Initialization ---
+        # ───────────────────── Curses runtime initialisation ─────────────────
         self.stdscr = stdscr
-        self.stdscr.keypad(True)  # Enable support for special keys (F-keys, arrows, etc.)
-        curses.raw()              # Enable raw mode (input characters are available one by one)
-        curses.noecho()           # Do not echo typed characters to the screen
-        curses.curs_set(1)        # Set cursor visibility (1 = normal, 0 = invisible, 2 = very visible)
+        self.stdscr.keypad(True)
+        curses.raw()
+        curses.noecho()
+        curses.curs_set(1)
 
-        # --- Load Configuration and Initialize Settings/Buffers ---
+        # ───────────────────── Configuration & colours ───────────────────────
         try:
-            self.config = load_config() # Load from config.toml or use defaults
-        except Exception as e_config:
-            logging.error(f"Failed to load configuration: {e_config}. Using minimal fallback defaults.", exc_info=True)
-            self.config = { # Fallback configuration
-                "editor": {"use_system_clipboard": True, "tab_size": 4, "use_spaces": True, "default_new_filename": "untitled.txt"},
+            self.config = load_config()
+        except Exception as exc:
+            logging.error("Failed to load config: %s – using defaults", exc)
+            self.config = {
+                "editor": {
+                    "use_system_clipboard": True,
+                    "tab_size": 4,
+                    "use_spaces": True,
+                    "default_new_filename": "untitled.txt",
+                },
                 "keybindings": {},
-                "colors": {}, # Colors will be initialized by init_colors
+                "colors": {},
                 "git": {"enabled": True},
                 "settings": {"auto_save_interval": 1, "show_git_info": True},
                 "file_icons": {"text": "📝", "default": "❓"},
-                "supported_formats": {}
+                "supported_formats": {},
             }
 
-        self.colors: dict[str, int] = {} # To store curses color pair attributes
-        self.init_colors() # Initialize color pairs
+        self.colors: dict[str, int] = {}
+        self.init_colors()
 
-        # Clipboard settings
-        self.use_system_clipboard = self.config.get("editor", {}).get("use_system_clipboard", True)
-        self.pyclip_available = self._check_pyclip_availability() # Check if pyperclip and system utils are working
+        # ───────────────────── Clipboard support ─────────────────────────────
+        self.use_system_clipboard = self.config["editor"].get(
+            "use_system_clipboard", True
+        )
+        self.pyclip_available = self._check_pyclip_availability()
         if not self.pyclip_available and self.use_system_clipboard:
-            logging.warning("pyperclip/system clipboard utilities are unavailable. System clipboard integration disabled.")
-            self.use_system_clipboard = False # Fallback to internal clipboard only
+            logging.warning(
+                "System clipboard unavailable – falling back to internal buffer."
+            )
+            self.use_system_clipboard = False
         self.internal_clipboard: str = ""
 
-        # Auto-save settings and state
+        # ───────────────────── Auto-save parameters ──────────────────────────
         self._auto_save_thread: Optional[threading.Thread] = None
-        self._auto_save_enabled: bool = False
-        self._auto_save_stop_event = threading.Event() # For cleanly stopping the auto-save thread
+        self._auto_save_enabled = False
+        self._auto_save_stop_event = threading.Event()
         try:
-            self._auto_save_interval = float(self.config.get("settings", {}).get("auto_save_interval", 1.0)) # In minutes
+            self._auto_save_interval = float(
+                self.config["settings"].get("auto_save_interval", 1.0)
+            )
             if self._auto_save_interval <= 0:
-                logging.warning(f"Invalid auto_save_interval ({self._auto_save_interval} min), defaulting to 1.0 min.")
-                self._auto_save_interval = 1.0
+                raise ValueError
         except (ValueError, TypeError):
-            logging.warning("Could not parse auto_save_interval, defaulting to 1.0 min.")
+            logging.warning("Invalid auto_save_interval – defaulting to 1.0 min.")
             self._auto_save_interval = 1.0
 
-        # Editor mode and status
-        self.insert_mode: bool = True       # True for insert, False for replace/overwrite
-        self.status_message: str = "Ready"  # Current message for the status bar
-        self._last_status_msg_sent: Optional[str] = None # To prevent duplicate status messages
-        self._msg_q: queue.Queue[Any] = queue.Queue() # General message queue for status updates from threads
+        # ───────────────────── Core editor state ─────────────────────────────
+        self.insert_mode = True
+        self.status_message = "Ready"
+        self._last_status_msg_sent: Optional[str] = None
+        self._msg_q: "queue.Queue[str]" = queue.Queue()
 
-        # Linter panel state
-        self.lint_panel_message: Optional[str] = None # Full message content for the linter panel
-        self.lint_panel_active: bool = False          # Whether the linter panel is currently visible
+        self.lint_panel_message: Optional[str] = None
+        self.lint_panel_active = False
 
-        # Undo/Redo history
-        self.action_history: List[dict[str, Any]] = []
-        self.undone_actions: List[dict[str, Any]] = []
+        self.action_history: list[dict[str, Any]] = []
+        self.undone_actions: list[dict[str, Any]] = []
 
-        # Threading and Queues for background tasks
-        self._state_lock = threading.RLock()       # Reentrant lock for protecting shared editor state
-        self._shell_cmd_q: queue.Queue[str] = queue.Queue() # Queue for results from shell commands
-        self._git_q: queue.Queue[Tuple[str, str, str]] = queue.Queue() # Queue for Git info updates (branch, user, commits)
-        self._git_cmd_q: queue.Queue[str] = queue.Queue() # Queue for results from Git commands
+        # ───────────────────── Thread-safe queues / locks ────────────────────
+        self._state_lock = threading.RLock()
+        self._shell_cmd_q: "queue.Queue[str]" = queue.Queue()
+        self._git_q: "queue.Queue[tuple[str,str,str]]" = queue.Queue()
+        self._git_cmd_q: "queue.Queue[str]" = queue.Queue()
 
-        # Text buffer and cursor state
-        self.text: List[str] = [""]    # Document content, list of strings (lines)
-        self.cursor_x: int = 0         # Horizontal cursor position (character index within the line)
-        self.cursor_y: int = 0         # Vertical cursor position (line index)
-        self.scroll_top: int = 0       # Topmost visible line index in the editor window
-        self.scroll_left: int = 0      # Leftmost visible character column (display width offset)
-        self.modified: bool = False    # True if the buffer has unsaved changes
-        self.encoding: str = "UTF-8"   # Default file encoding
-        self.filename: Optional[str] = None # Current filename, None if new/untitled
+        # ───────────────────── Buffer & caret position ───────────────────────
+        self.text = [""]
+        self.cursor_x = 0
+        self.cursor_y = 0
+        self.scroll_top = 0
+        self.scroll_left = 0
+        self.modified = False
+        self.encoding = "UTF-8"
+        self.filename: Optional[str] = None
 
-        # Selection state
-        self.selection_start: Optional[Tuple[int, int]] = None # (row, col) of selection start
-        self.selection_end: Optional[Tuple[int, int]] = None   # (row, col) of selection end (moving part)
-        self.is_selecting: bool = False                        # True if selection is active
+        # Selection
+        self.selection_start: Optional[tuple[int, int]] = None
+        self.selection_end: Optional[tuple[int, int]] = None
+        self.is_selecting = False
 
-        # Search state
-        self.search_term: str = ""
-        self.search_matches: List[Tuple[int, int, int]] = [] # List of (row, start_col, end_col)
-        self.current_match_idx: int = -1
-        self.highlighted_matches: List[Tuple[int, int, int]] = [] # Matches currently highlighted on screen
+        # Search
+        self.search_term = ""
+        self.search_matches: list[tuple[int, int, int]] = []
+        self.current_match_idx = -1
+        self.highlighted_matches: list[tuple[int, int, int]] = []
 
-        # Git integration state
-        self.git_info: Tuple[str, str, str] = ("", "", "0") # (branch, user_name, commit_count_str)
-        self._last_git_filename: Optional[str] = None # Filename for which Git info was last fetched
+        # Git
+        self.git_info = ("", "", "0")  # branch, user, commits
+        self._last_git_filename: Optional[str] = None
 
-        # Syntax highlighting (Pygments)
-        self._lexer: Optional[TextLexer] = None # Current Pygments lexer instance
-        # self._token_cache is managed by @functools.lru_cache on _get_tokenized_line method
-        # If you were using a manual dict cache for Pygments:
-        # from collections import OrderedDict
-        # self._token_cache: OrderedDict[Tuple[int, int, int, bool], List[Tuple[str, int]]] = OrderedDict()
-        # However, with lru_cache on _get_tokenized_line, this instance variable for Pygments tokens is not strictly needed.
+        # Syntax highlighting
+        self._lexer: Optional[TextLexer] = None
 
-        # Screen drawing related
-        self.visible_lines: int = 0 # Number of lines visible in the text area
-        self.last_window_size: Tuple[int, int] = (0, 0) # (height, width)
-        self.drawer = DrawScreen(self) # Drawing helper class instance
+        # ───────────────────── Drawing helper & screen info ──────────────────
+        self.visible_lines = 0
+        self.last_window_size: tuple[int, int] = (0, 0)
+        self._force_full_redraw = False
+        self.drawer = DrawScreen(self)
 
-        # Load keybindings and setup action map
+        # ───────────────────── Key-bindings & action map ─────────────────────
         try:
             self.keybindings = self._load_keybindings()
-            logging.debug("Keybindings loaded successfully in __init__.")
-        except Exception as e_kb_init:
-            logging.critical(f"CRITICAL ERROR during keybinding setup in __init__: {e_kb_init}", exc_info=True)
-            # Depending on severity, might want to raise to stop editor or try to continue with defaults
-            raise # Re-raise to indicate critical failure
-
+        except Exception as exc:
+            logging.critical("Key-binding setup failed: %s", exc, exc_info=True)
+            raise
         self.action_map = self._setup_action_map()
-        logging.debug("Action map set up successfully in __init__.")
 
-        # Set initial cursor and scroll positions
+        # ───────────────────── Initial caret & scroll ────────────────────────
         self.set_initial_cursor_position()
 
-        # Fetch initial Git info if enabled
-        if self.config.get("git", {}).get("enabled", True) and self.config.get("settings", {}).get("show_git_info", True):
-            logging.debug("Git integration enabled, fetching initial synchronous Git info.")
+        # ───────────────────── Git – initial synchronous fetch ───────────────
+        if (
+            self.config["git"].get("enabled", True)
+            and self.config["settings"].get("show_git_info", True)
+        ):
             try:
-                # Use current working directory if no filename yet for initial Git context
-                # get_git_info handles None filename by using os.getcwd()
-                self.git_info = get_git_info(self.filename) 
-                logging.debug(f"Initial synchronous Git info fetched: {self.git_info}")
-            except Exception as e_git_init:
-                self.git_info = ("", "", "0") # Default on error
-                logging.error(f"Failed to get initial synchronous Git info during init: {e_git_init}", exc_info=True)
-        else:
-            self.git_info = ("", "", "0") # Default if Git is disabled or info display is off
-            logging.debug("Git integration or info display is disabled. Git info set to default.")
+                self.git_info = get_git_info(self.filename)
+            except Exception as exc:
+                logging.error("Initial Git info failed: %s", exc, exc_info=True)
 
-        # Set locale for character handling (e.g., wcwidth)
+        # ───────────────────── Locale ────────────────────────────────────────
         try:
-            locale.setlocale(locale.LC_ALL, "") # Use system's default locale settings
-            logging.debug(f"Locale set to: {locale.getlocale()}")
-        except locale.Error as e_locale:
-            logging.error(f"Failed to set system locale: {e_locale}. Character width calculations might be affected.", exc_info=True)
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error as exc:
+            logging.error("Could not set system locale: %s", exc, exc_info=True)
 
-        logging.info("SwayEditor initialized successfully.")
-
+        logging.info("SwayEditor initialised successfully.")
 
     # ───────────────────── Keybinding Initialization ─────────────────────
     def _load_keybindings(self) -> Dict[str, int]:
@@ -1891,11 +1927,15 @@ class SwayEditor:
             # It updates attributes and puts a message in a queue, which is thread-safe.
             # The main loop processes the queue and updates curses UI elements.
             self._set_status_message(
-                message_for_statusbar=final_statusbar_msg, 
-                is_lint_status=True, 
+                message_for_statusbar=final_statusbar_msg,
+                is_lint_status=True,
                 full_lint_output=final_panel_output,
                 activate_lint_panel_if_issues=activate_panel_on_completion
             )
+
+            # удерживаем всплывашку, чтобы она не «мигала»
+            if activate_panel_on_completion:          # есть что показывать
+                self.drawer._keep_lint_panel_alive()  # ≈400 мс по умолчанию
             # The show_lint_panel method isn't called directly here;
             # _set_status_message handles the self.lint_panel_active flag.
 
@@ -7146,180 +7186,205 @@ class SwayEditor:
 
     # ------------------ Prompting for Input ------------------
     def prompt(self, message: str, max_len: int = 1024, timeout_seconds: int = 60) -> Optional[str]:
-        """
-        Displays a single-line input prompt in the status bar with a timeout.
+        """Displays a single-line input prompt in the status bar with a timeout.
 
-        Features:
-        - Enter: Confirms and returns the stripped input string.
-        - Esc: Cancels and returns None.
-        - Tab: Inserts a tab equivalent (using editor's tab_size setting).
-        - Backspace, Delete, Left/Right Arrows, Home, End: Standard text editing.
-        - Resize: Redraws the prompt according to the new screen size.
-        - Timeout: Returns None if no input is confirmed within the timeout.
+        This method takes over the bottom line of the screen to display a prompt
+        message and an input field for the user. It handles basic text editing
+        within the input field, including Backspace, Delete, arrow keys, Home,
+        End, and Tab. The prompt is confirmed with Enter or cancelled with Esc.
+        A timeout mechanism is also in place. Window resize events during the
+        prompt are handled by redrawing the prompt.
+
+        The method uses `noutrefresh()` for screen updates and a final `doupdate()`
+        to minimize flicker, especially if called frequently or if other parts of
+        the UI might update.
 
         Args:
-            message (str): The message to display before the input field.
-            max_len (int): Maximum allowed length of the input buffer (character count).
-            timeout_seconds (int): Timeout for waiting for input, in seconds.
+            message: The message to display before the input field.
+            max_len: Maximum allowed length of the input buffer (character count).
+            timeout_seconds: Timeout for waiting for input, in seconds.
+                            If 0 or negative, no timeout (waits indefinitely).
 
         Returns:
-            Optional[str]: The user's input string (stripped) if confirmed, 
-                           or None if cancelled or timed out.
+            The user's input string (stripped of leading/trailing whitespace)
+            if confirmed with Enter, or None if cancelled (Esc) or timed out.
         """
         logging.debug(
             f"Prompt called. Message: '{message}', Max length: {max_len}, Timeout: {timeout_seconds}s"
         )
         
-        # Ensure cursor is visible for the prompt
+        # Ensure cursor is visible for the prompt input field.
+        # Store original visibility to restore it later.
         original_cursor_visibility = curses.curs_set(1) 
         
-        # Set stdscr to blocking mode with a timeout for this prompt
-        self.stdscr.nodelay(False) 
-        self.stdscr.timeout(timeout_seconds * 1000) # timeout is in milliseconds
+        # Set stdscr to blocking mode with a timeout for this prompt.
+        # nodelay(False) means get_wch() will block.
+        self.stdscr.nodelay(False)
+        if timeout_seconds > 0:
+            self.stdscr.timeout(timeout_seconds * 1000) # timeout is in milliseconds
+        else:
+            self.stdscr.timeout(-1) # No timeout, block indefinitely
 
         input_buffer: List[str] = [] # Stores characters of the input
-        cursor_char_pos: int = 0     # Cursor position as an index within the input_buffer
+        cursor_char_pos: int = 0     # Cursor position as an index within input_buffer
         
-        # Tab width for Tab key insertion (could be made configurable or use editor setting)
+        # Tab width for Tab key insertion, using editor's configuration.
         prompt_tab_width: int = self.config.get("editor", {}).get("tab_size", 4)
         
         input_result: Optional[str] = None # Stores the final result (string or None)
 
         try:
-            while True:
+            while True: # Main loop for handling input within the prompt
                 term_height, term_width = self.stdscr.getmaxyx()
-                if term_height <= 0: # Guard against invalid terminal dimensions
+
+                # Guard against invalid terminal dimensions (e.g., during rapid resize).
+                if term_height <= 0:
                     logging.error("Prompt: Terminal height is zero or negative. Aborting prompt.")
-                    # Try to restore terminal state before returning
-                    self.stdscr.nodelay(True)
-                    self.stdscr.timeout(-1)
-                    curses.curs_set(original_cursor_visibility)
-                    curses.flushinp()
+                    # Attempt to restore terminal state before returning.
+                    # This part of finally block will handle full restoration.
                     return None
 
-                prompt_row = term_height - 1 # Prompt always on the last line
+                prompt_row = term_height - 1 # Prompt is always on the last line.
 
-                # --- Prepare prompt message display ---
-                # Truncate display message if too long for the available width.
-                # Leave some space for the input field itself (e.g., at least 10 cells + cursor)
-                max_allowed_msg_display_width = max(0, term_width - 10 - 1) 
+                # --- Prepare prompt message for display ---
+                # Truncate the display message if it's too long for the available width,
+                # leaving space for the input field.
+                # Arbitrary minimum space for input field + cursor.
+                min_space_for_input_and_cursor = 15
+                max_allowed_msg_display_width = max(0, term_width - min_space_for_input_and_cursor)
                 display_message_str = message
                 
-                # Use self.get_string_width for accurate width calculation
                 if self.get_string_width(message) > max_allowed_msg_display_width:
-                    # Use self.truncate_string if available for proper Unicode truncation
+                    # Use self.truncate_string if available for proper Unicode truncation.
+                    # Otherwise, use basic slicing as a fallback.
                     if hasattr(self, 'truncate_string'):
-                         display_message_str = self.truncate_string(message, max_allowed_msg_display_width - 3) + "..."
-                    else: # Basic slicing as a fallback if truncate_string is not defined
-                         display_message_str = message[:max_allowed_msg_display_width - 3] + "..."
+                        display_message_str = self.truncate_string(message, max_allowed_msg_display_width - 3) + "..." # -3 for "..."
+                    else:
+                        display_message_str = message[:max_allowed_msg_display_width - 3] + "..."
                 
                 display_message_screen_len = self.get_string_width(display_message_str)
 
                 # --- Clear and redraw the prompt line ---
                 try:
+                    # Move to the prompt line and clear it.
                     self.stdscr.move(prompt_row, 0)
                     self.stdscr.clrtoeol()
-                    # Draw the prompt message (e.g., "Enter command: ")
-                    self.stdscr.addstr(prompt_row, 0, display_message_str, self.colors.get("status", curses.A_NORMAL))
+                    # Draw the prompt message.
+                    # Use a status color, or a default if not found.
+                    prompt_message_color = self.colors.get("status", curses.A_NORMAL)
+                    self.stdscr.addstr(prompt_row, 0, display_message_str, prompt_message_color)
                 except curses.error as e_draw_msg:
                     logging.error(f"Prompt: Curses error during prompt message draw: {e_draw_msg}")
-                    return None # Cannot proceed if we can't draw the prompt message
+                    return None # Cannot proceed if we can't draw the prompt message.
 
                 current_input_text = "".join(input_buffer)
-                # Available screen width (in display cells) for the input text itself
-                available_width_for_input_text = max(0, term_width - (display_message_screen_len + 1)) # +1 for potential cursor space
+                # Calculate available screen width (in display cells) for the input text itself.
+                input_field_start_x_on_screen = display_message_screen_len
+                available_width_for_input_text = max(0, term_width - (input_field_start_x_on_screen + 1)) # +1 for cursor space at end
 
-                # --- Horizontal scrolling logic for the input text ---
-                # Screen x-position where the text input field starts
-                input_field_start_x = display_message_screen_len
+                # --- Horizontal scrolling logic for the input text within the prompt ---
+                width_before_cursor_in_buffer = self.get_string_width(current_input_text[:cursor_char_pos])
+                full_input_text_width_in_buffer = self.get_string_width(current_input_text)
                 
-                # Display width of text before the cursor
-                width_before_cursor = self.get_string_width(current_input_text[:cursor_char_pos])
-                # Display width of the full current input text
-                full_input_text_width = self.get_string_width(current_input_text)
+                # text_scroll_offset: how many display cells of the input_buffer are scrolled off to the left.
+                text_scroll_offset = 0
+                if full_input_text_width_in_buffer > available_width_for_input_text:
+                    # If cursor is too far right to be visible, scroll text left.
+                    # (-1) so the cursor itself is visible at the last position.
+                    if width_before_cursor_in_buffer > text_scroll_offset + available_width_for_input_text - 1:
+                        text_scroll_offset = width_before_cursor_in_buffer - (available_width_for_input_text - 1)
+                    # If cursor is too far left (scrolled past it), adjust scroll.
+                    elif width_before_cursor_in_buffer < text_scroll_offset:
+                        text_scroll_offset = width_before_cursor_in_buffer
                 
-                text_scroll_offset = 0 # How many display cells of the input text are scrolled off left
-                if full_input_text_width > available_width_for_input_text:
-                    # If cursor is too far right to be visible, scroll text left enough to show cursor
-                    if width_before_cursor > text_scroll_offset + available_width_for_input_text -1 : # -1 for cursor itself
-                        text_scroll_offset = width_before_cursor - (available_width_for_input_text - 1)
-                    # If cursor is too far left (scrolled past it), adjust scroll to bring it into view
-                    elif width_before_cursor < text_scroll_offset:
-                         text_scroll_offset = width_before_cursor
-                
-                # Determine the actual characters to display from input_buffer based on text_scroll_offset
-                display_start_char_index = 0
+                # Determine the actual characters from input_buffer to display,
+                # based on the calculated text_scroll_offset.
+                display_start_char_idx_in_buffer = 0
                 accumulated_scrolled_width = 0
                 if text_scroll_offset > 0:
                     for i_scroll, char_scroll in enumerate(input_buffer):
                         char_w = self.get_char_width(char_scroll)
                         if accumulated_scrolled_width + char_w > text_scroll_offset:
-                            display_start_char_index = i_scroll
-                            # How much of the current char is visible if it's partially scrolled
-                            # This can be complex, for now, we start drawing from this char
+                            # This char is partially or fully visible after the scroll.
+                            display_start_char_idx_in_buffer = i_scroll
                             break
                         accumulated_scrolled_width += char_w
-                    else: # Scrolled past all content
-                        display_start_char_index = len(input_buffer)
-                
+                        # If we iterate through all chars and still haven't met text_scroll_offset,
+                        # it means scroll_offset is too large or text is empty.
+                        # Setting display_start_char_idx_in_buffer to i_scroll+1 ensures it becomes len(input_buffer).
+                        if i_scroll == len(input_buffer) -1: # Reached end of buffer
+                            display_start_char_idx_in_buffer = len(input_buffer)
+
+                # Construct the segment of the input text that will be visible on screen.
                 visible_text_segment_to_draw = ""
-                current_visible_segment_width = 0
-                for char_val in input_buffer[display_start_char_index:]:
+                current_visible_segment_width_on_screen = 0
+                for char_val in input_buffer[display_start_char_idx_in_buffer:]:
                     char_w = self.get_char_width(char_val)
-                    if current_visible_segment_width + char_w > available_width_for_input_text:
-                        break
+                    if current_visible_segment_width_on_screen + char_w > available_width_for_input_text:
+                        break # Segment would exceed available width.
                     visible_text_segment_to_draw += char_val
-                    current_visible_segment_width += char_w
+                    current_visible_segment_width_on_screen += char_w
                 
-                # Cursor's screen X position relative to the start of the displayed segment
-                cursor_screen_offset_within_visible_segment = self.get_string_width("".join(input_buffer[display_start_char_index:cursor_char_pos]))
+                # Calculate cursor's screen X position relative to the start of the displayed segment.
+                # This is the width of the part of the visible segment that is *before* the cursor.
+                cursor_screen_offset_within_visible_segment = self.get_string_width(
+                    "".join(input_buffer[display_start_char_idx_in_buffer:cursor_char_pos])
+                )
                 
                 # --- Draw the visible input text and position the actual curses cursor ---
                 try:
                     if visible_text_segment_to_draw: 
-                        self.stdscr.addstr(prompt_row, input_field_start_x, visible_text_segment_to_draw)
+                        self.stdscr.addstr(prompt_row, input_field_start_x_on_screen, visible_text_segment_to_draw)
                     
-                    # Final screen cursor X position
-                    screen_cursor_x = input_field_start_x + cursor_screen_offset_within_visible_segment
-                    # Clamp cursor to be within the drawable area of the input field and terminal width
-                    screen_cursor_x = max(input_field_start_x, min(screen_cursor_x, input_field_start_x + max(0, available_width_for_input_text -1) ))
-                    if term_width > 0: 
-                         screen_cursor_x = min(screen_cursor_x, term_width -1) # Ensure not off screen right
+                    # Final screen X position for the curses cursor.
+                    screen_cursor_x = input_field_start_x_on_screen + cursor_screen_offset_within_visible_segment
+                    # Clamp cursor to be within the drawable area of the input field and terminal width.
+                    # Ensure cursor is not drawn left of where the input field starts.
+                    screen_cursor_x = max(input_field_start_x_on_screen, screen_cursor_x)
+                    # Ensure cursor is not drawn beyond the right edge of the terminal.
+                    if term_width > 0: # term_width can be 0 if terminal is not properly initialized.
+                        screen_cursor_x = min(screen_cursor_x, term_width -1)
 
                     self.stdscr.move(prompt_row, screen_cursor_x)
                 except curses.error as e_draw_input:
                     logging.error(f"Prompt: Curses error during input text/cursor draw: {e_draw_input}")
                     return None 
-                    
-                self.stdscr.refresh() # Refresh screen to show prompt and input
+                
+                # Use noutrefresh and doupdate instead of a single refresh.
+                self.stdscr.noutrefresh()
+                curses.doupdate() # Apply changes to the physical screen.
 
                 # --- Get key press ---
-                key_event: Any = curses.ERR # Initialize for timeout case
+                key_event: Any = curses.ERR # Initialize for timeout or error case.
                 try:
                     key_event = self.stdscr.get_wch() 
                     logging.debug(f"Prompt: get_wch() returned: {repr(key_event)} (type: {type(key_event)})")
                 except curses.error as e_getch:
-                    if 'no input' in str(e_getch).lower(): # Timeout
+                    # Check if it's a timeout error (get_wch() raises error if no input within timeout).
+                    if 'no input' in str(e_getch).lower() or e_getch.args[0] == 'no input': # More robust check
                         logging.warning(f"Prompt: Input timed out after {timeout_seconds}s for: '{message}'")
                         input_result = None 
-                        break # Exit the while loop on timeout
-                    else: # Other curses error during get_wch
+                        break # Exit the while loop on timeout.
+                    else: # Other curses error during get_wch.
                         logging.error(f"Prompt: Curses error on get_wch(): {e_getch}", exc_info=True)
                         input_result = None 
-                        break # Exit the while loop on error
+                        break # Exit the while loop on error.
                 
                 # --- Process key press ---
-                if isinstance(key_event, int): # Special key or non-ASCII char as int
-                    if key_event == 27: # Esc key code
+                if isinstance(key_event, int): # Special key (e.g., arrows, F-keys) or non-ASCII char as int.
+                    if key_event == 27: # Esc key code.
                         logging.debug("Prompt: Esc (int) detected. Cancelling.")
                         input_result = None; break
-                    elif key_event in (curses.KEY_ENTER, 10, 13): # Enter/Return keys
+                    elif key_event in (curses.KEY_ENTER, 10, 13): # Enter/Return keys.
                         logging.debug(f"Prompt: Enter (int {key_event}) detected. Confirming.")
                         input_result = "".join(input_buffer).strip(); break
-                    elif key_event in (curses.KEY_BACKSPACE, 127, 8): 
-                        if cursor_char_pos > 0: cursor_char_pos -= 1; input_buffer.pop(cursor_char_pos)
-                    elif key_event == curses.KEY_DC: 
-                        if cursor_char_pos < len(input_buffer): input_buffer.pop(cursor_char_pos)
+                    elif key_event in (curses.KEY_BACKSPACE, 127, 8): # Backspace key (code can vary).
+                        if cursor_char_pos > 0:
+                            cursor_char_pos -= 1
+                            input_buffer.pop(cursor_char_pos)
+                    elif key_event == curses.KEY_DC: # Delete character under cursor.
+                        if cursor_char_pos < len(input_buffer):
+                            input_buffer.pop(cursor_char_pos)
                     elif key_event == curses.KEY_LEFT:
                         cursor_char_pos = max(0, cursor_char_pos - 1)
                     elif key_event == curses.KEY_RIGHT:
@@ -7332,73 +7397,334 @@ class SwayEditor:
                         logging.debug("Prompt: KEY_RESIZE detected. Redrawing prompt at start of loop.")
                         # Screen will be redrawn with new dimensions at the start of the next loop iteration.
                         continue 
-                    elif key_event == curses.ascii.TAB: 
+                    elif key_event == curses.ascii.TAB: # Tab key.
                         tab_spaces_str = " " * prompt_tab_width
                         for char_in_tab_str in tab_spaces_str:
                             if len(input_buffer) < max_len: 
                                 input_buffer.insert(cursor_char_pos, char_in_tab_str)
                                 cursor_char_pos += 1
-                    elif 32 <= key_event < 1114112 : # Other integer that might be a printable Unicode char
+                    elif 32 <= key_event < 1114112 : # Other integer that might be a printable Unicode char.
                         try:
                             char_to_insert_val = chr(key_event)
-                            # Check if it's displayable and not a control char missed by earlier checks
+                            # Check if it's displayable and not a control char missed by earlier checks.
+                            # wcswidth < 0 usually means non-printable or control.
                             if len(input_buffer) < max_len and wcswidth(char_to_insert_val) >= 0 : 
                                 input_buffer.insert(cursor_char_pos, char_to_insert_val)
                                 cursor_char_pos += 1
                         except ValueError: 
-                             logging.warning(f"Prompt: Could not convert integer key code {key_event} to char.")
-                    else: # Unhandled integer key
+                            logging.warning(f"Prompt: Could not convert integer key code {key_event} to char.")
+                    else: # Unhandled integer key.
                         logging.debug(f"Prompt: Ignored unhandled integer key: {key_event}")
 
-                elif isinstance(key_event, str): # String input (usually a single character or Esc sequence part)
-                    if key_event == '\x1b': # Esc key sometimes comes as a string
+                elif isinstance(key_event, str): # String input (usually a single character or Esc sequence part).
+                    # Handle multi-character strings if get_wch() might return them (e.g. paste, complex escape seq).
+                    # For now, assuming single character or known sequences.
+                    if key_event == '\x1b': # Esc key sometimes comes as a string (e.g., part of an escape sequence).
                         logging.debug("Prompt: Esc (str) detected. Cancelling.")
                         input_result = None; break
-                    elif key_event in ("\n", "\r"): # Enter/Return as string
+                    elif key_event in ("\n", "\r"): # Enter/Return as string.
                         logging.debug(f"Prompt: Enter (str '{repr(key_event)}') detected. Confirming.")
                         input_result = "".join(input_buffer).strip(); break
-                    elif key_event == '\t': # Tab as string
+                    elif key_event == '\t': # Tab as string.
                         tab_spaces_str = " " * prompt_tab_width
                         for char_in_tab_str in tab_spaces_str:
                             if len(input_buffer) < max_len: 
                                 input_buffer.insert(cursor_char_pos, char_in_tab_str)
                                 cursor_char_pos += 1
-                    elif len(key_event) == 1 and key_event.isprintable(): # Check if it's a standard printable char
-                        if wcswidth(key_event) > 0: # Final check for displayable width
+                    # Process other characters if they are single and printable.
+                    elif len(key_event) == 1: # If it's a single character string
+                        # isprintable() is a good first check, but wcswidth is more robust for display width.
+                        if key_event.isprintable() and wcswidth(key_event) >= 0: 
                             if len(input_buffer) < max_len: 
                                 input_buffer.insert(cursor_char_pos, key_event)
                                 cursor_char_pos += 1
                         else:
-                             logging.debug(f"Prompt: Ignored non-displayable/zero-width string char after isprintable(): {repr(key_event)}")
-                    # Could also handle multi-character paste here if get_wch() ever returns that
-                    # (though it's not standard for get_wch() to return multiple user-typed chars at once).
-                    else: 
-                        logging.debug(f"Prompt: Ignored unhandled string input: {repr(key_event)}")
-                # else key_event == curses.ERR (no input), which is handled by the try-except for get_wch()
+                            logging.debug(f"Prompt: Ignored non-displayable/control string char: {repr(key_event)}")
+                    else: # Multi-character string not handled above (e.g., unparsed escape sequence).
+                        logging.debug(f"Prompt: Ignored unhandled multi-character string input: {repr(key_event)}")
+                # else key_event == curses.ERR (no input), which is handled by the try-except for get_wch().
 
         finally:
-            # Restore terminal settings that were changed for the prompt duration
-            self.stdscr.nodelay(True)  # Restore non-blocking input for the main editor loop
-            self.stdscr.timeout(-1)    # Disable timeout for stdscr
-            # curses.noecho() should still be in effect from editor's global settings.
-            curses.curs_set(original_cursor_visibility) # Restore original cursor visibility
+            # Restore terminal settings that were changed for the prompt duration.
+            self.stdscr.nodelay(True)  # Restore non-blocking input for the main editor loop.
+            self.stdscr.timeout(-1)    # Disable timeout for stdscr.
+            curses.curs_set(original_cursor_visibility) # Restore original cursor visibility.
             
-            # Clear the prompt line from the status bar before returning control
-            term_height_final, _ = self.stdscr.getmaxyx() # Get height again in case of resize
+            # Clear the prompt line from the status bar before returning control.
+            # This is important so the main editor's status bar can be redrawn cleanly.
+            term_height_final, _ = self.stdscr.getmaxyx()
             try:
-                if term_height_final > 0: # Ensure height is valid
+                if term_height_final > 0: # Ensure height is valid.
                     self.stdscr.move(term_height_final - 1, 0)
                     self.stdscr.clrtoeol()
-                # A full redraw by the main loop (via self.drawer.draw()) will typically follow,
-                # which will redraw the normal status bar. Calling self.stdscr.refresh() here
-                # might cause a flicker if the main loop also refreshes immediately.
-                # For now, let the main loop's draw cycle handle full status bar restoration.
+                    self.stdscr.noutrefresh() # Prepare this clear operation.
+                    curses.doupdate()         # Apply it.
+                    # The main editor loop will then perform a full redraw which
+                    # will restore its own status bar content.
             except curses.error as e_final_clear_prompt:
-                 logging.warning(f"Prompt: Curses error during final status line clear: {e_final_clear_prompt}")
+                logging.warning(f"Prompt: Curses error during final status line clear: {e_final_clear_prompt}")
 
-            curses.flushinp() # Clear any unprocessed typeahead characters from terminal input buffer
+            curses.flushinp() # Clear any unprocessed typeahead characters from terminal input buffer.
         
         return input_result
+
+
+
+
+    # def prompt(self, message: str, max_len: int = 1024, timeout_seconds: int = 60) -> Optional[str]:
+    #     """
+    #     Displays a single-line input prompt in the status bar with a timeout.
+
+    #     Features:
+    #     - Enter: Confirms and returns the stripped input string.
+    #     - Esc: Cancels and returns None.
+    #     - Tab: Inserts a tab equivalent (using editor's tab_size setting).
+    #     - Backspace, Delete, Left/Right Arrows, Home, End: Standard text editing.
+    #     - Resize: Redraws the prompt according to the new screen size.
+    #     - Timeout: Returns None if no input is confirmed within the timeout.
+
+    #     Args:
+    #         message (str): The message to display before the input field.
+    #         max_len (int): Maximum allowed length of the input buffer (character count).
+    #         timeout_seconds (int): Timeout for waiting for input, in seconds.
+
+    #     Returns:
+    #         Optional[str]: The user's input string (stripped) if confirmed, 
+    #                        or None if cancelled or timed out.
+    #     """
+    #     logging.debug(
+    #         f"Prompt called. Message: '{message}', Max length: {max_len}, Timeout: {timeout_seconds}s"
+    #     )
+        
+    #     # Ensure cursor is visible for the prompt
+    #     original_cursor_visibility = curses.curs_set(1) 
+        
+    #     # Set stdscr to blocking mode with a timeout for this prompt
+    #     self.stdscr.nodelay(False) 
+    #     self.stdscr.timeout(timeout_seconds * 1000) # timeout is in milliseconds
+
+    #     input_buffer: List[str] = [] # Stores characters of the input
+    #     cursor_char_pos: int = 0     # Cursor position as an index within the input_buffer
+        
+    #     # Tab width for Tab key insertion (could be made configurable or use editor setting)
+    #     prompt_tab_width: int = self.config.get("editor", {}).get("tab_size", 4)
+        
+    #     input_result: Optional[str] = None # Stores the final result (string or None)
+
+    #     try:
+    #         while True:
+    #             term_height, term_width = self.stdscr.getmaxyx()
+    #             if term_height <= 0: # Guard against invalid terminal dimensions
+    #                 logging.error("Prompt: Terminal height is zero or negative. Aborting prompt.")
+    #                 # Try to restore terminal state before returning
+    #                 self.stdscr.nodelay(True)
+    #                 self.stdscr.timeout(-1)
+    #                 curses.curs_set(original_cursor_visibility)
+    #                 curses.flushinp()
+    #                 return None
+
+    #             prompt_row = term_height - 1 # Prompt always on the last line
+
+    #             # --- Prepare prompt message display ---
+    #             # Truncate display message if too long for the available width.
+    #             # Leave some space for the input field itself (e.g., at least 10 cells + cursor)
+    #             max_allowed_msg_display_width = max(0, term_width - 10 - 1) 
+    #             display_message_str = message
+                
+    #             # Use self.get_string_width for accurate width calculation
+    #             if self.get_string_width(message) > max_allowed_msg_display_width:
+    #                 # Use self.truncate_string if available for proper Unicode truncation
+    #                 if hasattr(self, 'truncate_string'):
+    #                      display_message_str = self.truncate_string(message, max_allowed_msg_display_width - 3) + "..."
+    #                 else: # Basic slicing as a fallback if truncate_string is not defined
+    #                      display_message_str = message[:max_allowed_msg_display_width - 3] + "..."
+                
+    #             display_message_screen_len = self.get_string_width(display_message_str)
+
+    #             # --- Clear and redraw the prompt line ---
+    #             try:
+    #                 self.stdscr.move(prompt_row, 0)
+    #                 self.stdscr.clrtoeol()
+    #                 # Draw the prompt message (e.g., "Enter command: ")
+    #                 self.stdscr.addstr(prompt_row, 0, display_message_str, self.colors.get("status", curses.A_NORMAL))
+    #             except curses.error as e_draw_msg:
+    #                 logging.error(f"Prompt: Curses error during prompt message draw: {e_draw_msg}")
+    #                 return None # Cannot proceed if we can't draw the prompt message
+
+    #             current_input_text = "".join(input_buffer)
+    #             # Available screen width (in display cells) for the input text itself
+    #             available_width_for_input_text = max(0, term_width - (display_message_screen_len + 1)) # +1 for potential cursor space
+
+    #             # --- Horizontal scrolling logic for the input text ---
+    #             # Screen x-position where the text input field starts
+    #             input_field_start_x = display_message_screen_len
+                
+    #             # Display width of text before the cursor
+    #             width_before_cursor = self.get_string_width(current_input_text[:cursor_char_pos])
+    #             # Display width of the full current input text
+    #             full_input_text_width = self.get_string_width(current_input_text)
+                
+    #             text_scroll_offset = 0 # How many display cells of the input text are scrolled off left
+    #             if full_input_text_width > available_width_for_input_text:
+    #                 # If cursor is too far right to be visible, scroll text left enough to show cursor
+    #                 if width_before_cursor > text_scroll_offset + available_width_for_input_text -1 : # -1 for cursor itself
+    #                     text_scroll_offset = width_before_cursor - (available_width_for_input_text - 1)
+    #                 # If cursor is too far left (scrolled past it), adjust scroll to bring it into view
+    #                 elif width_before_cursor < text_scroll_offset:
+    #                      text_scroll_offset = width_before_cursor
+                
+    #             # Determine the actual characters to display from input_buffer based on text_scroll_offset
+    #             display_start_char_index = 0
+    #             accumulated_scrolled_width = 0
+    #             if text_scroll_offset > 0:
+    #                 for i_scroll, char_scroll in enumerate(input_buffer):
+    #                     char_w = self.get_char_width(char_scroll)
+    #                     if accumulated_scrolled_width + char_w > text_scroll_offset:
+    #                         display_start_char_index = i_scroll
+    #                         # How much of the current char is visible if it's partially scrolled
+    #                         # This can be complex, for now, we start drawing from this char
+    #                         break
+    #                     accumulated_scrolled_width += char_w
+    #                 else: # Scrolled past all content
+    #                     display_start_char_index = len(input_buffer)
+                
+    #             visible_text_segment_to_draw = ""
+    #             current_visible_segment_width = 0
+    #             for char_val in input_buffer[display_start_char_index:]:
+    #                 char_w = self.get_char_width(char_val)
+    #                 if current_visible_segment_width + char_w > available_width_for_input_text:
+    #                     break
+    #                 visible_text_segment_to_draw += char_val
+    #                 current_visible_segment_width += char_w
+                
+    #             # Cursor's screen X position relative to the start of the displayed segment
+    #             cursor_screen_offset_within_visible_segment = self.get_string_width("".join(input_buffer[display_start_char_index:cursor_char_pos]))
+                
+    #             # --- Draw the visible input text and position the actual curses cursor ---
+    #             try:
+    #                 if visible_text_segment_to_draw: 
+    #                     self.stdscr.addstr(prompt_row, input_field_start_x, visible_text_segment_to_draw)
+                    
+    #                 # Final screen cursor X position
+    #                 screen_cursor_x = input_field_start_x + cursor_screen_offset_within_visible_segment
+    #                 # Clamp cursor to be within the drawable area of the input field and terminal width
+    #                 screen_cursor_x = max(input_field_start_x, min(screen_cursor_x, input_field_start_x + max(0, available_width_for_input_text -1) ))
+    #                 if term_width > 0: 
+    #                      screen_cursor_x = min(screen_cursor_x, term_width -1) # Ensure not off screen right
+
+    #                 self.stdscr.move(prompt_row, screen_cursor_x)
+    #             except curses.error as e_draw_input:
+    #                 logging.error(f"Prompt: Curses error during input text/cursor draw: {e_draw_input}")
+    #                 return None 
+                    
+    #             self.stdscr.refresh() # Refresh screen to show prompt and input
+
+    #             # --- Get key press ---
+    #             key_event: Any = curses.ERR # Initialize for timeout case
+    #             try:
+    #                 key_event = self.stdscr.get_wch() 
+    #                 logging.debug(f"Prompt: get_wch() returned: {repr(key_event)} (type: {type(key_event)})")
+    #             except curses.error as e_getch:
+    #                 if 'no input' in str(e_getch).lower(): # Timeout
+    #                     logging.warning(f"Prompt: Input timed out after {timeout_seconds}s for: '{message}'")
+    #                     input_result = None 
+    #                     break # Exit the while loop on timeout
+    #                 else: # Other curses error during get_wch
+    #                     logging.error(f"Prompt: Curses error on get_wch(): {e_getch}", exc_info=True)
+    #                     input_result = None 
+    #                     break # Exit the while loop on error
+                
+    #             # --- Process key press ---
+    #             if isinstance(key_event, int): # Special key or non-ASCII char as int
+    #                 if key_event == 27: # Esc key code
+    #                     logging.debug("Prompt: Esc (int) detected. Cancelling.")
+    #                     input_result = None; break
+    #                 elif key_event in (curses.KEY_ENTER, 10, 13): # Enter/Return keys
+    #                     logging.debug(f"Prompt: Enter (int {key_event}) detected. Confirming.")
+    #                     input_result = "".join(input_buffer).strip(); break
+    #                 elif key_event in (curses.KEY_BACKSPACE, 127, 8): 
+    #                     if cursor_char_pos > 0: cursor_char_pos -= 1; input_buffer.pop(cursor_char_pos)
+    #                 elif key_event == curses.KEY_DC: 
+    #                     if cursor_char_pos < len(input_buffer): input_buffer.pop(cursor_char_pos)
+    #                 elif key_event == curses.KEY_LEFT:
+    #                     cursor_char_pos = max(0, cursor_char_pos - 1)
+    #                 elif key_event == curses.KEY_RIGHT:
+    #                     cursor_char_pos = min(len(input_buffer), cursor_char_pos + 1)
+    #                 elif key_event == curses.KEY_HOME:
+    #                     cursor_char_pos = 0
+    #                 elif key_event == curses.KEY_END:
+    #                     cursor_char_pos = len(input_buffer)
+    #                 elif key_event == curses.KEY_RESIZE:
+    #                     logging.debug("Prompt: KEY_RESIZE detected. Redrawing prompt at start of loop.")
+    #                     # Screen will be redrawn with new dimensions at the start of the next loop iteration.
+    #                     continue 
+    #                 elif key_event == curses.ascii.TAB: 
+    #                     tab_spaces_str = " " * prompt_tab_width
+    #                     for char_in_tab_str in tab_spaces_str:
+    #                         if len(input_buffer) < max_len: 
+    #                             input_buffer.insert(cursor_char_pos, char_in_tab_str)
+    #                             cursor_char_pos += 1
+    #                 elif 32 <= key_event < 1114112 : # Other integer that might be a printable Unicode char
+    #                     try:
+    #                         char_to_insert_val = chr(key_event)
+    #                         # Check if it's displayable and not a control char missed by earlier checks
+    #                         if len(input_buffer) < max_len and wcswidth(char_to_insert_val) >= 0 : 
+    #                             input_buffer.insert(cursor_char_pos, char_to_insert_val)
+    #                             cursor_char_pos += 1
+    #                     except ValueError: 
+    #                          logging.warning(f"Prompt: Could not convert integer key code {key_event} to char.")
+    #                 else: # Unhandled integer key
+    #                     logging.debug(f"Prompt: Ignored unhandled integer key: {key_event}")
+
+    #             elif isinstance(key_event, str): # String input (usually a single character or Esc sequence part)
+    #                 if key_event == '\x1b': # Esc key sometimes comes as a string
+    #                     logging.debug("Prompt: Esc (str) detected. Cancelling.")
+    #                     input_result = None; break
+    #                 elif key_event in ("\n", "\r"): # Enter/Return as string
+    #                     logging.debug(f"Prompt: Enter (str '{repr(key_event)}') detected. Confirming.")
+    #                     input_result = "".join(input_buffer).strip(); break
+    #                 elif key_event == '\t': # Tab as string
+    #                     tab_spaces_str = " " * prompt_tab_width
+    #                     for char_in_tab_str in tab_spaces_str:
+    #                         if len(input_buffer) < max_len: 
+    #                             input_buffer.insert(cursor_char_pos, char_in_tab_str)
+    #                             cursor_char_pos += 1
+    #                 elif len(key_event) == 1 and key_event.isprintable(): # Check if it's a standard printable char
+    #                     if wcswidth(key_event) > 0: # Final check for displayable width
+    #                         if len(input_buffer) < max_len: 
+    #                             input_buffer.insert(cursor_char_pos, key_event)
+    #                             cursor_char_pos += 1
+    #                     else:
+    #                          logging.debug(f"Prompt: Ignored non-displayable/zero-width string char after isprintable(): {repr(key_event)}")
+    #                 # Could also handle multi-character paste here if get_wch() ever returns that
+    #                 # (though it's not standard for get_wch() to return multiple user-typed chars at once).
+    #                 else: 
+    #                     logging.debug(f"Prompt: Ignored unhandled string input: {repr(key_event)}")
+    #             # else key_event == curses.ERR (no input), which is handled by the try-except for get_wch()
+
+    #     finally:
+    #         # Restore terminal settings that were changed for the prompt duration
+    #         self.stdscr.nodelay(True)  # Restore non-blocking input for the main editor loop
+    #         self.stdscr.timeout(-1)    # Disable timeout for stdscr
+    #         # curses.noecho() should still be in effect from editor's global settings.
+    #         curses.curs_set(original_cursor_visibility) # Restore original cursor visibility
+            
+    #         # Clear the prompt line from the status bar before returning control
+    #         term_height_final, _ = self.stdscr.getmaxyx() # Get height again in case of resize
+    #         try:
+    #             if term_height_final > 0: # Ensure height is valid
+    #                 self.stdscr.move(term_height_final - 1, 0)
+    #                 self.stdscr.clrtoeol()
+    #             # A full redraw by the main loop (via self.drawer.draw()) will typically follow,
+    #             # which will redraw the normal status bar. Calling self.stdscr.refresh() here
+    #             # might cause a flicker if the main loop also refreshes immediately.
+    #             # For now, let the main loop's draw cycle handle full status bar restoration.
+    #         except curses.error as e_final_clear_prompt:
+    #              logging.warning(f"Prompt: Curses error during final status line clear: {e_final_clear_prompt}")
+
+    #         curses.flushinp() # Clear any unprocessed typeahead characters from terminal input buffer
+        
+    #     return input_result
         
 
     # ========== Search/Replace and Find ======================
@@ -9135,7 +9461,14 @@ class SwayEditor:
                 break
         if items_from_git_cmd_q > 0 and self.status_message != status_before_git_cmd_q:
              any_state_changed_by_queues = True
-             
+
+        # Если лент-панель активна и в ней уже есть текст – удерживаем её ~400 мс,
+        # чтобы не исчезла на следующем кадре (эффект «мигания»).
+        if self.lint_panel_active and self.lint_panel_message:
+            # DrawScreen есть всегда после __init__, но проверка на всякий случай:
+            if hasattr(self, "drawer"):
+                self.drawer._keep_lint_panel_alive()
+
         return any_state_changed_by_queues
 
 
@@ -9268,6 +9601,41 @@ class DrawScreen:
         if not hasattr(self.editor, 'visible_lines'):
             self.editor.visible_lines = self.stdscr.getmaxyx()[0] - 2 # Примерное значение
 
+
+    def _needs_full_redraw(self) -> bool:
+        """Return True when DrawScreen.draw() must call stdscr.erase().
+
+        A full redraw is required (a) after a window-resize or
+        (b) when the editor core explicitly sets the private flag
+        `_force_full_redraw` to True.
+        """
+        resized = self.editor.last_window_size != self.stdscr.getmaxyx()
+        force   = getattr(self.editor, "_force_full_redraw", False)
+        return resized or force
+
+    
+    # ─────────────────────  Безопасное «срезание» слева  ─────────────────────
+    def _safe_cut_left(self, s: str, cells_to_skip: int) -> str:
+        """
+        Отбрасывает слева ровно cells_to_skip экранных ячеек (а не символов!),
+        гарантируя, что мы НЕ разрезаем двуширинный символ пополам.
+
+        Возвращает оставшийся хвост строки.
+        """
+        skipped = 0
+        res = []
+        for ch in s:
+            w = self.editor.get_char_width(ch)       # 1 или 2 (wcwidth)
+            if skipped + w <= cells_to_skip:         # всё ещё в зоне «скролла»
+                skipped += w
+                continue
+            if skipped < cells_to_skip < skipped + w:  # граница попала внутрь wide-char
+                skipped += w                           # пропускаем его целиком
+                continue
+            res.append(ch)
+        return ''.join(res)
+
+
     def _should_draw_text(self) -> bool:
         """
         Проверяет, следует ли отрисовывать текстовую область.
@@ -9379,227 +9747,108 @@ class DrawScreen:
             self._draw_single_line(screen_row, line_data_tuple, window_width)
 
 
-    def _draw_single_line(self, screen_row: int, line_data: Tuple[int, List[Tuple[str, int]]], window_width: int):
+    def _draw_single_line(
+        self,
+        screen_row: int,
+        line_data: Tuple[int, List[Tuple[str, int]]],
+        window_width: int
+    ) -> None:
         """
-        Draws a single line of text with syntax highlighting.
-        :param screen_row: The screen row (y-coordinate) to draw on.
-        :param line_data: Tuple (line_index, tokens_for_this_line).
-                         line_index - index of the line in self.editor.text.
-                         tokens_for_this_line - list of tokens [(text, attr), ...].
-        :param window_width: Current width of the terminal window.
+        Draw a single logical line of source text on the given screen row,
+        applying horizontal scroll and syntax-highlight attributes.  Wide
+        Unicode characters (wcwidth == 2) are never split in half.
+
+        Args:
+            screen_row: Absolute Y position in the curses window.
+            line_data:  (buffer_index, [(lexeme, attr), ...]).
+            window_width: Current terminal width (in cells).
         """
         line_index, tokens_for_this_line = line_data
-        
+
+        # Clear the target area first.
         try:
             self.stdscr.move(screen_row, self._text_start_x)
             self.stdscr.clrtoeol()
         except curses.error as e:
-            logging.error(f"Curses error clearing line at ({screen_row}, {self._text_start_x}): {e}")
+            logging.error(
+                "Curses error while clearing line %d: %s", screen_row, e
+            )
             return
 
-        current_screen_x = self._text_start_x # Current drawing X position on the screen
-        logical_char_offset_in_line = 0 # Keeps track of the logical character offset from the start of the full line
+        logical_col_abs = 0  # running display width from line start
 
-        for token_text_content, token_color_attribute in tokens_for_this_line:
-            if not token_text_content:
+        for token_text, token_attr in tokens_for_this_line:
+            if not token_text:
                 continue
 
-            token_start_logical_col_abs = logical_char_offset_in_line
-            token_width_logical = self.editor.get_string_width(token_text_content)
-            
-            # Calculate where this token *would* start on screen if there were no horizontal scrolling or window clipping
-            token_ideal_screen_start_x = self._text_start_x + (token_start_logical_col_abs - self.editor.scroll_left)
-            
-            # Determine the visible part of the token
-            # chars_to_skip_from_token_start: how many display cells of the token are scrolled off to the left
-            chars_to_skip_from_token_start = 0
-            if token_ideal_screen_start_x < self._text_start_x:
-                chars_to_skip_from_token_start = self._text_start_x - token_ideal_screen_start_x
-            
-            # actual_draw_x_for_token: where the (potentially clipped) token will start drawing on screen
-            actual_draw_x_for_token = max(self._text_start_x, token_ideal_screen_start_x)
+            token_disp_width = self.editor.get_string_width(token_text)
+            token_start_abs = logical_col_abs
+            ideal_x = self._text_start_x + (token_start_abs - self.editor.scroll_left)
 
-            # available_width_for_token: how much screen space is left from actual_draw_x_for_token to the window edge
-            available_width_for_token = window_width - actual_draw_x_for_token
-            
-            if available_width_for_token <= 0: # Token starts beyond the right edge of the window
-                logical_char_offset_in_line += token_width_logical
-                break # No more tokens on this line will be visible
+            # How many display cells of this token are scrolled off to the left?
+            cells_cut_left = 0
+            if ideal_x < self._text_start_x:
+                cells_cut_left = self._text_start_x - ideal_x
 
-            # visible_token_width_on_screen: how much of the token's width can actually be displayed
-            # It's the token's original width, minus parts scrolled off left, limited by available screen space
-            visible_token_width_on_screen = max(0, token_width_logical - chars_to_skip_from_token_start)
-            visible_token_width_on_screen = min(visible_token_width_on_screen, available_width_for_token)
+            draw_x = max(self._text_start_x, ideal_x)
+            avail_screen_w = window_width - draw_x
+            if avail_screen_w <= 0:
+                # Nothing further on this line is visible.
+                break
 
-            if visible_token_width_on_screen > 0:
-                # We need to find the substring of token_text_content that corresponds to
-                # [chars_to_skip_from_token_start, chars_to_skip_from_token_start + visible_token_width_on_screen]
-                # This is tricky with wcwidth. For simplicity, we might still have to iterate chars if clipping.
-                
-                # Simplified: if the token fits entirely or is only clipped by window edge, try addnstr
-                # This doesn't perfectly handle clipping of a wide char in the middle.
-                
-                start_char_idx_in_token = 0
-                current_skipped_width = 0
-                if chars_to_skip_from_token_start > 0:
-                    for i, char_val in enumerate(token_text_content):
-                        char_w = self.editor.get_char_width(char_val)
-                        if current_skipped_width + char_w > chars_to_skip_from_token_start:
+            visible_w = max(0, token_disp_width - cells_cut_left)
+            visible_w = min(visible_w, avail_screen_w)
+            if visible_w <= 0:
+                logical_col_abs += token_disp_width
+                continue
+
+            # ------------------------------------------------------------------
+            # 1. Cut left part safely (do not split a wide char).
+            # ------------------------------------------------------------------
+            visible_part = self._safe_cut_left(token_text, cells_cut_left)
+            if not visible_part:
+                logical_col_abs += token_disp_width
+                continue
+
+            # ------------------------------------------------------------------
+            # 2. Cut right part to fit remaining screen width.
+            # ------------------------------------------------------------------
+            text_to_draw = ""
+            drawn_w = 0
+            for ch in visible_part:
+                char_w = self.editor.get_char_width(ch)
+                if drawn_w + char_w > visible_w:
+                    break
+                text_to_draw += ch
+                drawn_w += char_w
+
+            if text_to_draw:
+                try:
+                    self.stdscr.addstr(
+                        screen_row, draw_x, text_to_draw, token_attr
+                    )
+                except curses.error as e:
+                    # Fallback: draw char-by-char if addstr fails (rare, but safe).
+                    logging.debug(
+                        "addstr failed at (%d,%d): %s – falling back to addch",
+                        screen_row, draw_x, e
+                    )
+                    cx = draw_x
+                    for ch in text_to_draw:
+                        if cx >= window_width:
                             break
-                        current_skipped_width += char_w
-                        start_char_idx_in_token = i + 1
+                        try:
+                            self.stdscr.addch(screen_row, cx, ch, token_attr)
+                        except curses.error:
+                            break
+                        cx += self.editor.get_char_width(ch)
+
+            logical_col_abs += token_disp_width
+
+            # Early exit if we've reached the right edge.
+            if draw_x + visible_w >= window_width:
+                break
                 
-                text_to_draw = ""
-                accumulated_width_drawn = 0
-                for char_val in token_text_content[start_char_idx_in_token:]:
-                    char_w = self.editor.get_char_width(char_val)
-                    if accumulated_width_drawn + char_w > visible_token_width_on_screen:
-                        break
-                    text_to_draw += char_val
-                    accumulated_width_drawn += char_w
-
-                if text_to_draw:
-                    try:
-                        # logging.debug(f"    Drawing token part: screen_y={screen_row}, x={actual_draw_x_for_token}, text='{text_to_draw.replace(chr(9),'/t/')}', width={self.editor.get_string_width(text_to_draw)}, attr={token_color_attribute}")
-                        self.stdscr.addstr(screen_row, actual_draw_x_for_token, text_to_draw, token_color_attribute)
-                    except curses.error as e:
-                        # logging.warning(f"    Curses error drawing token part at ({screen_row}, {actual_draw_x_for_token}): {e}. Text='{text_to_draw}'")
-                        # Fallback to char-by-char for this problematic token segment if addstr fails
-                        current_char_draw_x = actual_draw_x_for_token
-                        for char_in_fallback in text_to_draw:
-                            if current_char_draw_x < window_width:
-                                try:
-                                    self.stdscr.addch(screen_row, current_char_draw_x, char_in_fallback, token_color_attribute)
-                                    current_char_draw_x += self.editor.get_char_width(char_in_fallback)
-                                except curses.error:
-                                    break # Stop drawing this line if addch fails
-                            else:
-                                break
-                        logical_char_offset_in_line += token_width_logical # Still advance full token width
-                        continue # To next token, as this one had issues
-
-            logical_char_offset_in_line += token_width_logical
-            current_screen_x = actual_draw_x_for_token + self.editor.get_string_width(text_to_draw) # Update screen x for next token
-            if current_screen_x >= window_width:
-                 break # Reached end of screen
-            
-#     def _draw_single_line(self, screen_row: int, line_data: Tuple[int, List[Tuple[str, int]]], window_width: int):
-#         """
-#         Отрисовывает одну строку текста с подсветкой синтаксиса.
-#         :param screen_row: Экранная строка (y-координата), куда рисовать.
-#         :param line_data: Кортеж (line_index, tokens_for_this_line).
-#                          line_index - индекс строки в self.editor.text.
-#                          tokens_for_this_line - список токенов [(text, attr), ...].
-#         :param window_width: Текущая ширина окна терминала.
-#         """
-#         line_index, tokens_for_this_line = line_data
-        
-#         # Очищаем строку перед отрисовкой (от self._text_start_x до конца)
-#         try:
-#             self.stdscr.move(screen_row, self._text_start_x)
-#             self.stdscr.clrtoeol()
-#         except curses.error as e:
-#             logging.error(f"Curses error clearing line at ({screen_row}, {self._text_start_x}): {e}")
-#             return # Не можем продолжить, если не можем очистить строку
-
-#         original_line_text_for_log = self.editor.text[line_index] if line_index < len(self.editor.text) else "LINE_INDEX_OUT_OF_BOUNDS"
-#         logging.debug(
-#             f"  DrawScreen _draw_single_line: Line {line_index} (screen_row {screen_row}), "
-#             f"Original content: '{original_line_text_for_log[:70].replace(chr(9), '/t/')}{'...' if len(original_line_text_for_log)>70 else ''}'"
-#         )
-#         logging.debug(
-#             f"    DrawScreen _draw_single_line: Tokens: "
-#             f"{[(token_text.replace(chr(9), '/t/'), token_attr) for token_text, token_attr in tokens_for_this_line if isinstance(token_text, str)]}"
-#         )
-
-#         logical_char_col_abs = 0  # Суммарная *логическая ширина* символов от начала строки (с учетом wcwidth)
-        
-#         for token_index, (token_text_content, token_color_attribute) in enumerate(tokens_for_this_line):
-#             logging.debug(
-#                 f"      DrawScreen _draw_single_line: Token {token_index}: text='{token_text_content.replace(chr(9),'/t/')}', attr={token_color_attribute}"
-#             )
-#             if not token_text_content:
-#                 logging.debug("        DrawScreen _draw_single_line: Skipping empty token.")
-#                 continue
-
-#             for char_index_in_token, char_to_render in enumerate(token_text_content):
-#                 char_printed_width = self.editor.get_char_width(char_to_render)
-                
-#                 logging.debug(
-#                     f"        DrawScreen _draw_single_line: Char '{char_to_render.replace(chr(9),'/t/')}' (idx_in_token {char_index_in_token}), "
-#                     f"current_logical_col_abs_BEFORE_this_char={logical_char_col_abs}, char_width={char_printed_width}"
-#                 )
-
-#                 if char_printed_width == 0: 
-#                     logging.debug("          DrawScreen _draw_single_line: Skipping zero-width char.")
-#                     continue # logical_char_col_abs не увеличивается для символов нулевой ширины
-
-#                 # Идеальная стартовая X координата символа на экране (относительно начала окна)
-#                 char_ideal_screen_start_x = self._text_start_x + (logical_char_col_abs - self.editor.scroll_left)
-#                 # Идеальная конечная X координата символа на экране
-#                 char_ideal_screen_end_x = char_ideal_screen_start_x + char_printed_width
-
-#                 # Проверяем, видим ли мы этот символ на экране
-#                 is_char_visible_on_screen = (char_ideal_screen_end_x > self._text_start_x and
-#                                              char_ideal_screen_start_x < window_width)
-
-#                 if is_char_visible_on_screen:
-#                     # Реальная X координата для отрисовки (не левее начала текстовой области)
-#                     actual_draw_x = max(self._text_start_x, char_ideal_screen_start_x)
-
-#                     if actual_draw_x < window_width: # Убедимся, что мы не пытаемся рисовать за пределами окна
-#                         try:
-#                             logging.debug(
-#                                 f"          DrawScreen _draw_single_line: DRAWING Char '{char_to_render.replace(chr(9),'/t/')}' "
-#                                 f"at screen ({screen_row}, {actual_draw_x}), "
-#                                 f"ideal_X={char_ideal_screen_start_x}, "
-#                                 f"final_attr={token_color_attribute}"
-#                             )
-#                             self.stdscr.addch(screen_row, actual_draw_x, char_to_render, token_color_attribute)
-#                         except curses.error as e:
-#                             # Если ошибка при отрисовке символа (например, за пределами экрана справа),
-#                             # прекращаем отрисовку этой строки.
-#                             logging.warning(
-#                                 f"          DrawScreen _draw_single_line: CURSES ERROR drawing char '{char_to_render.replace(chr(9),'/t/')}' (ord: {ord(char_to_render) if len(char_to_render)==1 else 'multi'}) "
-#                                 f"at ({screen_row}, {actual_draw_x}) with attr {token_color_attribute}. Error: {e}. Stopping line draw."
-#                             )
-#                             return # Прерываем отрисовку всей строки
-#                     else:
-#                         # Символ начинается за пределами правой границы окна
-#                         logging.debug(
-#                             f"          DrawScreen _draw_single_line: Char '{char_to_render.replace(chr(9),'/t/')}' not drawn, actual_draw_x={actual_draw_x} >= window_width={window_width}."
-#                         )
-#                         # Если символ уже не помещается, нет смысла продолжать для этой строки
-#                         return 
-#                 else:
-#                     # Символ полностью вне видимой области (слева или справа)
-#                     logging.debug(
-#                         f"          DrawScreen _draw_single_line: Char '{char_to_render.replace(chr(9),'/t/')}' not visible. "
-#                         f"Ideal screen X range: [{char_ideal_screen_start_x} - {char_ideal_screen_end_x}). "
-#                         f"Visible text area X range: [{self._text_start_x} - {window_width-1}]."
-#                     )
-                
-#                 logical_char_col_abs += char_printed_width # Увеличиваем логическую позицию на ширину символа
-                
-#                 # Проверка, не вышли ли мы за правую границу окна по логической ширине
-#                 # Если следующий символ начнется за пределами окна, нет смысла продолжать
-#                 next_char_ideal_screen_start_x_check = self._text_start_x + (logical_char_col_abs - self.editor.scroll_left)
-#                 if next_char_ideal_screen_start_x_check >= window_width:
-#                     logging.debug(
-#                         f"        DrawScreen _draw_single_line: Next char would start at or beyond window width "
-#                         f"({next_char_ideal_screen_start_x_check} >= {window_width}). Breaking inner char loop."
-#                     )
-#                     break # Прерываем цикл по символам в текущем токене
-            
-#             # Если внутренний цикл (по символам) был прерван (break), то прерываем и внешний (по токенам)
-#             else: # Этот 'else' относится к 'for char_index_in_token...'
-#                 continue # Продолжаем со следующим токеном
-#             logging.debug(f"      DrawScreen _draw_single_line: Broken from char loop, breaking token loop as well.")
-#             break # Прерываем цикл по токенам
-            
-#         logging.debug(f"    DrawScreen _draw_single_line: Finished processing tokens for line {line_index}. Final logical_char_col_abs = {logical_char_col_abs}")
-
-# #----
 
     def draw(self):
         """Основной метод отрисовки экрана."""
@@ -9621,10 +9870,17 @@ class DrawScreen:
                 self.editor.last_window_size = (height, width)
                 self.editor.scroll_left = 0
                 self._adjust_vertical_scroll()
-                logging.debug(f"Window resized to {width}x{height}. Visible lines: {self.editor.visible_lines}. Scroll left reset.")
+                logging.debug(
+                    f"Window resized to {width}x{height}. "
+                    f"Visible lines: {self.editor.visible_lines}. Scroll left reset."
+                )
 
-            # 4. Очищаем экран
-            self.stdscr.clear()
+            # 4. Полная или выборочная очистка экрана
+            if self._needs_full_redraw():          # ← новый блок
+                self.stdscr.erase()                # полный clear при resize/force
+                self.editor._force_full_redraw = False
+            else:
+                self._clear_invalidated_lines()    # точечная очистка «грязных» строк
 
             # 5. Рисуем основной интерфейс
             self._draw_line_numbers()
@@ -9643,6 +9899,7 @@ class DrawScreen:
 
             # 8. Обновляем экран
             self._update_display()
+            self._maybe_hide_lint_panel()
 
         except curses.error as e:
             logging.error(f"Curses error in DrawScreen.draw(): {e}", exc_info=True)
@@ -9651,6 +9908,77 @@ class DrawScreen:
         except Exception as e:
             logging.exception("Unexpected error in DrawScreen.draw()")
             self.editor._set_status_message(f"Draw error: {str(e)[:80]}...")
+
+
+    def _clear_invalidated_lines(self):
+        """
+        Очищает строки, которые в этом кадре будут перерисованы.
+        Избегаем глобального clear().
+        """
+        for row in range(self.editor.visible_lines):
+            try:
+                self.stdscr.move(row, self._text_start_x)
+                self.stdscr.clrtoeol()
+            except curses.error:
+                pass
+        # статус-бар
+        try:
+            h, _ = self.stdscr.getmaxyx()
+            self.stdscr.move(h - 1, 0)
+            self.stdscr.clrtoeol()
+        except curses.error:
+            pass
+
+
+    def _keep_lint_panel_alive(self, hold_ms: int = 400) -> None:
+        """Pin the lint-panel open for a minimum time window.
+
+        This helper is meant to be called immediately after the Flake8 worker
+        (running in a background thread) delivers its final output and
+        `self.lint_panel_message` has been populated.
+
+        The method sets a **future timestamp** in the private attribute
+        ``_next_lint_panel_hide_ts``.  While the current wall-clock time is less
+        than that timestamp, :pymeth:`_maybe_hide_lint_panel` will keep
+        ``self.editor.lint_panel_active`` set to ``True`` so that the panel is
+        drawn on every frame and does **not** “flash” for only a single frame.
+
+        Args:
+            hold_ms: Minimum time in **milliseconds** for which the lint panel
+                must remain visible.  Default is 400 ms.
+
+        Side Effects:
+            * Forces ``self.editor.lint_panel_active = True``.
+            * Updates the private timer ``self._next_lint_panel_hide_ts``.
+
+        Notes:
+            The draw-loop should call :pymeth:`_maybe_hide_lint_panel` once per
+            frame to honour the timer created here.
+        """
+        self.editor.lint_panel_active = True
+        self._next_lint_panel_hide_ts = time.time() + hold_ms / 1000.0
+
+
+    def _maybe_hide_lint_panel(self) -> None:
+        """Deactivate the lint panel once the hold timer expires.
+
+        Should be invoked once per draw frame (e.g. near the end of
+        :pymeth:`DrawScreen.draw`).  If the current time is **past** the moment
+        stored in ``self._next_lint_panel_hide_ts``, the helper clears
+        ``self.editor.lint_panel_active`` so the panel will no longer be painted.
+
+        This keeps the panel visible for at least the duration requested via
+        :pymeth:`_keep_lint_panel_alive` and automatically hides it afterwards.
+
+        Side Effects:
+            May set ``self.editor.lint_panel_active = False`` when the timer
+            elapses.  Does nothing if the panel was already inactive or if the
+            timer has not yet expired.
+        """
+        if getattr(self, "_next_lint_panel_hide_ts", 0) < time.time():
+            self.editor.lint_panel_active = False
+
+
 
 
     def _show_small_window_error(self, height, width):
@@ -9909,71 +10237,108 @@ class DrawScreen:
 
 
     def _draw_status_bar(self) -> None:
-        """Рисует статус-бар, избегая ERR от addnstr()."""
+        """Draw the bottom status-bar line.
 
+        The bar consists of three aligned segments:
+
+        * **Left segment** – file icon/name, language, position, and
+          insert/replace mode.
+        * **Middle segment** – editor status message (error, info, etc.),
+          centred in the remaining space.
+        * **Right segment** – Git branch + commit count (optional).
+
+        The method:
+
+        1. Clears the last terminal row and sets a temporary background
+           attribute (`bkgdset`) for convenient colour filling.
+        2. Calculates each segment’s display width with `wcwidth` helpers so
+           that wide Unicode characters are handled correctly.
+        3. Writes the three segments with `addnstr`, clipping where required to
+           avoid `curses.ERR`.
+        4. **Always resets** the global background attribute back to normal
+           before exiting to prevent side-effects in subsequent drawing calls.
+
+        Raises:
+            Exception: Any unexpected error is logged; a simplified message is
+            sent to the editor status bar so the user is informed.
+        """
         logging.debug("Drawing status bar")
+
         try:
             h, w = self.stdscr.getmaxyx()
-            if h <= 0 or w <= 1:
+            if h <= 0 or w <= 1:      # Window too small – nothing to draw.
                 return
 
-            y = h - 1
+            y = h - 1                # Last row
             max_col = w - 1
 
-            # ── цвета ──────────────────────────────────────────────────────────
-            c_norm = self.colors.get("status", curses.color_pair(10) | curses.A_BOLD)
-            c_err = self.colors.get("status_error", curses.color_pair(11) | curses.A_BOLD)
-            c_git = self.colors.get("git_info", curses.color_pair(12))
-            c_dirty = self.colors.get("git_dirty", curses.color_pair(13) | curses.A_BOLD)
+            # ── colour attributes ──────────────────────────────────────────
+            c_norm  = self.colors.get("status",       curses.color_pair(10) | curses.A_BOLD)
+            c_err   = self.colors.get("status_error", curses.color_pair(11) | curses.A_BOLD)
+            c_git   = self.colors.get("git_info",     curses.color_pair(12))
+            c_dirty = self.colors.get("git_dirty",    curses.color_pair(13) | curses.A_BOLD)
 
+            # Clear the line and set temporary background attr.
             self.stdscr.move(y, 0)
             self.stdscr.clrtoeol()
-            self.stdscr.bkgdset(" ", c_norm)
+            self.stdscr.bkgdset(" ", c_norm)          # <─ temp background
 
-            # ── формируем текст блоков ─────────────────────────────────────────
-            icon = get_file_icon(self.editor.filename, self.editor.config)
-            fname = os.path.basename(self.editor.filename) if self.editor.filename else "No Name"
+            # ── build left segment ─────────────────────────────────────────
+            icon       = get_file_icon(self.editor.filename, self.editor.config)
+            fname      = os.path.basename(self.editor.filename) if self.editor.filename else "No Name"
             lexer_name = self.editor._lexer.name if self.editor._lexer else "plain text"
+            left = (
+                f" {icon} {fname}{'*' if self.editor.modified else ''}"
+                f" | {lexer_name} | UTF-8"
+                f" | Ln {self.editor.cursor_y + 1}/{len(self.editor.text)}, "
+                f"Col {self.editor.cursor_x + 1}"
+                f" | {'INS' if self.editor.insert_mode else 'REP'} "
+            )
 
-            left = f" {icon} {fname}{'*' if self.editor.modified else ''} | {lexer_name} | UTF-8 | Ln {self.editor.cursor_y+1}/{len(self.editor.text)}, Col {self.editor.cursor_x+1} | {'INS' if self.editor.insert_mode else 'REP'} "
+            # ── build right (Git) segment ──────────────────────────────────
+            branch, _user, commits = self.editor.git_info
+            git_txt = f"Git: {branch} ({commits})" if branch else ""
+            git_attr = c_dirty if "*" in branch else c_git
 
-            g_branch, _, g_commits = self.editor.git_info
-            git_txt = f"Git: {g_branch} ({g_commits})" if g_branch else ""
-            git_col = c_dirty if "*" in g_branch else c_git
+            # ── middle message segment ─────────────────────────────────────
+            msg      = self.editor.status_message or "Ready"
+            msg_attr = c_err if msg.lower().startswith("error") else c_norm
 
-            msg = self.editor.status_message or "Ready"
-            msg_col = c_err if msg.startswith("Error") else c_norm
-
-            # ── ширины блоков ───────────────────────────────────────────────────
+            # ── widths (wcwidth-aware) ─────────────────────────────────────
             gw_left = self.editor.get_string_width(left)
-            gw_msg = self.editor.get_string_width(msg)
-            gw_git = self.editor.get_string_width(git_txt)
+            gw_git  = self.editor.get_string_width(git_txt)
+            # (middle width is computed after truncation)
 
-            # ── левый блок ──────────────────────────────────────────────────────
+            # ── draw left segment ──────────────────────────────────────────
             x = 0
             self.stdscr.addnstr(y, x, left, min(gw_left, max_col - x), c_norm)
             x += gw_left
 
-            # ── git блок справа ─────────────────────────────────────────────────
+            # ── draw right/Git segment ─────────────────────────────────────
             if git_txt:
                 x_git = max_col - gw_git
-                self.stdscr.addnstr(y, x_git, git_txt, gw_git, git_col)
+                self.stdscr.addnstr(y, x_git, git_txt, gw_git, git_attr)
                 right_limit = x_git
             else:
                 right_limit = max_col
 
-            # ── сообщение по центру (обрезка если нужно) ────────────────────────
+            # ── draw centred message segment ───────────────────────────────
             space_for_msg = right_limit - x
             if space_for_msg > 0:
                 msg = self.truncate_string(msg, space_for_msg)
                 gw_msg = self.editor.get_string_width(msg)
                 x_msg = x + (space_for_msg - gw_msg) // 2
-                self.stdscr.addnstr(y, x_msg, msg, gw_msg, msg_col)
+                self.stdscr.addnstr(y, x_msg, msg, gw_msg, msg_attr)
+
+            # ── RESET background attribute so it does not leak ─────────────
+            self.stdscr.bkgdset(" ", curses.A_NORMAL)   # <- important reset
 
         except Exception as e:
-            logging.error(f"Error in _draw_status_bar: {e}", exc_info=True)
-            self.editor._set_status_message("Status bar error (see log)")
-
+            logging.error("Error in _draw_status_bar: %s", e, exc_info=True)
+            try:
+                self.editor._set_status_message("Status bar error (see log)")
+            except Exception:
+                pass
 
     def _position_cursor(self) -> None:
         """Позиционирует курсор на экране, не позволяя ему «улетать» за Git-статус."""
