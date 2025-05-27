@@ -1593,266 +1593,6 @@ class SwayEditor:
         return made_change or (self.status_message != original_status)
     
 
-    # ───────────────────── Commenting and uncommenting lines ─────────────────────
-    def comment_lines(self, start_y: int, end_y: int, comment_prefix: str) -> bool:
-        """
-        Comments a range of lines by prepending the comment_prefix.
-        Avoids double-commenting if a line already starts with the prefix (after indent).
-        Updates action history and modified status.
-
-        Args:
-            start_y (int): The starting line index (0-based).
-            end_y (int): The ending line index (0-based).
-            comment_prefix (str): The comment prefix to add (e.g., "// ", "# ").
-
-        Returns:
-            bool: True if any lines were actually commented, False otherwise.
-                  (Status message changes are handled separately by the caller or here).
-        """
-        made_actual_text_change = False
-        original_status = self.status_message # To check if only status changes
-
-        # Store original selection/cursor states for action history
-        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
-        original_cursor_tuple = (self.cursor_y, self.cursor_x) # if not selecting
-
-        with self._state_lock: 
-            undo_changes_list: List[Dict[str, Any]] = []
-            min_indent = float('inf')
-            non_empty_lines_in_block_indices = []
-
-            # First pass: determine minimum indentation of non-empty lines in the block
-            for y_scan in range(start_y, end_y + 1):
-                if y_scan >= len(self.text): continue
-                line_content_scan = self.text[y_scan]
-                if line_content_scan.strip(): # If line is not blank
-                    non_empty_lines_in_block_indices.append(y_scan)
-                    indent_len = len(line_content_scan) - len(line_content_scan.lstrip())
-                    min_indent = min(min_indent, indent_len)
-            
-            if not non_empty_lines_in_block_indices: # All lines in selection are blank or whitespace
-                min_indent = 0 # Add comment at the beginning of whitespace lines or col 0 for empty
-            
-            lines_actually_commented_count = 0
-            
-            # Store original texts before modification for undo
-            original_texts_map = {
-                y_iter: self.text[y_iter] for y_iter in range(start_y, end_y + 1) if y_iter < len(self.text)
-            }
-
-            for y_iter in range(start_y, end_y + 1):
-                if y_iter >= len(self.text): continue
-                
-                line_content_to_modify = self.text[y_iter]
-                
-                # Determine insertion position for the comment prefix
-                # For non-blank lines: at min_indent
-                # For blank/whitespace-only lines: at the start of non-space whitespace, or col 0
-                insert_pos: int
-                is_blank_line = not line_content_to_modify.strip()
-                
-                if is_blank_line:
-                    # For blank lines, find first non-space char (e.g. tab) or end of string
-                    first_non_space = 0
-                    for i, char_in_line in enumerate(line_content_to_modify):
-                        if char_in_line != ' ':
-                            first_non_space = i
-                            break
-                    else: # Line is all spaces or empty
-                        first_non_space = len(line_content_to_modify)
-                    insert_pos = first_non_space
-                else: # Non-blank line
-                    insert_pos = int(min_indent) # Ensure min_indent is int if not float('inf')
-
-                # --- Check if already commented with the exact same prefix at insert_pos ---
-                # This check needs to be robust.
-                # We check if line[insert_pos:] starts with comment_prefix.
-                already_commented = False
-                if len(line_content_to_modify) >= insert_pos + len(comment_prefix):
-                    if line_content_to_modify[insert_pos:].startswith(comment_prefix):
-                        already_commented = True
-                        logging.debug(f"Line {y_iter+1} already commented with '{comment_prefix}', skipping.")
-
-                if not already_commented:
-                    self.text[y_iter] = (line_content_to_modify[:insert_pos] + 
-                                         comment_prefix + 
-                                         line_content_to_modify[insert_pos:])
-                    
-                    undo_changes_list.append({
-                        "line_index": y_iter, 
-                        "original_text": original_texts_map.get(y_iter, line_content_to_modify), 
-                        "new_text": self.text[y_iter]
-                    })
-                    lines_actually_commented_count += 1
-                    made_actual_text_change = True
-
-            if made_actual_text_change:
-                self.modified = True
-                
-                # Adjust selection and cursor
-                # If selection was active, its x-coordinates might shift by len(comment_prefix)
-                # if the comment was inserted before or within the selection's x-range on those lines.
-                if self.is_selecting and self.selection_start and self.selection_end:
-                    s_y, s_x = self.selection_start
-                    e_y, e_x = self.selection_end
-                    
-                    # A simple shift if the comment was added at or before the selection start on the line
-                    new_s_x = s_x
-                    if s_y >= start_y and s_y <= end_y and insert_pos <= s_x : # Check if insert_pos is defined if loop didn't run
-                         new_s_x = s_x + len(comment_prefix)
-                    
-                    new_e_x = e_x
-                    if e_y >= start_y and e_y <= end_y and insert_pos <= e_x:
-                         new_e_x = e_x + len(comment_prefix)
-
-                    self.selection_start = (s_y, new_s_x)
-                    self.selection_end = (e_y, new_e_x)
-                    self.cursor_y, self.cursor_x = self.selection_end
-                elif not self.is_selecting: # Single line comment at cursor_y
-                    if self.cursor_y >= start_y and self.cursor_y <= end_y and insert_pos <= self.cursor_x:
-                         self.cursor_x += len(comment_prefix)
-
-
-                self.action_history.append({
-                    "type": "comment_block", # Use a specific type
-                    "changes": undo_changes_list, 
-                    "comment_prefix": comment_prefix, # Store for redo/context
-                    "start_y": start_y, "end_y": end_y, 
-                    "selection_before": original_selection_tuple[1:], # (start_coords, end_coords)
-                    "cursor_before_no_selection": original_cursor_tuple if not original_selection_tuple[0] else None,
-                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
-                    "cursor_after_no_selection": (self.cursor_y, self.cursor_x) if not self.is_selecting else None
-                })
-                self.undone_actions.clear()
-                self._set_status_message(f"Commented {lines_actually_commented_count} line(s)")
-                return True
-            else:
-                # No lines were actually commented (e.g., all were already commented)
-                if self.status_message == original_status:
-                    self._set_status_message("Selected lines already commented.")
-                return self.status_message != original_status
-            
-
-    # Note: This method is used to uncomment lines that were previously commented with the same prefix.
-    def uncomment_lines(self, start_y: int, end_y: int, comment_prefix: str) -> bool:
-        """
-        Uncomments a range of lines by removing the specified comment_prefix.
-        Updates action history and modified status.
-
-        Args:
-            start_y (int): The starting line index (0-based).
-            end_y (int): The ending line index (0-based).
-            comment_prefix (str): The comment prefix to remove (e.g., "// ", "# ").
-
-        Returns:
-            bool: True if any lines were actually unindented, False otherwise.
-                  (Status message changes are handled by the caller or set here and will
-                   trigger redraw via main loop's status check).
-        """
-        made_actual_text_change = False
-        original_status = self.status_message # To check if only status changes
-        
-        # Store original selection/cursor states for action history
-        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
-        original_cursor_tuple = (self.cursor_y, self.cursor_x)
-
-
-        with self._state_lock: 
-            undo_changes_list = []
-            prefix_to_remove_stripped = comment_prefix.strip() 
-            
-            # For adjusting selection, track how much was removed from start/end lines of selection
-            chars_removed_from_sel_start_line = 0
-            chars_removed_from_sel_end_line = 0
-
-            for y_iter in range(start_y, end_y + 1):
-                if y_iter >= len(self.text): 
-                    continue
-                
-                original_line_text = self.text[y_iter]
-                line_to_modify = self.text[y_iter]
-                current_line_unindented = False
-                
-                # Determine leading whitespace
-                leading_whitespace = ""
-                for char_idx, char_val in enumerate(line_to_modify):
-                    if char_val.isspace():
-                        leading_whitespace += char_val
-                    else:
-                        break
-                
-                content_after_indent = line_to_modify[len(leading_whitespace):]
-                prefix_actually_removed_len = 0
-
-                if content_after_indent.startswith(comment_prefix): # Exact prefix match (including trailing space if any)
-                    self.text[y_iter] = leading_whitespace + content_after_indent[len(comment_prefix):]
-                    prefix_actually_removed_len = len(comment_prefix)
-                    current_line_unindented = True
-                elif content_after_indent.startswith(prefix_to_remove_stripped): 
-                    # If exact prefix (with space) didn't match, try stripped prefix.
-                    # This handles cases where user might have `comment_prefix = "# "` but line is `#comment`
-                    # or `comment_prefix = "#"` and line is `# comment`
-                    # We should only remove the stripped prefix then.
-                    # Check if there's a space after the stripped prefix that should also be removed
-                    # if the original comment_prefix had a trailing space.
-                    len_stripped = len(prefix_to_remove_stripped)
-                    if comment_prefix.endswith(' ') and \
-                       len(content_after_indent) > len_stripped and \
-                       content_after_indent[len_stripped] == ' ':
-                        self.text[y_iter] = leading_whitespace + content_after_indent[len_stripped + 1:]
-                        prefix_actually_removed_len = len_stripped + 1
-                    else:
-                        self.text[y_iter] = leading_whitespace + content_after_indent[len_stripped:]
-                        prefix_actually_removed_len = len_stripped
-                    current_line_unindented = True
-
-                if current_line_unindented:
-                    made_actual_text_change = True
-                    undo_changes_list.append({
-                        "line_index": y_iter,
-                        "original_text": original_line_text,
-                        "new_text": self.text[y_iter]
-                    })
-                    if y_iter == original_selection_tuple[1][0] if original_selection_tuple[1] else -1 : # start_y of selection
-                        chars_removed_from_sel_start_line = prefix_actually_removed_len
-                    if y_iter == original_selection_tuple[2][0] if original_selection_tuple[2] else -1 : # end_y of selection
-                        chars_removed_from_sel_end_line = prefix_actually_removed_len
-
-
-            if made_actual_text_change: 
-                self.modified = True
-                
-                # Adjust selection and cursor
-                if self.is_selecting and self.selection_start and self.selection_end:
-                    s_y, s_x = self.selection_start
-                    e_y, e_x = self.selection_end
-                    # Adjust based on characters removed from the specific lines of selection start/end
-                    self.selection_start = (s_y, max(0, s_x - chars_removed_from_sel_start_line))
-                    self.selection_end = (e_y, max(0, e_x - chars_removed_from_sel_end_line))
-                    self.cursor_y, self.cursor_x = self.selection_end
-                elif not self.is_selecting: # If it was a single line unindent without selection
-                     # current_y should be self.cursor_y here
-                     self.cursor_x = max(0, self.cursor_x - chars_removed_from_sel_start_line) # Assuming single line op
-
-                self.action_history.append({
-                    "type": "uncomment_block", # Or "block_unindent" if separating logic
-                    "changes": undo_changes_list,
-                    "comment_prefix": comment_prefix, # Store for context if needed by redo
-                    "start_y": start_y, "end_y": end_y,
-                    "selection_before": original_selection_tuple[1:], # (start_coords, end_coords)
-                    "cursor_before_no_selection": original_cursor_tuple if not original_selection_tuple[0] else None,
-                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
-                    "cursor_after_no_selection": (self.cursor_y, self.cursor_x) if not self.is_selecting else None
-                })
-                self.undone_actions.clear()
-                self._set_status_message(f"Uncommented {len(undo_changes_list)} line(s)")
-                return True # Indicates actual text change
-            else:
-                self._set_status_message(f"Nothing to uncomment in lines {start_y+1}-{end_y+1} with prefix '{comment_prefix}'")
-                return self.status_message != original_status # True if status changed
-            
-
-
     # Note:  This method is called from the main loop when a key is pressed.
     # --------------------- Input Handler --------------------
     def handle_input(self, key: Union[str, int]) -> bool:
@@ -2446,1090 +2186,6 @@ class SwayEditor:
         return self.status_message != original_status
 
 
-    def cut(self) -> bool:
-        """
-        Cuts the selected text to the internal and (if enabled) system clipboard.
-        The selected text is removed from the document.
-        Manages action history for the deletion.
-
-        Returns:
-            bool: True if the text, selection, cursor, scroll, or status message changed,
-                  False otherwise (e.g., if trying to cut with no selection and status didn't change).
-        """
-        with self._state_lock:
-            # Store initial state for comparison
-            original_text_tuple = tuple(self.text)
-            original_cursor_pos = (self.cursor_y, self.cursor_x)
-            original_scroll_pos = (self.scroll_top, self.scroll_left)
-            original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
-            original_modified_flag = self.modified
-            original_status = self.status_message
-            
-            action_made_change_to_content = False # Tracks if text content actually changed
-
-            if not self.is_selecting:
-                self._set_status_message("Nothing to cut (no selection)")
-                return self.status_message != original_status # Redraw if status message changed
-
-            # Selection exists, proceed with cutting
-            normalized_range = self._get_normalized_selection_range()
-            if not normalized_range: # Should ideally not happen if self.is_selecting is True
-                logging.warning("cut: is_selecting=True, but no valid normalized range.")
-                self.is_selecting = False # Attempt to recover
-                self.selection_start = None
-                self.selection_end = None
-                self._set_status_message("Cut error: Invalid selection state")
-                return True # Status changed
-
-            norm_start_coords, norm_end_coords = normalized_range
-            
-            # delete_selected_text_internal sets self.modified and new cursor position
-            deleted_text_segments = self.delete_selected_text_internal(
-                norm_start_coords[0], norm_start_coords[1],
-                norm_end_coords[0], norm_end_coords[1]
-            )
-
-            # Check if anything was actually deleted
-            if not deleted_text_segments and norm_start_coords == norm_end_coords:
-                # This means the selection was effectively a point (start == end)
-                self._set_status_message("Nothing to cut (empty selection)")
-                self.is_selecting = False # Clear selection state
-                self.selection_start = None
-                self.selection_end = None
-                # Return True if status message changed or selection state changed
-                return (self.status_message != original_status or
-                        (self.is_selecting, self.selection_start, self.selection_end) != original_selection_state)
-
-            action_made_change_to_content = True # Text was removed
-            
-            text_for_clipboard = "\n".join(deleted_text_segments)
-            
-            # Always copy to internal clipboard
-            self.internal_clipboard = text_for_clipboard
-            status_message_for_cut = "Cut to internal clipboard" # Default message
-
-            # Attempt to copy to system clipboard if enabled and available
-            if self.use_system_clipboard and self.pyclip_available:
-                try:
-                    pyperclip.copy(text_for_clipboard)
-                    status_message_for_cut = "Cut to system clipboard"
-                    logging.debug("Text cut and copied to system clipboard successfully.")
-                except pyperclip.PyperclipException as e:
-                    logging.error(f"Failed to copy cut text to system clipboard: {str(e)}")
-                    status_message_for_cut = "Cut to internal clipboard (system clipboard error)"
-                except Exception as e: # Catch any other unexpected error
-                    logging.error(f"Unexpected error copying cut text to system clipboard: {e}", exc_info=True)
-                    status_message_for_cut = "Cut to internal clipboard (unexpected system clipboard error)"
-            
-            # Add the deletion action to history
-            self.action_history.append({
-                "type": "delete_selection", 
-                "text": deleted_text_segments,
-                "start": norm_start_coords, 
-                "end": norm_end_coords
-            })
-            self.undone_actions.clear() # Cut is a new atomic action, clear redo stack
-            
-            # self.modified is already set to True by delete_selected_text_internal
-            # Cursor position is also set by delete_selected_text_internal to norm_start_coords
-            
-            self.is_selecting = False # Selection is gone after cut
-            self.selection_start = None
-            self.selection_end = None
-            
-            self._set_status_message(status_message_for_cut)
-            
-            # Ensure cursor and scroll are valid after the operation
-            # Although delete_selected_text_internal sets cursor, _ensure_cursor_in_bounds is a good safeguard
-            self._ensure_cursor_in_bounds()
-            self._clamp_scroll() # Scroll might need adjustment if cursor position changed significantly
-
-            # Determine if a redraw is needed by comparing overall state
-            # Since cut always involves text deletion and status change, it should always return True if successful.
-            if (action_made_change_to_content or
-                (self.cursor_y, self.cursor_x) != original_cursor_pos or
-                (self.scroll_top, self.scroll_left) != original_scroll_pos or
-                (self.is_selecting, self.selection_start, self.selection_end) != original_selection_state or
-                self.modified != original_modified_flag or # Check if modified flag state actually flipped
-                self.status_message != original_status):
-                return True
-            
-            return False # Should not be reached if cut was successful
-        
-
-    def paste(self) -> bool:
-        """
-        Pastes text from the clipboard at the current cursor position.
-        If text is selected, the selected text is replaced by the clipboard content.
-        Manages action history for the entire paste operation (which might include
-        a deletion and an insertion as a single logical step for undo).
-
-        Returns:
-            bool: True if the text, selection, cursor, scroll, or status message changed, 
-                  False otherwise.
-        """
-        with self._state_lock:
-            # Store initial state for comparison
-            original_text_tuple = tuple(self.text)
-            original_cursor_pos = (self.cursor_y, self.cursor_x)
-            original_scroll_pos = (self.scroll_top, self.scroll_left)
-            original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
-            original_modified_flag = self.modified
-            original_status = self.status_message
-            
-            made_change_to_content = False # Tracks if text content or buffer structure actually changed
-
-            text_to_paste = self.internal_clipboard 
-            source_of_paste = "internal" 
-
-            if self.use_system_clipboard and self.pyclip_available:
-                try:
-                    system_clipboard_text = pyperclip.paste()
-                    if system_clipboard_text: 
-                        text_to_paste = system_clipboard_text
-                        source_of_paste = "system"
-                        logging.debug(f"Pasting {len(text_to_paste)} chars from system clipboard.")
-                    else:
-                        logging.debug("System clipboard is empty, using internal clipboard content.")
-                except pyperclip.PyperclipException as e:
-                    logging.error(f"System clipboard error on paste: {e} – using internal clipboard.")
-                except Exception as e: 
-                    logging.exception(f"Unexpected clipboard error on paste: {e} – using internal clipboard.")
-
-            if not text_to_paste:
-                self._set_status_message("Clipboard is empty")
-                # Return True if status changed (it did), or if selection was active and might be implicitly cleared by some UIs
-                return self.status_message != original_status 
-
-            # Normalize line endings from clipboard
-            text_to_paste = text_to_paste.replace("\r\n", "\n").replace("\r", "\n")
-            
-            # Determine actual insertion point, which might change if selection is deleted
-            effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
-
-            # --- Start of compound action for undo history ---
-            # We will group deletion (if any) and insertion into a sequence
-            # that should ideally be undone/redone together.
-            # A more advanced undo system might use "compound actions".
-            # For now, we add them sequentially, and `undone_actions.clear()` after the sequence.
-
-            # 1. Handle active selection: delete it first
-            if self.is_selecting:
-                normalized_selection = self._get_normalized_selection_range()
-                if normalized_selection:
-                    norm_start_coords, norm_end_coords = normalized_selection
-                    
-                    logging.debug(f"paste: Deleting active selection from {norm_start_coords} to {norm_end_coords} before pasting.")
-                    
-                    deleted_segments = self.delete_selected_text_internal(
-                        norm_start_coords[0], norm_start_coords[1],
-                        norm_end_coords[0], norm_end_coords[1]
-                    )
-                    
-                    # Record deletion action if something was actually deleted
-                    if deleted_segments or (norm_start_coords != norm_end_coords):
-                        self.action_history.append({
-                            "type": "delete_selection", 
-                            "text": deleted_segments,
-                            "start": norm_start_coords, 
-                            "end": norm_end_coords,     
-                        })
-                        # Don't clear undone_actions yet, as insertion is part of this user action
-                        made_change_to_content = True
-                    
-                    # delete_selected_text_internal sets the cursor to norm_start_coords
-                    effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
-                    
-                    self.is_selecting = False # Selection is now gone
-                    self.selection_start = None
-                    self.selection_end = None
-            
-            # 2. Insert the text from clipboard at the effective position
-            # Store position before low-level insert for this part of the history
-            insert_pos_for_history = (effective_insert_y, effective_insert_x)
-
-            try:
-                # Use the low-level insert_text_at_position directly
-                if self.insert_text_at_position(text_to_paste, effective_insert_y, effective_insert_x):
-                    made_change_to_content = True # Text was inserted
-                # insert_text_at_position sets self.modified = True and updates cursor
-            except IndexError as e:
-                logging.error(f"paste: Error during insert_text_at_position: {e}")
-                self._set_status_message(f"Paste insertion error: {e}")
-                # If deletion happened, action_history already has it.
-                # If insertion failed, the state might be after deletion but before successful paste.
-                # We need to decide if we should attempt to undo the deletion part or leave as is.
-                # For now, just report error.
-                return True # Status changed
-
-            # Add "insert" action to history for the pasted text
-            self.action_history.append({
-                "type": "insert",
-                "text": text_to_paste,
-                "position": insert_pos_for_history 
-            })
-            
-            # Now that the compound paste operation (delete + insert) is complete, clear redo stack.
-            if made_change_to_content:
-                self.undone_actions.clear()
-            
-            # Final status message
-            if made_change_to_content:
-                self._set_status_message(f"Pasted from {source_of_paste} clipboard")
-            elif self.status_message == original_status: # No content change, status not set by error
-                self._set_status_message("Paste: No effective change (e.g., pasting empty over empty)")
-            
-            # Ensure cursor and scroll are valid
-            if made_change_to_content:
-                self._ensure_cursor_in_bounds()
-                self._clamp_scroll()
-
-            # Determine if a redraw is needed by comparing overall state
-            if (made_change_to_content or
-                (self.cursor_y, self.cursor_x) != original_cursor_pos or
-                (self.scroll_top, self.scroll_left) != original_scroll_pos or
-                (self.is_selecting, self.selection_start, self.selection_end) != original_selection_state or
-                self.modified != original_modified_flag or
-                self.status_message != original_status):
-                return True
-            
-            return False
-        
-    ############### Selection Handling ####################
-    def extend_selection_right(self) -> bool:
-        """
-        Extends the selection one character to the right.
-        If no selection is active, starts a new selection from the current cursor position.
-        Moves the cursor to the new end of the selection.
-        Adjusts scroll if necessary.
-
-        Returns:
-            bool: True if the cursor position, selection state/boundaries, or scroll position changed, 
-                  False otherwise.
-        """
-        # Store initial state for comparison
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left)
-        original_selection_start = self.selection_start
-        original_selection_end = self.selection_end
-        original_is_selecting_flag = self.is_selecting
-        # No status message is typically set by this kind of fine-grained action
-
-        changed_state = False
-
-        with self._state_lock:
-            current_line_idx = self.cursor_y
-            if current_line_idx >= len(self.text): # Should not happen with valid cursor
-                logging.warning(f"extend_selection_right: cursor_y {current_line_idx} out of bounds.")
-                return False # No change possible
-
-            current_line_content = self.text[current_line_idx]
-            current_line_length = len(current_line_content)
-
-            # If selection is not active, start it from the current cursor position.
-            if not self.is_selecting:
-                self.selection_start = (self.cursor_y, self.cursor_x)
-                self.is_selecting = True
-                # This itself is a state change if original_is_selecting_flag was False
-            
-            # Move the cursor logically one character to the right, if not at the end of the line.
-            # This also becomes the new end of the selection.
-            if self.cursor_x < current_line_length:
-                self.cursor_x += 1
-                # Skip over zero-width characters if any (though less common for simple right extension)
-                while self.cursor_x < current_line_length and wcwidth(current_line_content[self.cursor_x]) == 0:
-                    self.cursor_x += 1
-            # If at the end of the line, cursor_x does not move further right on this line.
-            # Extending selection to the next line is typically handled by extend_selection_down then extend_selection_left/right.
-            # This method focuses on extending right on the *current* line or starting selection.
-
-            # Update the end of the selection to the new cursor position.
-            self.selection_end = (self.cursor_y, self.cursor_x)
-            
-            # Ensure scrolling is adjusted if the cursor moved out of view.
-            self._clamp_scroll()
-
-        # Determine if any relevant state actually changed.
-        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
-             (self.scroll_top, self.scroll_left) != original_scroll_pos or
-             self.is_selecting != original_is_selecting_flag or
-             self.selection_start != original_selection_start or
-             self.selection_end != original_selection_end ):
-            changed_state = True
-            logging.debug(
-                f"extend_selection_right: New cursor ({self.cursor_y},{self.cursor_x}), "
-                f"selection_end ({self.selection_end}). Changed: {changed_state}"
-            )
-        else:
-            logging.debug("extend_selection_right: No change in cursor, scroll, or selection state.")
-            
-        return changed_state
-
-
-    def extend_selection_left(self) -> bool:
-        """
-        Extends the selection one character to the left.
-        If no selection is active, starts a new selection from the current cursor position.
-        Moves the cursor to the new end of the selection (which is to the left).
-        Adjusts scroll if necessary.
-
-        Returns:
-            bool: True if the cursor position, selection state/boundaries, or scroll position changed, 
-                  False otherwise.
-        """
-        # Store initial state for comparison
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left)
-        original_selection_start = self.selection_start
-        original_selection_end = self.selection_end
-        original_is_selecting_flag = self.is_selecting
-        
-        changed_state = False
-
-        with self._state_lock:
-            current_line_idx = self.cursor_y
-            if current_line_idx >= len(self.text): # Should not happen with valid cursor
-                logging.warning(f"extend_selection_left: cursor_y {current_line_idx} out of bounds.")
-                return False # No change possible
-
-            # If selection is not active, start it from the current cursor position.
-            # When extending left, the initial cursor position becomes the 'anchor' or 'selection_start'
-            # if we consider selection_end to be the moving part.
-            # Or, if self.selection_start is the fixed point and self.selection_end moves with cursor:
-            if not self.is_selecting:
-                self.selection_start = (self.cursor_y, self.cursor_x) # Anchor point
-                self.is_selecting = True
-            
-            # Move the cursor logically one character to the left.
-            if self.cursor_x > 0:
-                self.cursor_x -= 1
-                # If moving left lands on a zero-width character, keep moving left
-                # until a non-zero-width character is found or beginning of line.
-                # This ensures the selection "jumps over" combining characters.
-                current_line_content = self.text[current_line_idx]
-                while self.cursor_x > 0 and wcwidth(current_line_content[self.cursor_x]) == 0:
-                    self.cursor_x -= 1
-            # If at the beginning of the current line (self.cursor_x == 0),
-            # this method does not currently extend to the previous line.
-            # That would typically be handled by extend_selection_up then extend_selection_right/end.
-
-            # Update the end of the selection to the new cursor position.
-            # If selection_start was (y, X) and cursor moves to (y, X-1),
-            # selection_end becomes (y, X-1).
-            self.selection_end = (self.cursor_y, self.cursor_x)
-            
-            # Ensure scrolling is adjusted if the cursor moved out of view.
-            self._clamp_scroll()
-
-        # Determine if any relevant state actually changed.
-        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
-             (self.scroll_top, self.scroll_left) != original_scroll_pos or
-             self.is_selecting != original_is_selecting_flag or
-             self.selection_start != original_selection_start or # Could change if is_selecting was false
-             self.selection_end != original_selection_end ):      # Will always change if cursor_x changed
-            changed_state = True
-            logging.debug(
-                f"extend_selection_left: New cursor ({self.cursor_y},{self.cursor_x}), "
-                f"selection_end ({self.selection_end}). Changed: {changed_state}"
-            )
-        else:
-            logging.debug("extend_selection_left: No change in cursor, scroll, or selection state.")
-            
-        return changed_state
-
-
-    def select_to_home(self) -> bool:
-        """
-        Extends the selection from the current cursor position to the beginning of the current line.
-        If no selection is active, starts a new selection.
-        The cursor moves to the beginning of the line (column 0).
-
-        Returns:
-            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
-                  False otherwise.
-        """
-        # Store initial state for comparison
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left) # Specifically scroll_left
-        original_selection_start = self.selection_start
-        original_selection_end = self.selection_end
-        original_is_selecting_flag = self.is_selecting
-        
-        changed_state = False
-
-        with self._state_lock:
-            current_line_idx = self.cursor_y
-            if current_line_idx >= len(self.text): # Should not happen with valid cursor
-                logging.warning(f"select_to_home: cursor_y {current_line_idx} out of bounds.")
-                return False # No change possible
-
-            # If selection is not active, start it from the current cursor position.
-            # This current position becomes the 'anchor' (selection_start).
-            if not self.is_selecting:
-                self.selection_start = (self.cursor_y, self.cursor_x)
-                self.is_selecting = True
-            
-            # Move the cursor to the beginning of the current line (column 0).
-            self.cursor_x = 0
-            
-            # Update the end of the selection to the new cursor position (beginning of the line).
-            self.selection_end = (self.cursor_y, self.cursor_x)
-            
-            # Adjust horizontal scroll if necessary, as cursor moved to column 0.
-            # _clamp_scroll will handle if self.cursor_x (now 0) is less than self.scroll_left.
-            self._clamp_scroll()
-
-        # Determine if any relevant state actually changed.
-        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
-             (self.scroll_top, self.scroll_left) != original_scroll_pos or # Check both scroll dimensions
-             self.is_selecting != original_is_selecting_flag or
-             self.selection_start != original_selection_start or
-             self.selection_end != original_selection_end ):
-            changed_state = True
-            logging.debug(
-                f"select_to_home: New cursor ({self.cursor_y},{self.cursor_x}), "
-                f"selection_end ({self.selection_end}). Changed: {changed_state}"
-            )
-        else:
-            logging.debug("select_to_home: No change in cursor, scroll, or selection state.")
-            
-        return changed_state
-
-    def select_to_end(self) -> bool:
-        """
-        Extends the selection from the current cursor position to the end of the current line.
-        If no selection is active, starts a new selection.
-        The cursor moves to the end of the line.
-
-        Returns:
-            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
-                  False otherwise.
-        """
-        # Store initial state for comparison
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left)
-        original_selection_start = self.selection_start
-        original_selection_end = self.selection_end
-        original_is_selecting_flag = self.is_selecting
-        
-        changed_state = False
-
-        with self._state_lock:
-            current_line_idx = self.cursor_y
-            if current_line_idx >= len(self.text): # Should not happen with valid cursor
-                logging.warning(f"select_to_end: cursor_y {current_line_idx} out of bounds.")
-                return False # No change possible
-
-            current_line_content = self.text[current_line_idx]
-            current_line_length = len(current_line_content)
-
-            # If selection is not active, start it from the current cursor position.
-            # This current position becomes the 'anchor' (selection_start).
-            if not self.is_selecting:
-                self.selection_start = (self.cursor_y, self.cursor_x)
-                self.is_selecting = True
-            
-            # Move the cursor to the end of the current line.
-            self.cursor_x = current_line_length
-            
-            # Update the end of the selection to the new cursor position (end of the line).
-            self.selection_end = (self.cursor_y, self.cursor_x)
-            
-            # Adjust scroll if necessary, as cursor may have moved far right.
-            self._clamp_scroll()
-
-        # Determine if any relevant state actually changed.
-        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
-             (self.scroll_top, self.scroll_left) != original_scroll_pos or
-             self.is_selecting != original_is_selecting_flag or
-             self.selection_start != original_selection_start or
-             self.selection_end != original_selection_end ):
-            changed_state = True
-            logging.debug(
-                f"select_to_end: New cursor ({self.cursor_y},{self.cursor_x}), "
-                f"selection_end ({self.selection_end}). Changed: {changed_state}"
-            )
-        else:
-            logging.debug("select_to_end: No change in cursor, scroll, or selection state.")
-            
-        return changed_state
-    
-
-    def select_all(self) -> bool:
-        """
-        Selects all text in the document.
-        Moves the cursor to the end of the selection.
-        Sets a status message.
-        Adjusts scroll to ensure the end of the selection (and cursor) is visible.
-
-        Returns:
-            bool: True, as this action always changes the selection state, 
-                  cursor position, potentially scroll, and status message,
-                  thus requiring a redraw.
-        """
-        logging.debug("select_all called")
-
-        # Store original state for comparison, though this action almost always changes it
-        original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left)
-        original_status = self.status_message
-        
-        with self._state_lock: # Ensure atomicity of state changes
-            if not self.text: # Should not happen if text is always at least [""]
-                self.text = [""] # Ensure there's at least one line
-                logging.warning("select_all: Text buffer was unexpectedly empty, initialized to [''].")
-
-            # Set selection start to the beginning of the document
-            self.selection_start = (0, 0)
-
-            # Determine the end of the document
-            # If the buffer is [""] (one empty line), last_line_idx is 0, len(self.text[0]) is 0.
-            # So selection_end will be (0,0).
-            # If buffer has content, e.g. ["abc", "de"], last_line_idx is 1, len(self.text[1]) is 2.
-            # So selection_end will be (1,2).
-            last_line_idx = max(0, len(self.text) - 1)
-            self.selection_end = (last_line_idx, len(self.text[last_line_idx]))
-            
-            self.is_selecting = True # Mark that selection is active
-
-            # Move the cursor to the end of the new selection
-            self.cursor_y, self.cursor_x = self.selection_end
-            
-            self._set_status_message("All text selected")
-            
-            # Adjust scroll to make the new cursor position (end of selection) visible
-            self._clamp_scroll() 
-
-        # Determine if a redraw is needed by comparing relevant state aspects
-        # For select_all, it's virtually guaranteed to change state.
-        if (self.is_selecting != original_selection_state[0] or
-            self.selection_start != original_selection_state[1] or
-            self.selection_end != original_selection_state[2] or
-            (self.cursor_y, self.cursor_x) != original_cursor_pos or
-            (self.scroll_top, self.scroll_left) != original_scroll_pos or
-            self.status_message != original_status):
-            return True
-        
-        return False # Should technically not be reached if "All text selected" is always set.
-
-
-    def extend_selection_up(self) -> bool:
-        """
-        Extends the selection one line upwards.
-        If no selection is active, starts a new selection from the current cursor position.
-        The cursor moves to the corresponding column in the line above, clamped by line length.
-        The new cursor position becomes the (moving) end of the selection.
-
-        Returns:
-            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
-                  False otherwise.
-        """
-        # Store initial state for comparison
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left)
-        original_selection_start = self.selection_start
-        original_selection_end = self.selection_end
-        original_is_selecting_flag = self.is_selecting
-        
-        changed_state = False
-
-        with self._state_lock:
-            # If selection is not active, start it from the current cursor position.
-            # This current position becomes the 'anchor' (selection_start).
-            if not self.is_selecting:
-                self.selection_start = (self.cursor_y, self.cursor_x)
-                self.is_selecting = True
-            
-            # Move the cursor logically one line up, if not already at the first line.
-            if self.cursor_y > 0:
-                self.cursor_y -= 1
-                # Maintain the horizontal cursor column if possible, clamping to the new line's length.
-                # self.cursor_x (the "desired" column) is preserved from the previous line.
-                self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
-            # If at the first line (self.cursor_y == 0), no further upward movement is possible.
-            
-            # Update the end of the selection to the new cursor position.
-            self.selection_end = (self.cursor_y, self.cursor_x)
-            
-            # Adjust scroll if necessary.
-            self._clamp_scroll()
-
-        # Determine if any relevant state actually changed.
-        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
-             (self.scroll_top, self.scroll_left) != original_scroll_pos or
-             self.is_selecting != original_is_selecting_flag or
-             self.selection_start != original_selection_start or # Could change if is_selecting was false
-             self.selection_end != original_selection_end ):      # Will change if cursor_y or cursor_x changed
-            changed_state = True
-            logging.debug(
-                f"extend_selection_up: New cursor ({self.cursor_y},{self.cursor_x}), "
-                f"selection_end ({self.selection_end}). Changed: {changed_state}"
-            )
-        else:
-            logging.debug("extend_selection_up: No change in cursor, scroll, or selection state.")
-            
-        return changed_state
-
-
-    def extend_selection_down(self) -> bool:
-        """
-        Extends the selection one line downwards.
-        If no selection is active, starts a new selection from the current cursor position.
-        The cursor moves to the corresponding column in the line below, clamped by line length.
-        The new cursor position becomes the (moving) end of the selection.
-
-        Returns:
-            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
-                  False otherwise.
-        """
-        # Store initial state for comparison
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left)
-        original_selection_start = self.selection_start
-        original_selection_end = self.selection_end
-        original_is_selecting_flag = self.is_selecting
-        
-        changed_state = False
-
-        with self._state_lock:
-            # If selection is not active, start it from the current cursor position.
-            if not self.is_selecting:
-                self.selection_start = (self.cursor_y, self.cursor_x)
-                self.is_selecting = True
-            
-            # Move the cursor logically one line down, if not already at the last line.
-            if self.cursor_y < len(self.text) - 1:
-                self.cursor_y += 1
-                # Maintain the horizontal cursor column if possible, clamping to the new line's length.
-                self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
-            # If at the last line, no further downward movement.
-            
-            # Update the end of the selection to the new cursor position.
-            self.selection_end = (self.cursor_y, self.cursor_x)
-            
-            # Adjust scroll if necessary.
-            self._clamp_scroll()
-
-        # Determine if any relevant state actually changed.
-        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
-             (self.scroll_top, self.scroll_left) != original_scroll_pos or
-             self.is_selecting != original_is_selecting_flag or
-             self.selection_start != original_selection_start or
-             self.selection_end != original_selection_end ):
-            changed_state = True
-            logging.debug(
-                f"extend_selection_down: New cursor ({self.cursor_y},{self.cursor_x}), "
-                f"selection_end ({self.selection_end}). Changed: {changed_state}"
-            )
-        else:
-            logging.debug("extend_selection_down: No change in cursor, scroll, or selection state.")
-            
-        return changed_state
-
-
-    def undo(self) -> bool:
-        """
-        Undoes the last action from the action_history stack.
-        Restores the text, cursor position, selection state, and modified status
-        to what it was before the last action was performed.
-
-        Returns:
-            bool: True if the editor's state (text, cursor, scroll, selection, modified flag,
-                  or status message) changed as a result of the undo operation, False otherwise.
-        """
-        with self._state_lock:
-            original_status = self.status_message # For checking if status message changes at the end
-
-            if not self.action_history:
-                self._set_status_message("Nothing to undo")
-                return self.status_message != original_status # Redraw if status changed
-
-            # Store current state to compare against after undoing the action
-            pre_undo_text_tuple = tuple(self.text)
-            pre_undo_cursor_pos = (self.cursor_y, self.cursor_x)
-            pre_undo_scroll_pos = (self.scroll_top, self.scroll_left)
-            pre_undo_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
-            pre_undo_modified_flag = self.modified
-
-            last_action = self.action_history.pop()
-            action_type = last_action.get("type")
-            # This flag tracks if the core data (text, selection, cursor) was changed by this undo
-            content_or_selection_changed_by_this_undo = False 
-
-            logging.debug(f"Undo: Attempting to undo action of type '{action_type}' with data: {last_action}")
-
-            try:
-                if action_type == "insert":
-                    text_that_was_inserted = last_action["text"]
-                    row, col = last_action["position"]
-                    lines_inserted = text_that_was_inserted.split('\n')
-                    num_lines_in_inserted_text = len(lines_inserted)
-
-                    if not (0 <= row < len(self.text)):
-                        raise IndexError(f"Undo insert: Start row {row} out of bounds (text len {len(self.text)}). Action: {last_action}")
-
-                    if num_lines_in_inserted_text == 1:
-                        len_inserted = len(text_that_was_inserted)
-                        # Check if the text to be removed actually matches what's there
-                        if not (col <= len(self.text[row]) and self.text[row][col:col+len_inserted] == text_that_was_inserted):
-                             logging.warning(f"Undo insert: Text mismatch for deletion at [{row},{col}] len {len_inserted}. Expected '{text_that_was_inserted}', found '{self.text[row][col:col+len_inserted]}'.")
-                             # Potentially raise error or try to proceed if desired, for now, log and proceed carefully.
-                             # This indicates a potential inconsistency in undo stack or text state.
-                        self.text[row] = self.text[row][:col] + self.text[row][col + len_inserted:]
-                    else: # Multi-line insert undo
-                        end_row_affected_by_original_insert = row + num_lines_in_inserted_text - 1
-                        if end_row_affected_by_original_insert >= len(self.text):
-                            raise IndexError(f"Undo insert: End row {end_row_affected_by_original_insert} out of bounds (text len {len(self.text)}). Action: {last_action}")
-                        
-                        # The suffix that was originally on line 'row' and got pushed down
-                        # is now at the end of line 'end_row_affected_by_original_insert'
-                        # after the last segment of the inserted text.
-                        original_suffix_from_line_row = self.text[end_row_affected_by_original_insert][len(lines_inserted[-1]):]
-                        
-                        self.text[row] = self.text[row][:col] + original_suffix_from_line_row
-                        # Delete the lines that were created by the multi-line insert
-                        del self.text[row + 1 : end_row_affected_by_original_insert + 1]
-                        
-                    self.cursor_y, self.cursor_x = row, col 
-                    content_or_selection_changed_by_this_undo = True
-
-                elif action_type == "delete_char":
-                    y, x = last_action["position"] # Position where char was deleted, and cursor stayed
-                    char_that_was_deleted = last_action["text"]
-                    if not (0 <= y < len(self.text) and 0 <= x <= len(self.text[y])):
-                         raise IndexError(f"Undo delete_char: Invalid position ({y},{x}) for re-insertion. Action: {last_action}")
-                    self.text[y] = self.text[y][:x] + char_that_was_deleted + self.text[y][x:]
-                    self.cursor_y, self.cursor_x = y, x # Cursor stays at the position of the re-inserted char
-                    content_or_selection_changed_by_this_undo = True
-                
-                elif action_type == "delete_newline":
-                    y, x_at_split_point = last_action["position"] # Cursor pos after original merge
-                    content_of_merged_line = last_action["text"]  # This was the line that got appended
-                    if not (0 <= y < len(self.text) and 0 <= x_at_split_point <= len(self.text[y])):
-                        raise IndexError(f"Undo delete_newline: Invalid position ({y},{x_at_split_point}) for split. Action: {last_action}")
-                    
-                    line_to_be_split = self.text[y]
-                    self.text[y] = line_to_be_split[:x_at_split_point]
-                    self.text.insert(y + 1, content_of_merged_line) 
-                    self.cursor_y, self.cursor_x = y, x_at_split_point # Cursor to the split point
-                    content_or_selection_changed_by_this_undo = True
-
-                elif action_type == "delete_selection":
-                    deleted_segments = last_action["text"] # This is a list[str]
-                    start_y, start_x = last_action["start"] # Coords where deletion started
-                    
-                    text_to_restore = "\n".join(deleted_segments)
-                    if self.insert_text_at_position(text_to_restore, start_y, start_x): # This returns bool
-                        content_or_selection_changed_by_this_undo = True
-                    # For undo of delete_selection, cursor should go to the start of the re-inserted text.
-                    self.cursor_y, self.cursor_x = start_y, start_x 
-                    # Restore selection state if it was stored with the action (optional enhancement)
-                    # For now, just clear selection after undoing a deletion.
-                    self.is_selecting = False
-                    self.selection_start = None
-                    self.selection_end = None
-                
-                elif action_type in ("block_indent", "block_unindent", "comment_block", "uncomment_block"):
-                    changes = last_action.get("changes", []) # List of dicts
-                    if not changes:
-                        logging.warning(f"Undo ({action_type}): No 'changes' data in action. Action: {last_action}")
-                    
-                    for change_item in reversed(changes): # Restore original_text in reverse order of application
-                        idx = change_item["line_index"]
-                        original_line_text = change_item.get("original_text")
-                        if original_line_text is None:
-                            logging.warning(f"Undo ({action_type}): Missing 'original_text' for line {idx}. Skipping.")
-                            continue
-                        if idx < len(self.text):
-                            if self.text[idx] != original_line_text:
-                                self.text[idx] = original_line_text
-                                content_or_selection_changed_by_this_undo = True
-                        else:
-                            logging.warning(f"Undo ({action_type}): Line index {idx} out of bounds for text len {len(self.text)}. Skipping.")
-                    
-                    # Restore selection and cursor state as it was *before* the original operation
-                    selection_state_before_op = last_action.get("selection_before")
-                    cursor_state_no_sel_before_op = last_action.get("cursor_before_no_selection")
-
-                    # Store current selection/cursor to compare *after* attempting to restore
-                    current_sel_is, current_sel_start, current_sel_end = self.is_selecting, self.selection_start, self.selection_end
-                    current_curs_y, current_curs_x = self.cursor_y, self.cursor_x
-
-                    if selection_state_before_op and isinstance(selection_state_before_op, tuple) and len(selection_state_before_op) == 2:
-                        # Assumes selection_before is (sel_start_coords, sel_end_coords)
-                        # The full state was (is_selecting, sel_start_coords, sel_end_coords)
-                        # Let's assume "selection_before" from actions like block_indent stores the tuple (start_coords, end_coords)
-                        # and implies is_selecting = True.
-                        # If it stores (is_selecting, start_coords, end_coords), then adjust accordingly.
-                        # Based on block_indent, it stores (start_coords, end_coords).
-                        self.is_selecting = True
-                        self.selection_start, self.selection_end = selection_state_before_op[0], selection_state_before_op[1]
-                        if self.is_selecting and self.selection_end: # Position cursor at end of restored selection
-                            self.cursor_y, self.cursor_x = self.selection_end
-                    elif cursor_state_no_sel_before_op and isinstance(cursor_state_no_sel_before_op, tuple):
-                        self.is_selecting = False
-                        self.selection_start, self.selection_end = None, None
-                        self.cursor_y, self.cursor_x = cursor_state_no_sel_before_op
-                    else: # Fallback if no specific state stored, clear selection
-                        self.is_selecting = False
-                        self.selection_start, self.selection_end = None, None
-                        # Cursor might have been affected by text changes if any.
-                    
-                    # Check if selection or cursor state actually changed due to restoration
-                    if (self.is_selecting != current_sel_is or 
-                        self.selection_start != current_sel_start or 
-                        self.selection_end != current_sel_end or
-                        (self.cursor_y, self.cursor_x) != (current_curs_y, current_curs_x) ):
-                        content_or_selection_changed_by_this_undo = True
-                
-                else:
-                    logging.warning(f"Undo: Unknown action type '{action_type}'. Cannot undo. Action: {last_action}")
-                    self.action_history.append(last_action) # Put it back on history if not handled
-                    self._set_status_message(f"Undo failed: Unknown action type '{action_type}'")
-                    return True # Status changed
-
-            except IndexError as e_idx: # Catch errors from list/string indexing during undo logic
-                logging.error(f"Undo: IndexError during undo of '{action_type}': {e_idx}", exc_info=True)
-                self._set_status_message(f"Undo error for '{action_type}': Index out of bounds.")
-                self.action_history.append(last_action) # Attempt to put action back
-                return True # Status changed, state might be inconsistent
-            except Exception as e_undo_general: # Catch any other unexpected errors
-                logging.exception(f"Undo: Unexpected error during undo of '{action_type}': {e_undo_general}")
-                self._set_status_message(f"Undo error for '{action_type}': {str(e_undo_general)[:60]}...")
-                self.action_history.append(last_action) # Attempt to put action back
-                return True # Status changed
-
-            # If undo logic completed (even if it raised an error that was caught and handled above by returning True)
-            self.undone_actions.append(last_action) # Move the undone action to the redo stack
-            
-            # Determine `self.modified` state after undo
-            if not self.action_history: # If history is now empty
-                self.modified = False # All changes undone, back to last saved or new state
-                logging.debug("Undo: Action history empty, file considered not modified.")
-            else:
-                # Check if the current text matches the state of the last item in history
-                # This is complex. A simpler heuristic: if there's history, it's modified.
-                # A more robust system would store a "saved_checkpoint" in history.
-                self.modified = True 
-                logging.debug(f"Undo: Action history not empty ({len(self.action_history)} items), file considered modified.")
-            
-            # Ensure cursor and scroll are valid after any operation
-            self._ensure_cursor_in_bounds()
-            scroll_changed_by_clamp = self._clamp_scroll_and_check_change(pre_undo_scroll_pos)
-
-            # Determine if a redraw is needed based on actual state changes
-            final_redraw_needed = False
-            if (content_or_selection_changed_by_this_undo or
-                tuple(self.text) != pre_undo_text_tuple or 
-                (self.cursor_y, self.cursor_x) != pre_undo_cursor_pos or
-                scroll_changed_by_clamp or
-                (self.is_selecting, self.selection_start, self.selection_end) != pre_undo_selection_state or
-                self.modified != pre_undo_modified_flag):
-                final_redraw_needed = True
-            
-            if final_redraw_needed:
-                self._set_status_message("Action undone")
-                logging.debug(f"Undo successful, state changed for action type '{action_type}'. Redraw needed.")
-            else:
-                # This implies the undo operation resulted in the exact same state as before it ran
-                if self.status_message == original_status : 
-                    self._set_status_message("Undo: No effective change from current state")
-                logging.debug(f"Undo for action type '{action_type}' resulted in no effective change from current state.")
-            
-            # Return True if a redraw is needed due to state changes OR if status message changed
-            return final_redraw_needed or (self.status_message != original_status)
-        
-    def redo(self) -> bool:
-        """
-        Redoes the last undone action from the undone_actions stack.
-        Restores the text, cursor position, selection state, and modified status
-        to what it was after the original action was performed (and before it was undone).
-
-        Returns:
-            bool: True if the editor's state (text, cursor, scroll, selection, modified flag,
-                  or status message) changed as a result of the redo operation, False otherwise.
-        """
-        with self._state_lock:
-            original_status = self.status_message # For checking if status message changes at the end
-
-            if not self.undone_actions:
-                self._set_status_message("Nothing to redo")
-                return self.status_message != original_status # Redraw if status message changed
-
-            # Store current state to compare against after redoing the action
-            pre_redo_text_tuple = tuple(self.text)
-            pre_redo_cursor_pos = (self.cursor_y, self.cursor_x)
-            pre_redo_scroll_pos = (self.scroll_top, self.scroll_left)
-            pre_redo_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
-            pre_redo_modified_flag = self.modified
-
-            action_to_redo = self.undone_actions.pop()
-            action_type = action_to_redo.get("type")
-            # This flag tracks if the core data (text, selection, cursor) was changed by this redo
-            content_or_selection_changed_by_this_redo = False 
-
-            logging.debug(f"Redo: Attempting to redo action of type '{action_type}' with data: {action_to_redo}")
-
-            try:
-                if action_type == "insert":
-                    # To redo an insert, we re-insert the text.
-                    # 'text' is the text that was originally inserted.
-                    # 'position' is (row, col) where insertion originally started.
-                    text_to_re_insert = action_to_redo["text"]
-                    row, col = action_to_redo["position"]
-                    # insert_text_at_position updates cursor and self.modified
-                    if self.insert_text_at_position(text_to_re_insert, row, col):
-                        content_or_selection_changed_by_this_redo = True
-                    # Cursor is set by insert_text_at_position to be after the inserted text.
-
-                elif action_type == "delete_char":
-                    # To redo a delete_char, we re-delete the character.
-                    # 'text' is the character that was originally deleted.
-                    # 'position' is (y,x) where the character was (and where cursor stayed).
-                    y, x = action_to_redo["position"]
-                    # Ensure the character that was re-inserted by 'undo' is still there to be 're-deleted'.
-                    # This also implies the line length and content should match expectations.
-                    char_that_was_reinserted_by_undo = action_to_redo["text"]
-                    if not (0 <= y < len(self.text) and 
-                            0 <= x < len(self.text[y]) and 
-                            self.text[y][x] == char_that_was_reinserted_by_undo):
-                        raise IndexError(
-                            f"Redo delete_char: Text mismatch or invalid position ({y},{x}) for re-deletion. "
-                            f"Expected '{char_that_was_reinserted_by_undo}' at position. Action: {action_to_redo}"
-                        )
-                    self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
-                    self.cursor_y, self.cursor_x = y, x # Cursor stays at the position of deletion
-                    content_or_selection_changed_by_this_redo = True
-                
-                elif action_type == "delete_newline":
-                    # To redo a delete_newline (merge), we re-merge the lines.
-                    # 'text' is the content of the line that was merged up.
-                    # 'position' is (y,x) where cursor ended after original merge.
-                    y_target_line, x_cursor_after_merge = last_action["position"]
-                    # To redo, we expect line y_target_line to exist, and line y_target_line + 1
-                    # (which was re-created by undo) to also exist and match 'text'.
-                    if not (0 <= y_target_line < len(self.text) - 1 and 
-                            self.text[y_target_line + 1] == last_action["text"]):
-                        raise IndexError(f"Redo delete_newline: State mismatch for re-merging at line {y_target_line}. Action: {last_action}")
-
-                    self.text[y_target_line] += self.text.pop(y_target_line + 1)
-                    self.cursor_y, self.cursor_x = y_target_line, x_cursor_after_merge
-                    content_or_selection_changed_by_this_redo = True
-
-                elif action_type == "delete_selection":
-                    # To redo a delete_selection, we re-delete the selection.
-                    # 'start' and 'end' are the normalized coordinates of the original selection.
-                    start_y, start_x = action_to_redo["start"]
-                    end_y, end_x = action_to_redo["end"]
-                    # delete_selected_text_internal updates cursor and self.modified
-                    # It expects normalized coordinates.
-                    deleted_segments_again = self.delete_selected_text_internal(start_y, start_x, end_y, end_x)
-                    # Check if something was actually deleted this time.
-                    if deleted_segments_again or (start_y,start_x) != (end_y,end_x) :
-                        content_or_selection_changed_by_this_redo = True
-                    # Cursor is set by delete_selected_text_internal to (start_y, start_x)
-                
-                elif action_type in ("block_indent", "block_unindent", "comment_block", "uncomment_block"):
-                    # These actions store 'changes': list of {"line_index", "original_text", "new_text"}
-                    # and 'selection_after', 'cursor_after_no_selection' which represent the state
-                    # *after* the original operation was performed.
-                    # To redo, we re-apply the "new_text" for each change and restore "after" states.
-                    changes = action_to_redo.get("changes", [])
-                    if not changes:
-                        logging.warning(f"Redo ({action_type}): No 'changes' data in action. Action: {action_to_redo}")
-
-                    for change_item in changes: # Apply in the original order
-                        idx = change_item["line_index"]
-                        new_line_text = change_item.get("new_text")
-                        if new_line_text is None:
-                             logging.warning(f"Redo ({action_type}): Missing 'new_text' for line {idx}. Skipping.")
-                             continue
-                        if idx < len(self.text):
-                            if self.text[idx] != new_line_text:
-                                self.text[idx] = new_line_text
-                                content_or_selection_changed_by_this_redo = True
-                        else:
-                            logging.warning(f"Redo ({action_type}): Line index {idx} out of bounds. Skipping.")
-                    
-                    selection_state_after_op = action_to_redo.get("selection_after")
-                    cursor_state_no_sel_after_op = action_to_redo.get("cursor_after_no_selection")
-
-                    current_sel_is, current_sel_start, current_sel_end = self.is_selecting, self.selection_start, self.selection_end
-                    current_curs_y, current_curs_x = self.cursor_y, self.cursor_x
-
-                    if selection_state_after_op and isinstance(selection_state_after_op, tuple) and len(selection_state_after_op) == 3:
-                        self.is_selecting, self.selection_start, self.selection_end = selection_state_after_op
-                        if self.is_selecting and self.selection_end:
-                            self.cursor_y, self.cursor_x = self.selection_end
-                    elif cursor_state_no_sel_after_op and isinstance(cursor_state_no_sel_after_op, tuple):
-                        self.is_selecting = False
-                        self.selection_start, self.selection_end = None, None
-                        self.cursor_y, self.cursor_x = cursor_state_no_sel_after_op
-                    else: # Fallback
-                        self.is_selecting = False 
-                        self.selection_start, self.selection_end = None, None
-                    
-                    if (self.is_selecting != current_sel_is or 
-                        self.selection_start != current_sel_start or 
-                        self.selection_end != current_sel_end or
-                        (self.cursor_y, self.cursor_x) != (current_curs_y, current_curs_x) ):
-                        content_or_selection_changed_by_this_redo = True
-                    
-                    if not changes and not content_or_selection_changed_by_this_redo :
-                        pass # No change by this redo
-                    elif not content_or_selection_changed_by_this_redo and changes: # Text didn't change but selection/cursor might have
-                        content_or_selection_changed_by_this_redo = True
-
-
-                else:
-                    logging.warning(f"Redo: Unknown action type '{action_type}'. Cannot redo. Action: {action_to_redo}")
-                    self.undone_actions.append(action_to_redo) # Put it back on undone stack
-                    self._set_status_message(f"Redo failed: Unknown action type '{action_type}'")
-                    return True # Status changed
-
-            except IndexError as e_idx: 
-                logging.error(f"Redo: IndexError during redo of '{action_type}': {e_idx}", exc_info=True)
-                self._set_status_message(f"Redo error for '{action_type}': Index out of bounds or text mismatch.")
-                self.undone_actions.append(action_to_redo) 
-                return True 
-            except Exception as e_redo_general: 
-                logging.exception(f"Redo: Unexpected error during redo of '{action_type}': {e_redo_general}")
-                self._set_status_message(f"Redo error for '{action_type}': {str(e_redo_general)[:60]}...")
-                self.undone_actions.append(action_to_redo)
-                return True 
-
-            # If redo logic completed for a known action type
-            self.action_history.append(action_to_redo) # Move action back to main history
-            
-            # A redo operation always implies the document is modified from its last saved state,
-            # because it's re-applying a change that was previously undone.
-            if content_or_selection_changed_by_this_redo : # If redo actually did something
-                self.modified = True
-            
-            self._ensure_cursor_in_bounds()
-            scroll_changed_by_clamp = self._clamp_scroll_and_check_change(pre_redo_scroll_pos)
-
-            final_redraw_needed = False
-            if (content_or_selection_changed_by_this_redo or
-                tuple(self.text) != pre_redo_text_tuple or 
-                (self.cursor_y, self.cursor_x) != pre_redo_cursor_pos or
-                scroll_changed_by_clamp or
-                (self.is_selecting, self.selection_start, self.selection_end) != pre_redo_selection_state or
-                self.modified != pre_redo_modified_flag):
-                final_redraw_needed = True
-            
-            if final_redraw_needed:
-                self._set_status_message("Action redone")
-                logging.debug(f"Redo successful and state changed for action type '{action_type}'. Redraw needed.")
-            else:
-                if self.status_message == original_status: 
-                    self._set_status_message("Redo: No effective change from current state")
-                logging.debug(f"Redo for action type '{action_type}' resulted in no effective change from current state.")
-            
-            return final_redraw_needed or (self.status_message != original_status)
-        
-
     # auxiliary method
     def _clamp_scroll_and_check_change(self, original_scroll_tuple: Tuple[int, int]) -> bool:
         """
@@ -3579,177 +2235,6 @@ class SwayEditor:
         
         return ((norm_start_y, norm_start_x), (norm_end_y, norm_end_x))
     
-    
-    def insert_text_at_position(self, text: str, row: int, col: int) -> bool: # Added return type bool
-        """
-        Low-level insertion of `text` at the logical position (row, col).
-        DOES NOT add to action history - the caller is responsible for that.
-        Cursor is set immediately after the inserted text.
-        Raises IndexError if row or col is invalid for insertion.
-        Returns True if text was non-empty and thus inserted, False otherwise.
-        """
-        if not text:
-            logging.debug("insert_text_at_position: empty text -> no action, returning False")
-            return False # No change
-
-        # Validate row index
-        if not (0 <= row < len(self.text)):
-            msg = f"insert_text_at_position: invalid row index {row} (buffer size {len(self.text)})"
-            logging.error(msg)
-            raise IndexError(msg)
-
-        current_line_len = len(self.text[row])
-        # Validate and clamp column index for insertion (allows insertion at end of line)
-        if not (0 <= col <= current_line_len):
-            # This case might be an error, but clamping is often a safe recovery.
-            # For strictness, one might raise IndexError here too.
-            logging.warning(f"insert_text_at_position: column {col} out of bounds for line {row} (len {current_line_len}). Clamping.")
-            col = max(0, min(col, current_line_len))
-
-        logging.debug(f"insert_text_at_position: text={text!r} at row={row}, col={col}")
-
-        lines_to_insert = text.split('\n')
-
-        original_line_prefix = self.text[row][:col]
-        original_line_suffix = self.text[row][col:] # "tail" of the original line
-
-        # 1. Replace the current line: prefix + first line of text to insert
-        self.text[row] = original_line_prefix + lines_to_insert[0]
-
-        # 2. Insert intermediate lines (if any)
-        # lines_to_insert[1:-1] - all lines between the first and the last
-        for offset, line_content in enumerate(lines_to_insert[1:-1], start=1):
-            self.text.insert(row + offset, line_content)
-
-        # 3. Add the last line of text to insert + the original line's suffix
-        if len(lines_to_insert) > 1:
-            # Insert as a new line: last inserted line + original tail
-            self.text.insert(row + len(lines_to_insert) - 1, lines_to_insert[-1] + original_line_suffix)
-        else:
-            # Single line insertion - just append the original tail
-            self.text[row] += original_line_suffix
-
-        # 4. Recalculate cursor position
-        if len(lines_to_insert) == 1:
-            # Stayed on the same logical line
-            self.cursor_y = row
-            self.cursor_x = col + len(lines_to_insert[0]) # Length of the inserted text (first/only line)
-        else:
-            # Moved to the last inserted logical line
-            self.cursor_y = row + len(lines_to_insert) - 1
-            self.cursor_x = len(lines_to_insert[-1]) # Length of the last inserted line segment
-
-        self.modified = True
-        logging.debug(f"insert_text_at_position: cursor now at (y={self.cursor_y}, x={self.cursor_x})")
-        return True # Text was inserted
-
-    
-    def insert_text(self, text: str) -> bool:
-        """
-        Main public method for text insertion.
-        Handles active selection by deleting it first (records 'delete_selection' action).
-        Then inserts the new text (records 'insert' action).
-        Manages action history for undo/redo.
-        Cursor is set after the inserted text.
-        Returns True if text was actually inserted or selection was modified/deleted, False otherwise.
-        """
-        if not text: # If inserting an empty string, only selection deletion might occur.
-            if self.is_selecting: # If selection exists, deleting it is a change.
-                logging.debug("insert_text: empty text, but selection exists. Deleting selection.")
-                # Fall through to selection deletion logic.
-            else:
-                logging.debug("insert_text: empty text and no selection, no change.")
-                return False
-
-        made_change_overall = False
-        with self._state_lock:
-            effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
-            original_status = self.status_message # To check if status changes by side effect
-
-            # 1. Handle active selection: delete it first
-            if self.is_selecting:
-                normalized_selection = self._get_normalized_selection_range()
-                if normalized_selection:
-                    norm_start_coords, norm_end_coords = normalized_selection
-                    # The deletion will be the first part of the "insert" operation conceptually
-                    # if text is not empty. If text is empty, this is just a deletion.
-                    
-                    logging.debug(f"insert_text: Deleting active selection from {norm_start_coords} to {norm_end_coords} before insertion.")
-                    
-                    deleted_segments = self.delete_selected_text_internal(
-                        norm_start_coords[0], norm_start_coords[1],
-                        norm_end_coords[0], norm_end_coords[1]
-                    )
-                    
-                    # Record deletion action if something was actually deleted
-                    if deleted_segments or (norm_start_coords != norm_end_coords):
-                        self.action_history.append({
-                            "type": "delete_selection",
-                            "text": deleted_segments,
-                            "start": norm_start_coords,
-                            "end": norm_end_coords,
-                        })
-                        # Do not clear undone_actions here if text insertion will follow,
-                        # as both deletion and insertion are part of one compound user action.
-                        # However, if `text` is empty, this is the only action.
-                        if not text: # If only deleting selection due to empty text insert
-                            self.undone_actions.clear()
-                        
-                        made_change_overall = True # Selection was deleted/modified
-                    
-                    # delete_selected_text_internal should have set the cursor
-                    effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
-
-                    self.is_selecting = False
-                    self.selection_start = None
-                    self.selection_end = None
-                    logging.debug(f"insert_text: Selection processed. Cursor at ({self.cursor_y}, {self.cursor_x}).")
-            
-            # 2. Insert the new text (if any)
-            if text: # Only proceed if there's actual text to insert
-                # Store position before low-level insert for history, relative to after selection deletion
-                insert_pos_for_history = (effective_insert_y, effective_insert_x)
-                
-                # Logging before calling the low-level insertion
-                if 0 <= effective_insert_y < len(self.text):
-                    logging.debug(f"insert_text: About to call low-level insert at ({effective_insert_y},{effective_insert_x}), line[{effective_insert_y}] = {self.text[effective_insert_y]!r}")
-                else: # Should not happen if buffer always has at least one line
-                    logging.debug(f"insert_text: About to call low-level insert at ({effective_insert_y},{effective_insert_x}). Buffer length: {len(self.text)}")
-
-                try:
-                    if self.insert_text_at_position(text, effective_insert_y, effective_insert_x):
-                        made_change_overall = True # Text was inserted by low-level function
-                    # insert_text_at_position sets self.modified = True
-                except IndexError as e:
-                    logging.error(f"insert_text: Error during insert_text_at_position: {e}")
-                    self._set_status_message(f"Insertion error: {e}")
-                    return True # Status changed, so redraw needed
-
-                # Logging after low-level insertion
-                if 0 <= self.cursor_y < len(self.text):
-                    logging.debug(f"insert_text: After low-level insert, line[{self.cursor_y}] = {self.text[self.cursor_y]!r}. Cursor at ({self.cursor_y}, {self.cursor_x}).")
-                else:
-                    logging.debug(f"insert_text: After low-level insert. Cursor at ({self.cursor_y}, {self.cursor_x}). Buffer length: {len(self.text)}")
-
-                # Add "insert" action to history
-                self.action_history.append({
-                    "type": "insert",
-                    "text": text,
-                    "position": insert_pos_for_history 
-                })
-                # If a selection was deleted AND text was inserted, these are part of one logical user operation.
-                # undone_actions should be cleared only once at the end of such a compound operation.
-                self.undone_actions.clear() 
-            
-            if made_change_overall:
-                # Set status message only if no other more specific message (like an error) was set
-                if self.status_message == original_status: 
-                    self._set_status_message("Text inserted" if text else "Selection deleted")
-                logging.debug(f"insert_text: Completed. Text '{text!r}' processed. Final cursor ({self.cursor_y}, {self.cursor_x}).")
-            else: # No change (e.g. inserting empty text with no selection)
-                 logging.debug(f"insert_text: No effective change made for text '{text!r}'.")
-
-        return made_change_overall
 
 
     def delete_text_internal(self, start_row: int, start_col: int, end_row: int, end_col: int) -> None:
@@ -3779,206 +2264,6 @@ class SwayEditor:
 
         self.modified = True # Обновляем статус модификации
 
-
-    def handle_block_indent(self) -> bool:
-        """
-        Increases indentation for all lines within the current selection.
-        Updates selection, cursor, modified status, and action history.
-
-        Returns:
-            bool: True if any lines were indented or if the status message changed,
-                  indicating a redraw is needed. False if no selection was active.
-        """
-        if not self.is_selecting or not self.selection_start or not self.selection_end:
-            self._set_status_message("No selection to indent.")
-            return True # Status message changed
-
-        original_status = self.status_message
-        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
-        original_cursor_tuple = (self.cursor_y, self.cursor_x)
-        
-        made_actual_text_change = False
-
-        with self._state_lock:
-            norm_range = self._get_normalized_selection_range()
-            if not norm_range: 
-                logging.warning("handle_block_indent: Could not get normalized selection range despite active selection.")
-                self._set_status_message("Selection error during indent.")
-                return True 
-
-            start_coords, end_coords = norm_range
-            start_y_idx, start_x_in_line_sel = start_coords 
-            end_y_idx, end_x_in_line_sel = end_coords     
-            
-            tab_size = self.config.get("editor", {}).get("tab_size", 4)
-            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
-            indent_string = " " * tab_size if use_spaces else "\t"
-            indent_char_length = len(indent_string) 
-
-            undo_changes_list: List[Dict[str, Any]] = []
-            indented_line_count = 0
-
-            for current_y in range(start_y_idx, end_y_idx + 1):
-                if current_y >= len(self.text): 
-                    continue
-                
-                original_line_content = self.text[current_y]
-                self.text[current_y] = indent_string + original_line_content
-                
-                undo_changes_list.append({
-                    "line_index": current_y,
-                    "original_text": original_line_content,
-                    "new_text": self.text[current_y]
-                })
-                indented_line_count += 1
-                made_actual_text_change = True
-            
-            if made_actual_text_change:
-                self.modified = True
-                
-                new_selection_start_x = start_x_in_line_sel + indent_char_length
-                new_selection_end_x = end_x_in_line_sel + indent_char_length
-                
-                self.selection_start = (start_y_idx, new_selection_start_x)
-                self.selection_end = (end_y_idx, new_selection_end_x)
-                
-                self.cursor_y, self.cursor_x = self.selection_end 
-
-                self.action_history.append({
-                    "type": "block_indent", 
-                    "changes": undo_changes_list,
-                    "indent_str_used": indent_string, 
-                    "start_y": start_y_idx, 
-                    "end_y": end_y_idx, 
-                    "selection_before": original_selection_tuple[1:], 
-                    "cursor_before_no_selection": None, 
-                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
-                    "cursor_after_no_selection": None
-                })
-                self.undone_actions.clear()
-                self._set_status_message(f"Indented {indented_line_count} line(s)")
-                logging.debug(
-                    f"Block indent: {indented_line_count} lines from {start_y_idx}-{end_y_idx} "
-                    f"indented by '{indent_string}'. New selection: {self.selection_start} -> {self.selection_end}"
-                )
-                return True
-            else:
-                if self.status_message == original_status:
-                     self._set_status_message("No lines selected for indent operation.")
-                return self.status_message != original_status
-        # Default return if somehow lock isn't acquired or other paths missed
-        return False
-    
-
-    def handle_block_unindent(self) -> bool:
-        """
-        Decreases indentation for all lines within the current selection.
-        Updates selection, cursor, modified status, and action history.
-
-        Returns:
-            bool: True if any lines were unindented or if the status message changed,
-                  False otherwise (e.g., no selection or nothing to unindent).
-        """
-        if not self.is_selecting or not self.selection_start or not self.selection_end:
-            self._set_status_message("No selection to unindent.")
-            return True # Status message changed
-
-        original_status = self.status_message
-        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
-        
-        made_actual_text_change = False
-
-        with self._state_lock:
-            norm_range = self._get_normalized_selection_range()
-            if not norm_range:
-                logging.warning("handle_block_unindent: Could not get normalized selection range despite active selection.")
-                self._set_status_message("Selection error during unindent.")
-                return True
-
-            start_coords, end_coords = norm_range
-            start_y_idx, start_x_in_line_sel = start_coords
-            end_y_idx, end_x_in_line_sel = end_coords
-            
-            tab_size = self.config.get("editor", {}).get("tab_size", 4)
-            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
-            # Number of characters to attempt to remove for unindentation
-            unindent_char_count_to_try = tab_size if use_spaces else 1
-            
-            undo_changes_list: List[Dict[str, Any]] = []
-            unindented_line_count = 0
-            
-            # Store characters actually removed per line for accurate cursor/selection adjustment
-            chars_removed_from_sel_start_line = 0
-            chars_removed_from_sel_end_line = 0
-
-            for current_y in range(start_y_idx, end_y_idx + 1):
-                if current_y >= len(self.text):
-                    continue
-
-                original_line_content = self.text[current_y]
-                line_to_modify = self.text[current_y]
-                prefix_that_was_removed = ""
-                
-                if use_spaces:
-                    actual_spaces_to_remove = 0
-                    for i in range(min(len(line_to_modify), unindent_char_count_to_try)):
-                        if line_to_modify[i] == ' ':
-                            actual_spaces_to_remove += 1
-                        else:
-                            break
-                    if actual_spaces_to_remove > 0:
-                        prefix_that_was_removed = line_to_modify[:actual_spaces_to_remove]
-                        self.text[current_y] = line_to_modify[actual_spaces_to_remove:]
-                else: # use_tabs
-                    if line_to_modify.startswith('\t'):
-                        prefix_that_was_removed = '\t'
-                        self.text[current_y] = line_to_modify[1:]
-                
-                if prefix_that_was_removed:
-                    undo_changes_list.append({
-                        "line_index": current_y,
-                        "original_text": original_line_content,
-                        "new_text": self.text[current_y]
-                    })
-                    unindented_line_count += 1
-                    made_actual_text_change = True
-                    if current_y == start_y_idx:
-                        chars_removed_from_sel_start_line = len(prefix_that_was_removed)
-                    if current_y == end_y_idx: # Could be same as start_y_idx
-                        chars_removed_from_sel_end_line = len(prefix_that_was_removed)
-            
-            if made_actual_text_change:
-                self.modified = True
-                
-                new_selection_start_x = max(0, start_x_in_line_sel - chars_removed_from_sel_start_line)
-                new_selection_end_x = max(0, end_x_in_line_sel - chars_removed_from_sel_end_line)
-                
-                self.selection_start = (start_y_idx, new_selection_start_x)
-                self.selection_end = (end_y_idx, new_selection_end_x)
-                
-                self.cursor_y, self.cursor_x = self.selection_end
-
-                self.action_history.append({
-                    "type": "block_unindent", # Specific type for undo/redo
-                    "changes": undo_changes_list,
-                    # "unindent_str_len_map": {y: len_removed for y, len_removed in ...} # Optional, if redo needs it
-                    "start_y": start_y_idx, "end_y": end_y_idx,
-                    "selection_before": original_selection_tuple[1:],
-                    "cursor_before_no_selection": None,
-                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
-                    "cursor_after_no_selection": None
-                })
-                self.undone_actions.clear()
-                self._set_status_message(f"Unindented {unindented_line_count} line(s)")
-                logging.debug(
-                    f"Block unindent: {unindented_line_count} lines from {start_y_idx}-{end_y_idx} unindented. "
-                    f"New selection: {self.selection_start} -> {self.selection_end}"
-                )
-                return True
-            else:
-                if self.status_message == original_status:
-                    self._set_status_message("Nothing to unindent in selection.")
-                return self.status_message != original_status
 
 
     def unindent_current_line(self) -> bool:
@@ -4199,22 +2484,6 @@ class SwayEditor:
         return highlighted_lines_result
 
 
-    def set_initial_cursor_position(self):
-        """Sets the initial cursor position and scrolling offsets."""
-        self.cursor_x = 0
-        self.cursor_y = 0
-        self.scroll_top = 0
-        self.scroll_left = 0
-        # При сбросе позиции курсора, сбрасываем и выделение
-        self.is_selecting = False
-        self.selection_start = None
-        self.selection_end = None
-        self.highlighted_matches = [] # Сбрасываем подсветку поиска
-        self.search_matches = []
-        self.search_term = ""
-        self.current_match_idx = -1
-
-
     def init_colors(self):
         """Создаём цветовые пары curses и заполняем self.colors."""
         if not curses.has_colors():
@@ -4361,90 +2630,166 @@ class SwayEditor:
         return removed
 
 
-    def handle_resize(self):
+    # In class SwayEditor:
+
+    def handle_resize(self) -> bool:
         """
-        Обрабатывает событие изменения размера окна.
-        Вызывается при изменении размера окна терминала.
+        Handles window resize events.
+        Updates editor's understanding of window dimensions and visible lines,
+        adjusts scroll and cursor if necessary, and signals that a redraw is needed.
+        The actual redrawing is handled by the main loop via self.drawer.draw().
         """
         logging.debug("handle_resize called")
+        # original_status = self.status_message # Not strictly needed if we always set a "Resized" status
+
         try:
-            self.height, self.width = self.stdscr.getmaxyx()
-            self._set_status_message(f"Resized to {self.width}x{self.height}")
-            self._draw_buffer()
+            # Get current terminal dimensions directly from curses
+            new_height, new_width = self.stdscr.getmaxyx()
+
+            # Update the editor's internal state related to window size.
+            # self.visible_lines is used by PageUp/PageDown and potentially other logic.
+            # It should be updated here.
+            self.visible_lines = max(1, new_height - 2)  # Assuming 2 lines for status/info bars
+
+            # Update last_window_size. This is primarily used by DrawScreen.draw()
+            # to detect if a full layout recalculation is needed.
+            self.last_window_size = (new_height, new_width)
+
+            # When window width changes, it's often safest to reset horizontal scroll.
+            # Vertical scroll adjustment is handled by _clamp_scroll.
+            self.scroll_left = 0
+            logging.debug(
+                f"Window resized to {new_width}x{new_height}. "
+                f"Visible text lines: {self.visible_lines}. Horizontal scroll reset."
+            )
+
+            # Ensure cursor position is still valid within the text buffer
+            # (though resize itself doesn't change text content).
+            self._ensure_cursor_in_bounds()
+
+            # Adjust scroll (both vertical and horizontal) to ensure
+            # the cursor remains visible after resize. _clamp_scroll handles this.
+            self._clamp_scroll()
+
+            # Set a status message indicating the resize.
+            self._set_status_message(f"Resized to {new_width}x{new_height}")
+
+            # A resize always requires a full redraw.
+            return True
+
         except Exception as e:
+            # Log any error during resize handling
             logging.error(f"Error in handle_resize: {e}", exc_info=True)
+            # Set an error status message
             self._set_status_message("Resize error (see log)")
+            # Still signal a redraw is needed to display the error status.
+            return True
+
+# OLD code
+    # def _draw_buffer(self) -> None:
+    #     """
+    #     Paint visible part of self.text to `stdscr`.
+    #     Handles both vertical (scroll_top) and horizontal (scroll_left) scrolling.
+    #     """
+    #     logging.debug(
+    #         "Drawing buffer: cur=(%s,%s) scroll=(%s,%s)",
+    #         self.cursor_x, self.cursor_y, self.scroll_left, self.scroll_top
+    #     )
+    #     try:
+    #         # ── draw lines ──────────────────────────────────────────────
+    #         for scr_y, line in enumerate(
+    #             self.text[self.scroll_top : self.scroll_top + self.height]
+    #         ):
+    #             # Cut line by horizontal scroll, then clip to window width ‑ 1
+    #             visible = line[self.logical_offset_by_width(line, self.scroll_left) :]
+    #             # soft‑clip by width
+    #             out, w_acc = "", 0
+    #             for ch in visible:
+    #                 w = wcwidth(ch)
+    #                 if w < 0:       # skip control char
+    #                     continue
+    #                 if w_acc + w > self.width - 1:
+    #                     break
+    #                 out += ch
+    #                 w_acc += w
+
+    #             self.stdscr.move(scr_y, 0)
+    #             self.stdscr.clrtoeol()
+    #             self.stdscr.addstr(scr_y, 0, out)
+
+    #         # ── place cursor ───────────────────────────────────────────
+    #         scr_y = self.cursor_y - self.scroll_top
+    #         # width up to logical cursor, then minus horizontal scroll
+    #         scr_x = self.get_display_width(
+    #             self.text[self.cursor_y][: self.cursor_x]
+    #         ) - self.scroll_left
+
+    #         # clamp to window
+    #         scr_y = max(0, min(scr_y, self.height - 1))
+    #         scr_x = max(0, min(scr_x, self.width - 1))
+    #         self.stdscr.move(scr_y, scr_x)
+
+    #     except Exception as exc:
+    #         logging.error("Error in _draw_buffer: %s", exc, exc_info=True)
+    #         self._set_status_message("Draw error (see log)")
 
 
-    def _draw_buffer(self) -> None:
+    # def logical_offset_by_width(self, line: str, cells: int) -> int:
+    #     """
+    #     Return index in *line* such that rendered width == *cells*.
+    #     Используется, когда нужно получить логический индекс
+    #     символа, с которого виден экран после горизонтального скролла.
+    #     """
+    #     acc = 0
+    #     for i, ch in enumerate(line):
+    #         w = wcwidth(ch)
+    #         if w < 0:
+    #             continue
+    #         if acc + w > cells:
+    #             return i
+    #         acc += w
+    #     return len(line)
+
+
+    def get_display_width(self, text: str) -> int:
         """
-        Paint visible part of self.text to `stdscr`.
-        Handles both vertical (scroll_top) and horizontal (scroll_left) scrolling.
+        Return the printable width of *text* in terminal cells.
+
+        * Uses wcwidth / wcswidth to honour full‑width CJK.
+        * Treats non‑printable characters (wcwidth == ‑1) as width 0.
         """
-        logging.debug(
-            "Drawing buffer: cur=(%s,%s) scroll=(%s,%s)",
-            self.cursor_x, self.cursor_y, self.scroll_left, self.scroll_top
-        )
-        try:
-            # ── draw lines ──────────────────────────────────────────────
-            for scr_y, line in enumerate(
-                self.text[self.scroll_top : self.scroll_top + self.height]
-            ):
-                # Cut line by horizontal scroll, then clip to window width ‑ 1
-                visible = line[self.logical_offset_by_width(line, self.scroll_left) :]
-                # soft‑clip by width
-                out, w_acc = "", 0
-                for ch in visible:
-                    w = wcwidth(ch)
-                    if w < 0:       # skip control char
-                        continue
-                    if w_acc + w > self.width - 1:
-                        break
-                    out += ch
-                    w_acc += w
+        # Fast‑path for ASCII
+        if text.isascii():
+            return len(text)
 
-                self.stdscr.move(scr_y, 0)
-                self.stdscr.clrtoeol()
-                self.stdscr.addstr(scr_y, 0, out)
+        width = wcswidth(text)
+        if width < 0:          # Means string contains non‑printables
+            width = 0
+            for ch in text:
+                w = wcwidth(ch)
+                width += max(w, 0)   # non‑printables add 0
+        return width
+    
 
-            # ── place cursor ───────────────────────────────────────────
-            scr_y = self.cursor_y - self.scroll_top
-            # width up to logical cursor, then minus horizontal scroll
-            scr_x = self.get_display_width(
-                self.text[self.cursor_y][: self.cursor_x]
-            ) - self.scroll_left
-
-            # clamp to window
-            scr_y = max(0, min(scr_y, self.height - 1))
-            scr_x = max(0, min(scr_x, self.width - 1))
-            self.stdscr.move(scr_y, scr_x)
-
-        except Exception as exc:
-            logging.error("Error in _draw_buffer: %s", exc, exc_info=True)
-            self._set_status_message("Draw error (see log)")
-
-
-    def logical_offset_by_width(self, line: str, cells: int) -> int:
-        """
-        Return index in *line* such that rendered width == *cells*.
-        Используется, когда нужно получить логический индекс
-        символа, с которого виден экран после горизонтального скролла.
-        """
-        acc = 0
-        for i, ch in enumerate(line):
-            w = wcwidth(ch)
-            if w < 0:
-                continue
-            if acc + w > cells:
-                return i
-            acc += w
-        return len(line)
-
-
-
-    # ===================== Курсор: страничные и домашние клавиши ======================
-
-    # `array up`
+    # ===================== Курсор и его методы ======================
+    # I. Прямое управление позицией курсора (навигация):
+    # handle_up(self)
+    # handle_down(self)
+    # handle_left(self)
+    # handle_right(self)
+    # handle_home(self)
+    # handle_end(self)
+    # handle_page_up(self)
+    # handle_page_down(self)
+    # goto_line(self)
+    # _goto_match(self, match_index: int) (вспомогательный для поиска)
+    # set_initial_cursor_position(self) (сброс позиции)
+    #      
+    # ** Вспомогательные методы для курсора и прокрутки:
+    # _ensure_cursor_in_bounds(self)
+    # _clamp_scroll(self)
+    
+    # 1.`array up`
     def handle_up(self) -> bool:
         """
         Move cursor one line up.
@@ -4487,7 +2832,7 @@ class SwayEditor:
 
         return changed
         
-    # `array down`
+    # 2. `array down`
     def handle_down(self) -> bool:
         """
         Move cursor one line down.
@@ -4527,7 +2872,7 @@ class SwayEditor:
                      changed = True
         return changed
 
-    # `array left (<-) `
+    # 3. `array left (<-) `
     def handle_left(self) -> bool:
         """
         Move cursor one position to the left.
@@ -4571,7 +2916,7 @@ class SwayEditor:
                      changed = True
         return changed
 
-    # `array right (->)`
+    # 4. `array right (->)`
     def handle_right(self) -> bool:
         """
         Move cursor one position to the right.
@@ -4627,80 +2972,7 @@ class SwayEditor:
             self._set_status_message("Cursor error (see log)")
             return True # Assume redraw needed
 
-    # ── Курсор: прокрутка и ограничение ────────────────────────────────
-    def _clamp_scroll(self) -> None:
-        """
-        Гарантирует, что scroll_top и scroll_left
-        всегда удерживают курсор в видимой области.
-        """
-        # размеры окна
-        height, width = self.stdscr.getmaxyx()
-        # область текста по вертикали (высота окна минус строки номера и статус-бара)
-        text_height = max(1, height - 2)
-
-        # Вертикальная прокрутка
-        if self.cursor_y < self.scroll_top:
-            self.scroll_top = self.cursor_y
-        elif self.cursor_y >= self.scroll_top + text_height:
-            self.scroll_top = self.cursor_y - text_height + 1
-
-        # Горизонтальная прокрутка — считаем дисплейную ширину до курсора
-        disp_x = self.get_display_width(self.text[self.cursor_y][: self.cursor_x])
-        if disp_x < self.scroll_left:
-            self.scroll_left = disp_x
-        elif disp_x >= self.scroll_left + width:
-            self.scroll_left = disp_x - width + 1
-
-        # Гарантируем неотрицательные значения
-        self.scroll_top = max(0, self.scroll_top)
-        self.scroll_left = max(0, self.scroll_left)
-
-
-    def get_display_width(self, text: str) -> int:
-        """
-        Return the printable width of *text* in terminal cells.
-
-        * Uses wcwidth / wcswidth to honour full‑width CJK.
-        * Treats non‑printable characters (wcwidth == ‑1) as width 0.
-        """
-        # Fast‑path for ASCII
-        if text.isascii():
-            return len(text)
-
-        width = wcswidth(text)
-        if width < 0:          # Means string contains non‑printables
-            width = 0
-            for ch in text:
-                w = wcwidth(ch)
-                width += max(w, 0)   # non‑printables add 0
-        return width
-
-    def _ensure_cursor_in_bounds(self) -> None:
-        """
-        Clamp `cursor_x` / `cursor_y` so they always reference a valid position
-        inside `self.text`.
-
-        • Если буфер пуст → создаётся пустая строка `[""]`, и курсор ставится в (0, 0).  
-        • `cursor_y` ограничивается диапазоном [0 … len(text)-1].  
-        • `cursor_x` ограничивается диапазоном [0 … len(current_line)].  
-        • После коррекции выводится отладочный лог.
-        """
-        # Пустой буфер – гарантируем хотя бы одну строку
-        if not self.text:
-            self.text.append("")
-
-        max_y = len(self.text) - 1
-        self.cursor_y = max(0, min(self.cursor_y, max_y))
-
-        max_x = len(self.text[self.cursor_y])
-        self.cursor_x = max(0, min(self.cursor_x, max_x))
-
-        logging.debug("Cursor clamped → (%d,%d) [line_len=%d]",
-                    self.cursor_y, self.cursor_x, max_x)
-
-
-    # ────────── Курсор: Home/End , pUp/pDown ──────────
-    # key HOME
+    # 5. key HOME
     def handle_home(self) -> bool:
         """
         Moves the cursor to the beginning of the current line.
@@ -4759,7 +3031,7 @@ class SwayEditor:
 
         return changed_state
 
-    # key END
+    # 6. key END
     def handle_end(self) -> bool:
         """
         Moves the cursor to the end of the current line.
@@ -4804,7 +3076,7 @@ class SwayEditor:
             
         return changed_state
 
-    # key page-up
+    # 7. key page-up
     def handle_page_up(self) -> bool:
         """
         Moves the cursor and view up by approximately one screen height of text.
@@ -4890,7 +3162,7 @@ class SwayEditor:
             
         return changed_state
     
-    # key page-down
+    # 8. key page-down
     def handle_page_down(self) -> bool:
         """
         Moves the cursor and view down by approximately one screen height of text.
@@ -4953,7 +3225,293 @@ class SwayEditor:
             
         return changed_state
 
+
+    # 9. -- GOTO LINE ------------------------------
+    def goto_line(self) -> bool:
+        """
+        Moves the cursor to a specified line number. Supports absolute numbers,
+        relative numbers (+N, -N), and percentages (N%).
+        Returns True if the cursor, scroll position, or status message changed, 
+        False otherwise (e.g., invalid input but status didn't change from original).
+        """
+        original_status = self.status_message
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_top = self.scroll_top
+        
+        # The prompt itself will temporarily change the status bar.
+        # We need to capture the status *after* the prompt to see if the prompt interaction
+        # itself should be considered the "final" status change for this operation if parsing fails.
+        prompt_text = f"Go to line (1-{len(self.text)}, ±N, %): "
+        raw_input_str = self.prompt(prompt_text)
+        
+        status_after_prompt = self.status_message # Status might have been restored by prompt's finally block
+
+        if not raw_input_str: # User cancelled the prompt (e.g., pressed Esc or Enter on empty input)
+            # If the prompt itself set a new status (e.g. "Prompt timeout"), that's a change.
+            # If prompt restored original_status, but user cancelled, set "Goto cancelled".
+            if status_after_prompt == original_status:
+                self._set_status_message("Goto cancelled")
+            # Return True if status message is different from what it was *before* the prompt.
+            return self.status_message != original_status
+
+        target_line_num_one_based: Optional[int] = None
+        total_lines = len(self.text)
+        if total_lines == 0: # Should not happen if self.text always has at least [""]
+            self._set_status_message("Cannot go to line: buffer is empty")
+            return self.status_message != original_status
+
+        try:
+            if raw_input_str.endswith('%'):
+                percentage_str = raw_input_str.rstrip('%')
+                if not percentage_str: # Just '%' was entered
+                    raise ValueError("Percentage value missing.")
+                percentage = float(percentage_str)
+                if not (0 <= percentage <= 100):
+                    self._set_status_message("Percentage out of range (0-100)")
+                    return True # Status changed
+                # Calculate target line (1-based), ensuring it's within [1, total_lines]
+                # round() handles .5 by rounding to the nearest even number in Python 3.
+                # int(val + 0.5) is a common way to round half up for positive numbers.
+                # For percentages, simple rounding is usually fine.
+                target_line_num_one_based = max(1, min(total_lines, round(total_lines * percentage / 100.0)))
+                if target_line_num_one_based == 0 and total_lines > 0 : target_line_num_one_based = 1 # Ensure at least line 1
+                logging.debug(f"Goto: Percentage {percentage}%, target line {target_line_num_one_based}")
+            elif raw_input_str.startswith(('+', '-')):
+                if len(raw_input_str) == 1: # Just '+' or '-' was entered
+                    raise ValueError("Relative offset value missing.")
+                relative_offset = int(raw_input_str)
+                # Current line is 0-based (self.cursor_y), target is 1-based
+                target_line_num_one_based = (self.cursor_y + 1) + relative_offset
+                logging.debug(f"Goto: Relative offset {relative_offset}, from line {self.cursor_y + 1}, target line {target_line_num_one_based}")
+            else:
+                target_line_num_one_based = int(raw_input_str)
+                logging.debug(f"Goto: Absolute target line {target_line_num_one_based}")
+
+            # Validate the calculated target_line_num_one_based
+            if target_line_num_one_based is None: # Should not happen if parsing logic is complete
+                 raise ValueError("Line number could not be determined.")
+            if not (1 <= target_line_num_one_based <= total_lines):
+                self._set_status_message(f"Line number out of range (1–{total_lines})")
+                return True # Status changed
+
+            # Convert 1-based target to 0-based for internal use
+            target_y_zero_based = target_line_num_one_based - 1
+
+            # Only proceed if the target is different from the current line
+            if target_y_zero_based == self.cursor_y and self.cursor_x == min(self.cursor_x, len(self.text[target_y_zero_based])):
+                 # If already on the target line and x is valid for it (or will be clamped to valid)
+                 # No actual cursor line change, but check if x needs clamping or status needs update.
+                 self.cursor_x = min(self.cursor_x, len(self.text[target_y_zero_based])) # Ensure x is valid
+                 self._clamp_scroll() # Ensure scroll is correct for current position
+                 if (self.cursor_y, self.cursor_x) != original_cursor_pos or self.scroll_top != original_scroll_top:
+                     self._set_status_message(f"Moved to line {target_line_num_one_based}, column adjusted")
+                     return True
+                 else:
+                     self._set_status_message(f"Already at line {target_line_num_one_based}")
+                     return self.status_message != original_status
+
+            # Move cursor
+            self.cursor_y = target_y_zero_based
+            # Try to maintain horizontal cursor position, clamped to new line length
+            self.cursor_x = min(original_cursor_pos[1], len(self.text[self.cursor_y])) 
+            
+            self._clamp_scroll() # Adjust scroll to make the new cursor position visible
+
+            # Check if cursor or scroll actually changed
+            if (self.cursor_y, self.cursor_x) != original_cursor_pos or \
+               self.scroll_top != original_scroll_top:
+                self._set_status_message(f"Moved to line {target_line_num_one_based}")
+                return True
+            else:
+                # This case should be rare if logic above for "already at line" is correct.
+                # It means target was same as current, and clamp_scroll did nothing.
+                # However, the prompt was shown.
+                if status_after_prompt != original_status: # If prompt itself set a lasting status
+                    return True 
+                # If prompt restored status, but we set a new one (e.g. "already at line")
+                self._set_status_message(f"At line {target_line_num_one_based} (no change)")
+                return self.status_message != original_status
+
+        except ValueError as ve: # Handles errors from int(), float(), or custom raises
+            logging.warning(f"Goto: Invalid input format '{raw_input_str}': {ve}")
+            self._set_status_message(f"Invalid format: {raw_input_str[:30]}")
+            return True # Status changed due to error message
+        except Exception as e: # Catch any other unexpected errors
+            logging.error(f"Unexpected error in goto_line for input '{raw_input_str}': {e}", exc_info=True)
+            self._set_status_message(f"Goto error: {str(e)[:60]}...")
+            return True # Status changed due to error message
+
+    # 10. вспомогательный для поиска
+    def _goto_match(self, match_index: int) -> None: # Added type hint and English docstring
+        """
+        Moves the cursor and adjusts the scroll view to the search match
+        specified by `match_index`.
+
+        This method assumes `self.search_matches` is populated and `match_index` is valid.
+        It updates `self.cursor_y`, `self.cursor_x`, `self.scroll_top`, and `self.scroll_left`
+        as necessary to make the match visible, ideally near the center of the screen.
+
+        Args:
+            match_index (int): The index of the desired match in `self.search_matches`.
+        """
+        # 1. Validate the match_index and ensure search_matches is populated.
+        if not self.search_matches or not (0 <= match_index < len(self.search_matches)):
+            logging.warning(
+                f"_goto_match called with invalid index {match_index} for "
+                f"{len(self.search_matches)} available matches. No action taken."
+            )
+            return # Invalid index or no matches to go to
+
+        # 2. Get the coordinates of the target match.
+        # search_matches stores tuples: (row_index, column_start_index, column_end_index)
+        target_row, target_col_start, _ = self.search_matches[match_index] # We only need start for cursor
+
+        logging.debug(
+            f"_goto_match: Navigating to match {match_index + 1}/{len(self.search_matches)} "
+            f"at (row:{target_row}, col:{target_col_start})."
+        )
+
+        # 3. Move the logical cursor to the start of the match.
+        # Ensure target_row and target_col_start are valid within the current text buffer.
+        # This is a safeguard; _collect_matches should provide valid indices.
+        if target_row >= len(self.text):
+            logging.error(f"_goto_match: Match row {target_row} is out of bounds for text length {len(self.text)}.")
+            return
+        if target_col_start > len(self.text[target_row]): # Allow being at the end of the line
+            logging.error(f"_goto_match: Match col_start {target_col_start} is out of bounds for line {target_row} (len {len(self.text[target_row])}).")
+            # Optionally clamp target_col_start or return
+            # target_col_start = len(self.text[target_row]) # Clamp to end of line
+            return
+
+        self.cursor_y = target_row
+        self.cursor_x = target_col_start
+        
+        # 4. Adjust scroll to ensure the new cursor position is visible.
+        # self._clamp_scroll() handles both vertical and horizontal scrolling
+        # to bring self.cursor_y and self.cursor_x into view.
+        # It also attempts to center the cursor line if it's far off-screen.
+        
+        # The previous logic for adjusting scroll_top was a simplified centering.
+        # _clamp_scroll provides a more comprehensive adjustment.
+        # Let's review _clamp_scroll's behavior for centering.
+        # Current _clamp_scroll:
+        #   if self.cursor_y < self.scroll_top: self.scroll_top = self.cursor_y
+        #   elif self.cursor_y >= self.scroll_top + text_height: self.scroll_top = self.cursor_y - text_height + 1
+        # This ensures visibility but doesn't explicitly center.
+        # To achieve better centering for _goto_match, we can pre-adjust scroll_top here.
+        
+        if self.visible_lines > 0: # visible_lines should be height - 2 (status/number bars)
+            text_area_height = self.visible_lines
+            
+            # Desired scroll_top to center the cursor_y, or bring it into view if near edges.
+            # Try to place the target line roughly in the middle third of the screen.
+            desired_scroll_top = self.cursor_y - (text_area_height // 3)
+            
+            # Clamp desired_scroll_top to valid range: [0, max_scroll_possible]
+            max_scroll_possible = max(0, len(self.text) - text_area_height)
+            self.scroll_top = max(0, min(desired_scroll_top, max_scroll_possible))
+            
+            logging.debug(f"_goto_match: Tentative scroll_top set to {self.scroll_top} to center line {self.cursor_y}.")
+        
+        # Now, call _clamp_scroll() to finalize both vertical and horizontal scroll based on
+        # the new cursor_y, cursor_x, and the tentative scroll_top.
+        # _clamp_scroll will also handle horizontal scrolling for cursor_x.
+        self._clamp_scroll() 
+        
+        logging.debug(
+            f"_goto_match: Final state after _clamp_scroll: "
+            f"Cursor=({self.cursor_y},{self.cursor_x}), Scroll=({self.scroll_top},{self.scroll_left})"
+        )
+        # This method modifies editor state (cursor, scroll) but does not directly
+        # return a bool for redraw; the caller (find_prompt or find_next) handles that.
+
+    # 11. сброс позиции
+    def set_initial_cursor_position(self):
+        """Sets the initial cursor position and scrolling offsets."""
+        self.cursor_x = 0
+        self.cursor_y = 0
+        self.scroll_top = 0
+        self.scroll_left = 0
+        # При сбросе позиции курсора, сбрасываем и выделение
+        self.is_selecting = False
+        self.selection_start = None
+        self.selection_end = None
+        self.highlighted_matches = [] # Сбрасываем подсветку поиска
+        self.search_matches = []
+        self.search_term = ""
+        self.current_match_idx = -1
+
+    # Вспомогательные методы для курсора и прокрутки:
+    # 12. ── Курсор: прокрутка и ограничение ────────────────────────────────
+    def _clamp_scroll(self) -> None:
+        """
+        Гарантирует, что scroll_top и scroll_left
+        всегда удерживают курсор в видимой области.
+        """
+        # размеры окна
+        height, width = self.stdscr.getmaxyx()
+        # область текста по вертикали (высота окна минус строки номера и статус-бара)
+        text_height = max(1, height - 2)
+
+        # Вертикальная прокрутка
+        if self.cursor_y < self.scroll_top:
+            self.scroll_top = self.cursor_y
+        elif self.cursor_y >= self.scroll_top + text_height:
+            self.scroll_top = self.cursor_y - text_height + 1
+
+        # Горизонтальная прокрутка — считаем дисплейную ширину до курсора
+        disp_x = self.get_display_width(self.text[self.cursor_y][: self.cursor_x])
+        if disp_x < self.scroll_left:
+            self.scroll_left = disp_x
+        elif disp_x >= self.scroll_left + width:
+            self.scroll_left = disp_x - width + 1
+
+        # Гарантируем неотрицательные значения
+        self.scroll_top = max(0, self.scroll_top)
+        self.scroll_left = max(0, self.scroll_left)
+    
+    # 13. Вспомогательный метод
+    def _ensure_cursor_in_bounds(self) -> None:
+        """
+        Clamp `cursor_x` / `cursor_y` so they always reference a valid position
+        inside `self.text`.
+
+        • Если буфер пуст → создаётся пустая строка `[""]`, и курсор ставится в (0, 0).  
+        • `cursor_y` ограничивается диапазоном [0 … len(text)-1].  
+        • `cursor_x` ограничивается диапазоном [0 … len(current_line)].  
+        • После коррекции выводится отладочный лог.
+        """
+        # Пустой буфер – гарантируем хотя бы одну строку
+        if not self.text:
+            self.text.append("")
+
+        max_y = len(self.text) - 1
+        self.cursor_y = max(0, min(self.cursor_y, max_y))
+
+        max_x = len(self.text[self.cursor_y])
+        self.cursor_x = max(0, min(self.cursor_x, max_x))
+
+        logging.debug("Cursor clamped → (%d,%d) [line_len=%d]",
+                    self.cursor_y, self.cursor_x, max_x)
+
+
+    # II. Изменение текста, влияющее на курсор:
+    # handle_backspace(self)
+    # handle_delete(self)
+    # handle_tab(self) (через insert_text)
+    # handle_smart_tab(self) (через insert_text или handle_block_indent)
+    # handle_enter(self) (через insert_text)
+    # insert_text(self, text: str) (основной метод вставки)
+    # insert_text_at_position(self, text: str, row: int, col: int) (низкоуровневая вставка)
+    # delete_selected_text_internal(self, start_y: int, start_x: int, end_y: int, end_x: int) (низкоуровневое удаление)
+    # paste(self) (включает удаление выделения и вставку)
+    # cut(self) (включает удаление выделения)
+    # search_and_replace(self) (сбрасывает курсор)
+    # undo(self) / redo(self) (восстанавливают позицию курсора)
+
+
     # ── Курсор: Backspace и Delete ────────────────────────────────────────
+    # 1. key Backspace
     def handle_backspace(self) -> bool:
         """
         Handles the Backspace key.
@@ -5091,7 +3649,7 @@ class SwayEditor:
             
             return False # No perceivable change that warrants a redraw
 
-
+    # 2. key Delete ----------------
     def handle_delete(self) -> bool:
         """
         Deletes the character under the cursor or the selected text.
@@ -5218,110 +3776,7 @@ class SwayEditor:
             return False # No perceivable change that warrants a redraw
 
 
-    def delete_selected_text_internal(self, start_y: int, start_x: int, end_y: int, end_x: int) -> list[str]:
-        """
-        Low-level method: deletes text between normalized (start_y, start_x) and (end_y, end_x).
-        Returns the deleted text as a list of strings (segments).
-        Sets the cursor to (start_y, start_x).
-        DOES NOT record an action in history. Sets self.modified = True.
-        Assumes coordinates are normalized (start_y, start_x) <= (end_y, end_x).
-        """
-        logging.debug(f"delete_selected_text_internal: Deleting from ({start_y},{start_x}) to ({end_y},{end_x})")
-        
-        # Basic coordinate validation
-        # Ensure start_y and end_y are within the bounds of self.text
-        if not (0 <= start_y < len(self.text) and 0 <= end_y < len(self.text)):
-            logging.error(
-                f"delete_selected_text_internal: Invalid row indices for deletion: "
-                f"start_y={start_y}, end_y={end_y} with text length {len(self.text)}"
-            )
-            return [] # Return empty if rows are out of bounds
-
-        # Ensure start_x and end_x are within the bounds of their respective lines
-        if not (0 <= start_x <= len(self.text[start_y]) and 0 <= end_x <= len(self.text[end_y])):
-            logging.error(
-                f"delete_selected_text_internal: Invalid column indices for deletion: "
-                f"start_x={start_x} (line len {len(self.text[start_y])}), "
-                f"end_x={end_x} (line len {len(self.text[end_y])})"
-            )
-            # Decide on recovery: clamp, return error, or rely on caller normalization.
-            # For an internal method, usually expect valid inputs or raise error.
-            # Given it's low-level, returning empty on bad input is safer than crashing.
-            return []
-
-
-        deleted_segments = []
-
-        if start_y == end_y:
-            # Deletion within a single line
-            line_content = self.text[start_y]
-            # Ensure start_x and end_x are ordered for slicing, though normalization should handle this
-            actual_start_x = min(start_x, end_x)
-            actual_end_x = max(start_x, end_x)
-            
-            # Ensure slice indices are valid for the line
-            actual_start_x = min(actual_start_x, len(line_content))
-            actual_end_x = min(actual_end_x, len(line_content))
-
-            if actual_start_x < actual_end_x: # Only if there's something to delete
-                deleted_segments.append(line_content[actual_start_x:actual_end_x])
-                self.text[start_y] = line_content[:actual_start_x] + line_content[actual_end_x:]
-            else:
-                logging.debug("delete_selected_text_internal: Single line selection, but start_x >= end_x. No characters deleted.")
-        else:
-            # Multi-line deletion
-
-            # Part from the first line (start_y)
-            line_start_content = self.text[start_y]
-            # Ensure start_x is within bounds
-            actual_start_x_on_first_line = min(start_x, len(line_start_content))
-            deleted_segments.append(line_start_content[actual_start_x_on_first_line:])
-            
-            remaining_prefix_on_start_line = line_start_content[:actual_start_x_on_first_line]
-
-            # Full lines between start_y and end_y (exclusive of start_y, exclusive of end_y)
-            if end_y > start_y + 1:
-                # Add all lines from start_y + 1 up to (but not including) end_y
-                deleted_segments.extend(self.text[start_y + 1 : end_y]) 
-            
-            # Part from the last line (end_y)
-            line_end_content = self.text[end_y]
-            # Ensure end_x is within bounds
-            actual_end_x_on_last_line = min(end_x, len(line_end_content))
-            deleted_segments.append(line_end_content[:actual_end_x_on_last_line])
-            
-            remaining_suffix_on_end_line = line_end_content[actual_end_x_on_last_line:]
-
-            # Update the text buffer:
-            # The first line of the selection becomes the prefix + suffix
-            self.text[start_y] = remaining_prefix_on_start_line + remaining_suffix_on_end_line
-            
-            # Delete the lines that were fully consumed or merged
-            # These are lines from (start_y + 1) up to and including end_y
-            # Example: delete from (0,5) to (2,5)
-            #   line 0: prefix + suffix_of_line_2
-            #   delete lines: 1 (original index), 2 (original index)
-            #   In terms of current list indices after line 0 is modified:
-            #   delete self.text[start_y + 1] through self.text[end_y - (start_y + 1) + (start_y + 1)]
-            #   which is self.text[start_y + 1 : end_y + 1] (relative to original indices)
-            del self.text[start_y + 1 : end_y + 1] # Python slice end is exclusive
-        
-        # Set cursor to the beginning of the deleted (normalized) selection
-        self.cursor_y = start_y
-        self.cursor_x = start_x # Logical start_x of the selection on the new combined line
-        
-        self.modified = True # Mark buffer as modified
-        
-        if not deleted_segments and start_y == end_y and start_x == end_x:
-             logging.debug(f"delete_selected_text_internal: No actual characters deleted (empty selection at a point). Cursor at ({self.cursor_y},{self.cursor_x}).")
-        else:
-             logging.debug(
-                f"delete_selected_text_internal: Deletion complete. Cursor at ({self.cursor_y},{self.cursor_x}). "
-                f"Deleted segments count: {len(deleted_segments)}. First segment preview: '{deleted_segments[0][:50] if deleted_segments else ""}'"
-             )
-        return deleted_segments
-
-    # ── Курсор: smart tab ─────────────────────────────────────────────
+    # 3. ---- Курсор: smart tab ---------
     def handle_smart_tab(self) -> bool:
         """
         Handles smart tabbing behavior.
@@ -5369,7 +3824,7 @@ class SwayEditor:
         # insert_text handles history, self.modified, and returns True if text was inserted.
         return self.insert_text(text_to_insert)
     
-    # для key TAB вспомогательный метод
+    # 4. для key TAB вспомогательный метод ---------------------------------
     def handle_tab(self) -> bool:
         """
         Inserts standard tab characters (spaces or a tab char) at the current cursor position.
@@ -5387,6 +3842,2042 @@ class SwayEditor:
 
         # self.insert_text handles active selection, history, and returns True if changes were made.
         return self.insert_text(text_to_insert_val)
+
+    # 5. key Enter ---------------
+    def handle_enter(self) -> bool:
+        """
+        Handles the Enter key.
+        If text is selected, it's deleted by insert_text first. 
+        Then a newline character is inserted.
+        Manages action history via the insert_text method.
+        Returns True as these actions (deletion of selection or insertion of newline) 
+        always change the text content or selection state.
+        """
+        changed_state = False
+        with self._state_lock:
+            # self.insert_text will handle:
+            # 1. Deleting selection if active (and recording "delete_selection" action).
+            # 2. Inserting the newline character (and recording "insert" action).
+            # 3. Returning True if any modification occurred.
+            if self.insert_text("\n"):
+                changed_state = True
+            
+        if changed_state:
+            logging.debug("Handled Enter key: Text or selection modified.")
+        else:
+            # This case should ideally not be reached if insert_text correctly inserts a newline
+            # or if a selection was present (which would be cleared).
+            logging.debug("Handled Enter key: No effective change (unexpected for Enter).")
+            
+        return changed_state # Should always be True due to newline insertion
+    
+    # 6. Insert text at position -----------------------------------------------------------
+    def insert_text_at_position(self, text: str, row: int, col: int) -> bool: # Added return type bool
+        """
+        Low-level insertion of `text` at the logical position (row, col).
+        DOES NOT add to action history - the caller is responsible for that.
+        Cursor is set immediately after the inserted text.
+        Raises IndexError if row or col is invalid for insertion.
+        Returns True if text was non-empty and thus inserted, False otherwise.
+        """
+        if not text:
+            logging.debug("insert_text_at_position: empty text -> no action, returning False")
+            return False # No change
+
+        # Validate row index
+        if not (0 <= row < len(self.text)):
+            msg = f"insert_text_at_position: invalid row index {row} (buffer size {len(self.text)})"
+            logging.error(msg)
+            raise IndexError(msg)
+
+        current_line_len = len(self.text[row])
+        # Validate and clamp column index for insertion (allows insertion at end of line)
+        if not (0 <= col <= current_line_len):
+            # This case might be an error, but clamping is often a safe recovery.
+            # For strictness, one might raise IndexError here too.
+            logging.warning(f"insert_text_at_position: column {col} out of bounds for line {row} (len {current_line_len}). Clamping.")
+            col = max(0, min(col, current_line_len))
+
+        logging.debug(f"insert_text_at_position: text={text!r} at row={row}, col={col}")
+
+        lines_to_insert = text.split('\n')
+
+        original_line_prefix = self.text[row][:col]
+        original_line_suffix = self.text[row][col:] # "tail" of the original line
+
+        # 1. Replace the current line: prefix + first line of text to insert
+        self.text[row] = original_line_prefix + lines_to_insert[0]
+
+        # 2. Insert intermediate lines (if any)
+        # lines_to_insert[1:-1] - all lines between the first and the last
+        for offset, line_content in enumerate(lines_to_insert[1:-1], start=1):
+            self.text.insert(row + offset, line_content)
+
+        # 3. Add the last line of text to insert + the original line's suffix
+        if len(lines_to_insert) > 1:
+            # Insert as a new line: last inserted line + original tail
+            self.text.insert(row + len(lines_to_insert) - 1, lines_to_insert[-1] + original_line_suffix)
+        else:
+            # Single line insertion - just append the original tail
+            self.text[row] += original_line_suffix
+
+        # 4. Recalculate cursor position
+        if len(lines_to_insert) == 1:
+            # Stayed on the same logical line
+            self.cursor_y = row
+            self.cursor_x = col + len(lines_to_insert[0]) # Length of the inserted text (first/only line)
+        else:
+            # Moved to the last inserted logical line
+            self.cursor_y = row + len(lines_to_insert) - 1
+            self.cursor_x = len(lines_to_insert[-1]) # Length of the last inserted line segment
+
+        self.modified = True
+        logging.debug(f"insert_text_at_position: cursor now at (y={self.cursor_y}, x={self.cursor_x})")
+        return True # Text was inserted
+
+    # 7. Main Insert Text ----------------------------------------------
+    def insert_text(self, text: str) -> bool:
+        """
+        Main public method for text insertion.
+        Handles active selection by deleting it first (records 'delete_selection' action).
+        Then inserts the new text (records 'insert' action).
+        Manages action history for undo/redo.
+        Cursor is set after the inserted text.
+        Returns True if text was actually inserted or selection was modified/deleted, False otherwise.
+        """
+        if not text: # If inserting an empty string, only selection deletion might occur.
+            if self.is_selecting: # If selection exists, deleting it is a change.
+                logging.debug("insert_text: empty text, but selection exists. Deleting selection.")
+                # Fall through to selection deletion logic.
+            else:
+                logging.debug("insert_text: empty text and no selection, no change.")
+                return False
+
+        made_change_overall = False
+        with self._state_lock:
+            effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
+            original_status = self.status_message # To check if status changes by side effect
+
+            # 1. Handle active selection: delete it first
+            if self.is_selecting:
+                normalized_selection = self._get_normalized_selection_range()
+                if normalized_selection:
+                    norm_start_coords, norm_end_coords = normalized_selection
+                    # The deletion will be the first part of the "insert" operation conceptually
+                    # if text is not empty. If text is empty, this is just a deletion.
+                    
+                    logging.debug(f"insert_text: Deleting active selection from {norm_start_coords} to {norm_end_coords} before insertion.")
+                    
+                    deleted_segments = self.delete_selected_text_internal(
+                        norm_start_coords[0], norm_start_coords[1],
+                        norm_end_coords[0], norm_end_coords[1]
+                    )
+                    
+                    # Record deletion action if something was actually deleted
+                    if deleted_segments or (norm_start_coords != norm_end_coords):
+                        self.action_history.append({
+                            "type": "delete_selection",
+                            "text": deleted_segments,
+                            "start": norm_start_coords,
+                            "end": norm_end_coords,
+                        })
+                        # Do not clear undone_actions here if text insertion will follow,
+                        # as both deletion and insertion are part of one compound user action.
+                        # However, if `text` is empty, this is the only action.
+                        if not text: # If only deleting selection due to empty text insert
+                            self.undone_actions.clear()
+                        
+                        made_change_overall = True # Selection was deleted/modified
+                    
+                    # delete_selected_text_internal should have set the cursor
+                    effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
+
+                    self.is_selecting = False
+                    self.selection_start = None
+                    self.selection_end = None
+                    logging.debug(f"insert_text: Selection processed. Cursor at ({self.cursor_y}, {self.cursor_x}).")
+            
+            # 2. Insert the new text (if any)
+            if text: # Only proceed if there's actual text to insert
+                # Store position before low-level insert for history, relative to after selection deletion
+                insert_pos_for_history = (effective_insert_y, effective_insert_x)
+                
+                # Logging before calling the low-level insertion
+                if 0 <= effective_insert_y < len(self.text):
+                    logging.debug(f"insert_text: About to call low-level insert at ({effective_insert_y},{effective_insert_x}), line[{effective_insert_y}] = {self.text[effective_insert_y]!r}")
+                else: # Should not happen if buffer always has at least one line
+                    logging.debug(f"insert_text: About to call low-level insert at ({effective_insert_y},{effective_insert_x}). Buffer length: {len(self.text)}")
+
+                try:
+                    if self.insert_text_at_position(text, effective_insert_y, effective_insert_x):
+                        made_change_overall = True # Text was inserted by low-level function
+                    # insert_text_at_position sets self.modified = True
+                except IndexError as e:
+                    logging.error(f"insert_text: Error during insert_text_at_position: {e}")
+                    self._set_status_message(f"Insertion error: {e}")
+                    return True # Status changed, so redraw needed
+
+                # Logging after low-level insertion
+                if 0 <= self.cursor_y < len(self.text):
+                    logging.debug(f"insert_text: After low-level insert, line[{self.cursor_y}] = {self.text[self.cursor_y]!r}. Cursor at ({self.cursor_y}, {self.cursor_x}).")
+                else:
+                    logging.debug(f"insert_text: After low-level insert. Cursor at ({self.cursor_y}, {self.cursor_x}). Buffer length: {len(self.text)}")
+
+                # Add "insert" action to history
+                self.action_history.append({
+                    "type": "insert",
+                    "text": text,
+                    "position": insert_pos_for_history 
+                })
+                # If a selection was deleted AND text was inserted, these are part of one logical user operation.
+                # undone_actions should be cleared only once at the end of such a compound operation.
+                self.undone_actions.clear() 
+            
+            if made_change_overall:
+                # Set status message only if no other more specific message (like an error) was set
+                if self.status_message == original_status: 
+                    self._set_status_message("Text inserted" if text else "Selection deleted")
+                logging.debug(f"insert_text: Completed. Text '{text!r}' processed. Final cursor ({self.cursor_y}, {self.cursor_x}).")
+            else: # No change (e.g. inserting empty text with no selection)
+                 logging.debug(f"insert_text: No effective change made for text '{text!r}'.")
+
+        return made_change_overall
+
+    # 8. Delete selected text ---------------------------------------------------------------
+    def delete_selected_text_internal(self, start_y: int, start_x: int, end_y: int, end_x: int) -> list[str]:
+        """
+        Low-level method: deletes text between normalized (start_y, start_x) and (end_y, end_x).
+        Returns the deleted text as a list of strings (segments).
+        Sets the cursor to (start_y, start_x).
+        DOES NOT record an action in history. Sets self.modified = True.
+        Assumes coordinates are normalized (start_y, start_x) <= (end_y, end_x).
+        """
+        logging.debug(f"delete_selected_text_internal: Deleting from ({start_y},{start_x}) to ({end_y},{end_x})")
+        
+        # Basic coordinate validation
+        # Ensure start_y and end_y are within the bounds of self.text
+        if not (0 <= start_y < len(self.text) and 0 <= end_y < len(self.text)):
+            logging.error(
+                f"delete_selected_text_internal: Invalid row indices for deletion: "
+                f"start_y={start_y}, end_y={end_y} with text length {len(self.text)}"
+            )
+            return [] # Return empty if rows are out of bounds
+
+        # Ensure start_x and end_x are within the bounds of their respective lines
+        if not (0 <= start_x <= len(self.text[start_y]) and 0 <= end_x <= len(self.text[end_y])):
+            logging.error(
+                f"delete_selected_text_internal: Invalid column indices for deletion: "
+                f"start_x={start_x} (line len {len(self.text[start_y])}), "
+                f"end_x={end_x} (line len {len(self.text[end_y])})"
+            )
+            return []
+
+        deleted_segments = []
+        if start_y == end_y:
+            # Deletion within a single line
+            line_content = self.text[start_y]
+            actual_start_x = min(start_x, end_x)
+            actual_end_x = max(start_x, end_x)
+            
+            actual_start_x = min(actual_start_x, len(line_content))
+            actual_end_x = min(actual_end_x, len(line_content))
+
+            if actual_start_x < actual_end_x: 
+                deleted_segments.append(line_content[actual_start_x:actual_end_x])
+                self.text[start_y] = line_content[:actual_start_x] + line_content[actual_end_x:]
+            else:
+                logging.debug("delete_selected_text_internal: Single line selection, but start_x >= end_x. No characters deleted.")
+        else:
+            # Multi-line deletion
+            line_start_content = self.text[start_y]
+            actual_start_x_on_first_line = min(start_x, len(line_start_content))
+            deleted_segments.append(line_start_content[actual_start_x_on_first_line:])
+            
+            remaining_prefix_on_start_line = line_start_content[:actual_start_x_on_first_line]
+
+            if end_y > start_y + 1:
+                deleted_segments.extend(self.text[start_y + 1 : end_y]) 
+            
+            line_end_content = self.text[end_y]
+            actual_end_x_on_last_line = min(end_x, len(line_end_content))
+            deleted_segments.append(line_end_content[:actual_end_x_on_last_line])
+            
+            remaining_suffix_on_end_line = line_end_content[actual_end_x_on_last_line:]
+
+            self.text[start_y] = remaining_prefix_on_start_line + remaining_suffix_on_end_line
+            del self.text[start_y + 1 : end_y + 1] 
+        
+        self.cursor_y = start_y
+        self.cursor_x = start_x 
+        
+        self.modified = True 
+        
+        if not deleted_segments and start_y == end_y and start_x == end_x:
+             logging.debug(f"delete_selected_text_internal: No actual characters deleted (empty selection at a point). Cursor at ({self.cursor_y},{self.cursor_x}).")
+        else:
+             logging.debug(
+                f"delete_selected_text_internal: Deletion complete. Cursor at ({self.cursor_y},{self.cursor_x}). "
+                f"Deleted segments count: {len(deleted_segments)}. First segment preview: '{deleted_segments[0][:50] if deleted_segments else ""}'"
+             )
+        return deleted_segments
+
+    # 9. Paste ---------------
+    def paste(self) -> bool:
+        """
+        Pastes text from the clipboard at the current cursor position.
+        If text is selected, the selected text is replaced by the clipboard content.
+        Manages action history for the entire paste operation (which might include
+        a deletion and an insertion as a single logical step for undo).
+
+        Returns:
+            bool: True if the text, selection, cursor, scroll, or status message changed, 
+                  False otherwise.
+        """
+        with self._state_lock:
+            # Store initial state for comparison
+            original_text_tuple = tuple(self.text)
+            original_cursor_pos = (self.cursor_y, self.cursor_x)
+            original_scroll_pos = (self.scroll_top, self.scroll_left)
+            original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
+            original_modified_flag = self.modified
+            original_status = self.status_message
+            
+            made_change_to_content = False # Tracks if text content or buffer structure actually changed
+
+            text_to_paste = self.internal_clipboard 
+            source_of_paste = "internal" 
+
+            if self.use_system_clipboard and self.pyclip_available:
+                try:
+                    system_clipboard_text = pyperclip.paste()
+                    if system_clipboard_text: 
+                        text_to_paste = system_clipboard_text
+                        source_of_paste = "system"
+                        logging.debug(f"Pasting {len(text_to_paste)} chars from system clipboard.")
+                    else:
+                        logging.debug("System clipboard is empty, using internal clipboard content.")
+                except pyperclip.PyperclipException as e:
+                    logging.error(f"System clipboard error on paste: {e} – using internal clipboard.")
+                except Exception as e: 
+                    logging.exception(f"Unexpected clipboard error on paste: {e} – using internal clipboard.")
+
+            if not text_to_paste:
+                self._set_status_message("Clipboard is empty")
+                # Return True if status changed (it did), or if selection was active and might be implicitly cleared by some UIs
+                return self.status_message != original_status 
+
+            # Normalize line endings from clipboard
+            text_to_paste = text_to_paste.replace("\r\n", "\n").replace("\r", "\n")
+            
+            # Determine actual insertion point, which might change if selection is deleted
+            effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
+
+            # --- Start of compound action for undo history ---
+            # We will group deletion (if any) and insertion into a sequence
+            # that should ideally be undone/redone together.
+            # A more advanced undo system might use "compound actions".
+            # For now, we add them sequentially, and `undone_actions.clear()` after the sequence.
+
+            # 1. Handle active selection: delete it first
+            if self.is_selecting:
+                normalized_selection = self._get_normalized_selection_range()
+                if normalized_selection:
+                    norm_start_coords, norm_end_coords = normalized_selection
+                    
+                    logging.debug(f"paste: Deleting active selection from {norm_start_coords} to {norm_end_coords} before pasting.")
+                    
+                    deleted_segments = self.delete_selected_text_internal(
+                        norm_start_coords[0], norm_start_coords[1],
+                        norm_end_coords[0], norm_end_coords[1]
+                    )
+                    
+                    # Record deletion action if something was actually deleted
+                    if deleted_segments or (norm_start_coords != norm_end_coords):
+                        self.action_history.append({
+                            "type": "delete_selection", 
+                            "text": deleted_segments,
+                            "start": norm_start_coords, 
+                            "end": norm_end_coords,     
+                        })
+                        # Don't clear undone_actions yet, as insertion is part of this user action
+                        made_change_to_content = True
+                    
+                    # delete_selected_text_internal sets the cursor to norm_start_coords
+                    effective_insert_y, effective_insert_x = self.cursor_y, self.cursor_x
+                    
+                    self.is_selecting = False # Selection is now gone
+                    self.selection_start = None
+                    self.selection_end = None
+            
+            # 2. Insert the text from clipboard at the effective position
+            # Store position before low-level insert for this part of the history
+            insert_pos_for_history = (effective_insert_y, effective_insert_x)
+
+            try:
+                # Use the low-level insert_text_at_position directly
+                if self.insert_text_at_position(text_to_paste, effective_insert_y, effective_insert_x):
+                    made_change_to_content = True # Text was inserted
+                # insert_text_at_position sets self.modified = True and updates cursor
+            except IndexError as e:
+                logging.error(f"paste: Error during insert_text_at_position: {e}")
+                self._set_status_message(f"Paste insertion error: {e}")
+                # If deletion happened, action_history already has it.
+                # If insertion failed, the state might be after deletion but before successful paste.
+                # We need to decide if we should attempt to undo the deletion part or leave as is.
+                # For now, just report error.
+                return True # Status changed
+
+            # Add "insert" action to history for the pasted text
+            self.action_history.append({
+                "type": "insert",
+                "text": text_to_paste,
+                "position": insert_pos_for_history 
+            })
+            
+            # Now that the compound paste operation (delete + insert) is complete, clear redo stack.
+            if made_change_to_content:
+                self.undone_actions.clear()
+            
+            # Final status message
+            if made_change_to_content:
+                self._set_status_message(f"Pasted from {source_of_paste} clipboard")
+            elif self.status_message == original_status: # No content change, status not set by error
+                self._set_status_message("Paste: No effective change (e.g., pasting empty over empty)")
+            
+            # Ensure cursor and scroll are valid
+            if made_change_to_content:
+                self._ensure_cursor_in_bounds()
+                self._clamp_scroll()
+
+            # Determine if a redraw is needed by comparing overall state
+            if (made_change_to_content or
+                (self.cursor_y, self.cursor_x) != original_cursor_pos or
+                (self.scroll_top, self.scroll_left) != original_scroll_pos or
+                (self.is_selecting, self.selection_start, self.selection_end) != original_selection_state or
+                self.modified != original_modified_flag or
+                self.status_message != original_status):
+                return True
+            
+            return False
+
+    # 10. Cut -----------
+    def cut(self) -> bool:
+        """
+        Cuts the selected text to the internal and (if enabled) system clipboard.
+        The selected text is removed from the document.
+        Manages action history for the deletion.
+
+        Returns:
+            bool: True if the text, selection, cursor, scroll, or status message changed,
+                  False otherwise (e.g., if trying to cut with no selection and status didn't change).
+        """
+        with self._state_lock:
+            # Store initial state for comparison
+            original_text_tuple = tuple(self.text)
+            original_cursor_pos = (self.cursor_y, self.cursor_x)
+            original_scroll_pos = (self.scroll_top, self.scroll_left)
+            original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
+            original_modified_flag = self.modified
+            original_status = self.status_message
+            
+            action_made_change_to_content = False # Tracks if text content actually changed
+
+            if not self.is_selecting:
+                self._set_status_message("Nothing to cut (no selection)")
+                return self.status_message != original_status # Redraw if status message changed
+
+            # Selection exists, proceed with cutting
+            normalized_range = self._get_normalized_selection_range()
+            if not normalized_range: # Should ideally not happen if self.is_selecting is True
+                logging.warning("cut: is_selecting=True, but no valid normalized range.")
+                self.is_selecting = False # Attempt to recover
+                self.selection_start = None
+                self.selection_end = None
+                self._set_status_message("Cut error: Invalid selection state")
+                return True # Status changed
+
+            norm_start_coords, norm_end_coords = normalized_range
+            
+            # delete_selected_text_internal sets self.modified and new cursor position
+            deleted_text_segments = self.delete_selected_text_internal(
+                norm_start_coords[0], norm_start_coords[1],
+                norm_end_coords[0], norm_end_coords[1]
+            )
+
+            # Check if anything was actually deleted
+            if not deleted_text_segments and norm_start_coords == norm_end_coords:
+                # This means the selection was effectively a point (start == end)
+                self._set_status_message("Nothing to cut (empty selection)")
+                self.is_selecting = False # Clear selection state
+                self.selection_start = None
+                self.selection_end = None
+                # Return True if status message changed or selection state changed
+                return (self.status_message != original_status or
+                        (self.is_selecting, self.selection_start, self.selection_end) != original_selection_state)
+
+            action_made_change_to_content = True # Text was removed
+            
+            text_for_clipboard = "\n".join(deleted_text_segments)
+            
+            # Always copy to internal clipboard
+            self.internal_clipboard = text_for_clipboard
+            status_message_for_cut = "Cut to internal clipboard" # Default message
+
+            # Attempt to copy to system clipboard if enabled and available
+            if self.use_system_clipboard and self.pyclip_available:
+                try:
+                    pyperclip.copy(text_for_clipboard)
+                    status_message_for_cut = "Cut to system clipboard"
+                    logging.debug("Text cut and copied to system clipboard successfully.")
+                except pyperclip.PyperclipException as e:
+                    logging.error(f"Failed to copy cut text to system clipboard: {str(e)}")
+                    status_message_for_cut = "Cut to internal clipboard (system clipboard error)"
+                except Exception as e: # Catch any other unexpected error
+                    logging.error(f"Unexpected error copying cut text to system clipboard: {e}", exc_info=True)
+                    status_message_for_cut = "Cut to internal clipboard (unexpected system clipboard error)"
+            
+            # Add the deletion action to history
+            self.action_history.append({
+                "type": "delete_selection", 
+                "text": deleted_text_segments,
+                "start": norm_start_coords, 
+                "end": norm_end_coords
+            })
+            self.undone_actions.clear() # Cut is a new atomic action, clear redo stack
+            
+            # self.modified is already set to True by delete_selected_text_internal
+            # Cursor position is also set by delete_selected_text_internal to norm_start_coords
+            
+            self.is_selecting = False # Selection is gone after cut
+            self.selection_start = None
+            self.selection_end = None
+            
+            self._set_status_message(status_message_for_cut)
+            
+            # Ensure cursor and scroll are valid after the operation
+            # Although delete_selected_text_internal sets cursor, _ensure_cursor_in_bounds is a good safeguard
+            self._ensure_cursor_in_bounds()
+            self._clamp_scroll() # Scroll might need adjustment if cursor position changed significantly
+
+            # Determine if a redraw is needed by comparing overall state
+            # Since cut always involves text deletion and status change, it should always return True if successful.
+            if (action_made_change_to_content or
+                (self.cursor_y, self.cursor_x) != original_cursor_pos or
+                (self.scroll_top, self.scroll_left) != original_scroll_pos or
+                (self.is_selecting, self.selection_start, self.selection_end) != original_selection_state or
+                self.modified != original_modified_flag or # Check if modified flag state actually flipped
+                self.status_message != original_status):
+                return True
+            
+            return False # Should not be reached if cut was successful
+        
+    # 11. ---------- Search/Replace ------------
+    def search_and_replace(self) -> bool:
+        """
+        Searches for text using a regular expression and replaces occurrences.
+        Prompts for search pattern and replacement text.
+        This operation is not added to the undo/redo history; instead, the history is cleared.
+        Returns True if any interaction (prompts, status change) or modification occurred, 
+        indicating a redraw is needed.
+        """
+        logging.debug("search_and_replace called")
+        
+        original_status = self.status_message
+        status_changed_by_prompts = False # Track if prompts themselves alter final status view
+
+        # Clear previous search state immediately
+        self.highlighted_matches = []
+        self.search_matches = []
+        self.search_term = "" # Clear the term so F3 won't use the old one
+        self.current_match_idx = -1
+        # Initial redraw might be good here if clearing highlights should be immediate
+        # but we'll rely on the return value for the main loop.
+
+        # Prompt for search pattern
+        status_before_search_prompt = self.status_message
+        search_pattern_str = self.prompt("Search for (regex): ")
+        if self.status_message != status_before_search_prompt:
+            status_changed_by_prompts = True
+
+        if not search_pattern_str: # User cancelled (Esc or empty Enter)
+            if not status_changed_by_prompts and self.status_message == original_status:
+                self._set_status_message("Search/Replace cancelled")
+            # Return True if status changed by prompt or by cancellation message
+            return self.status_message != original_status 
+
+        # Prompt for replacement string
+        # An empty replacement string is valid (means delete the matched pattern).
+        status_before_replace_prompt = self.status_message
+        replace_with_str = self.prompt("Replace with: ") # `prompt` can return None if cancelled
+        if self.status_message != status_before_replace_prompt:
+            status_changed_by_prompts = True
+
+        if replace_with_str is None: # User cancelled the replacement prompt
+            if not status_changed_by_prompts and self.status_message == original_status:
+                self._set_status_message("Search/Replace cancelled (no replacement text)")
+            return self.status_message != original_status
+
+        # Compile the regex pattern
+        compiled_regex_pattern: Optional[re.Pattern] = None
+        try:
+            # re.IGNORECASE is a common default, can be made configurable
+            compiled_regex_pattern = re.compile(search_pattern_str, re.IGNORECASE) 
+            logging.debug(f"Compiled regex pattern: '{search_pattern_str}' with IGNORECASE")
+        except re.error as e:
+            error_msg = f"Regex error: {str(e)[:70]}"
+            self._set_status_message(error_msg)
+            logging.warning(f"Search/Replace failed due to regex error: {e}")
+            return True # Status changed due to error message
+
+        # --- Perform replacement ---
+        new_text_lines: List[str] = []
+        total_replacements_count = 0
+        line_processing_error_occurred = False
+        
+        # It's safer to operate on a copy if iterating and modifying
+        # or build a new list directly as done here.
+        # Lock is needed for reading self.text if it could be modified by another thread,
+        # but here we are in the main thread of action.
+        
+        with self._state_lock: # Access self.text safely
+            current_text_snapshot = list(self.text) # Work on a snapshot
+
+        for line_idx, current_line in enumerate(current_text_snapshot):
+            try:
+                # Perform substitution on the current line
+                # subn returns a tuple: (new_string, number_of_subs_made)
+                new_line_content, num_subs_on_line = compiled_regex_pattern.subn(replace_with_str, current_line)
+                new_text_lines.append(new_line_content)
+                if num_subs_on_line > 0:
+                    total_replacements_count += num_subs_on_line
+            except Exception as e_sub: # Catch errors during re.subn (e.g., complex regex on specific line)
+                logging.error(f"Error replacing in line {line_idx + 1} ('{current_line[:50]}...'): {e_sub}")
+                new_text_lines.append(current_line) # Append original line in case of error on this line
+                line_processing_error_occurred = True
+
+        # --- Update editor state if replacements were made or errors occurred ---
+        if total_replacements_count > 0 or line_processing_error_occurred:
+            with self._state_lock:
+                self.text = new_text_lines
+                self.modified = True  # Document has been modified
+                # Search and Replace is a major change, typically clears undo/redo history
+                self.action_history.clear()
+                self.undone_actions.clear()
+                logging.debug("Cleared undo/redo history after search/replace.")
+                # Cursor position might be invalidated, reset to start of document or last known good pos.
+                # For simplicity, let's move to the beginning of the file.
+                self.cursor_y = 0
+                self.cursor_x = 0
+                self._ensure_cursor_in_bounds() # Ensure it's valid
+                self._clamp_scroll()            # Adjust scroll
+
+            if line_processing_error_occurred:
+                self._set_status_message(f"Replaced {total_replacements_count} occurrences with errors on some lines.")
+                logging.warning("Search/Replace completed with errors on some lines.")
+            else:
+                self._set_status_message(f"Replaced {total_replacements_count} occurrence(s).")
+                logging.info(f"Search/Replace successful: {total_replacements_count} replacements.")
+            return True # Text changed, status changed, cursor moved
+        else: # No replacements made and no errors
+            self._set_status_message("No occurrences found to replace.")
+            logging.info("Search/Replace: No occurrences found.")
+            return True # Status message changed
+            
+        # Fallback, should not be reached if logic is complete
+        # return status_changed_by_prompts
+
+    # 12. Undo
+    def undo(self) -> bool:
+        """
+        Undoes the last action from the action_history stack.
+        Restores the text, cursor position, selection state, and modified status
+        to what it was before the last action was performed.
+
+        Returns:
+            bool: True if the editor's state (text, cursor, scroll, selection, modified flag,
+                  or status message) changed as a result of the undo operation, False otherwise.
+        """
+        with self._state_lock:
+            original_status = self.status_message # For checking if status message changes at the end
+
+            if not self.action_history:
+                self._set_status_message("Nothing to undo")
+                return self.status_message != original_status # Redraw if status changed
+
+            # Store current state to compare against after undoing the action
+            pre_undo_text_tuple = tuple(self.text)
+            pre_undo_cursor_pos = (self.cursor_y, self.cursor_x)
+            pre_undo_scroll_pos = (self.scroll_top, self.scroll_left)
+            pre_undo_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
+            pre_undo_modified_flag = self.modified
+
+            last_action = self.action_history.pop()
+            action_type = last_action.get("type")
+            # This flag tracks if the core data (text, selection, cursor) was changed by this undo
+            content_or_selection_changed_by_this_undo = False 
+
+            logging.debug(f"Undo: Attempting to undo action of type '{action_type}' with data: {last_action}")
+
+            try:
+                if action_type == "insert":
+                    text_that_was_inserted = last_action["text"]
+                    row, col = last_action["position"]
+                    lines_inserted = text_that_was_inserted.split('\n')
+                    num_lines_in_inserted_text = len(lines_inserted)
+
+                    if not (0 <= row < len(self.text)):
+                        raise IndexError(f"Undo insert: Start row {row} out of bounds (text len {len(self.text)}). Action: {last_action}")
+
+                    if num_lines_in_inserted_text == 1:
+                        len_inserted = len(text_that_was_inserted)
+                        # Check if the text to be removed actually matches what's there
+                        if not (col <= len(self.text[row]) and self.text[row][col:col+len_inserted] == text_that_was_inserted):
+                             logging.warning(f"Undo insert: Text mismatch for deletion at [{row},{col}] len {len_inserted}. Expected '{text_that_was_inserted}', found '{self.text[row][col:col+len_inserted]}'.")
+                             # Potentially raise error or try to proceed if desired, for now, log and proceed carefully.
+                             # This indicates a potential inconsistency in undo stack or text state.
+                        self.text[row] = self.text[row][:col] + self.text[row][col + len_inserted:]
+                    else: # Multi-line insert undo
+                        end_row_affected_by_original_insert = row + num_lines_in_inserted_text - 1
+                        if end_row_affected_by_original_insert >= len(self.text):
+                            raise IndexError(f"Undo insert: End row {end_row_affected_by_original_insert} out of bounds (text len {len(self.text)}). Action: {last_action}")
+                        
+                        # The suffix that was originally on line 'row' and got pushed down
+                        # is now at the end of line 'end_row_affected_by_original_insert'
+                        # after the last segment of the inserted text.
+                        original_suffix_from_line_row = self.text[end_row_affected_by_original_insert][len(lines_inserted[-1]):]
+                        
+                        self.text[row] = self.text[row][:col] + original_suffix_from_line_row
+                        # Delete the lines that were created by the multi-line insert
+                        del self.text[row + 1 : end_row_affected_by_original_insert + 1]
+                        
+                    self.cursor_y, self.cursor_x = row, col 
+                    content_or_selection_changed_by_this_undo = True
+
+                elif action_type == "delete_char":
+                    y, x = last_action["position"] # Position where char was deleted, and cursor stayed
+                    char_that_was_deleted = last_action["text"]
+                    if not (0 <= y < len(self.text) and 0 <= x <= len(self.text[y])):
+                         raise IndexError(f"Undo delete_char: Invalid position ({y},{x}) for re-insertion. Action: {last_action}")
+                    self.text[y] = self.text[y][:x] + char_that_was_deleted + self.text[y][x:]
+                    self.cursor_y, self.cursor_x = y, x # Cursor stays at the position of the re-inserted char
+                    content_or_selection_changed_by_this_undo = True
+                
+                elif action_type == "delete_newline":
+                    y, x_at_split_point = last_action["position"] # Cursor pos after original merge
+                    content_of_merged_line = last_action["text"]  # This was the line that got appended
+                    if not (0 <= y < len(self.text) and 0 <= x_at_split_point <= len(self.text[y])):
+                        raise IndexError(f"Undo delete_newline: Invalid position ({y},{x_at_split_point}) for split. Action: {last_action}")
+                    
+                    line_to_be_split = self.text[y]
+                    self.text[y] = line_to_be_split[:x_at_split_point]
+                    self.text.insert(y + 1, content_of_merged_line) 
+                    self.cursor_y, self.cursor_x = y, x_at_split_point # Cursor to the split point
+                    content_or_selection_changed_by_this_undo = True
+
+                elif action_type == "delete_selection":
+                    deleted_segments = last_action["text"] # This is a list[str]
+                    start_y, start_x = last_action["start"] # Coords where deletion started
+                    
+                    text_to_restore = "\n".join(deleted_segments)
+                    if self.insert_text_at_position(text_to_restore, start_y, start_x): # This returns bool
+                        content_or_selection_changed_by_this_undo = True
+                    # For undo of delete_selection, cursor should go to the start of the re-inserted text.
+                    self.cursor_y, self.cursor_x = start_y, start_x 
+                    # Restore selection state if it was stored with the action (optional enhancement)
+                    # For now, just clear selection after undoing a deletion.
+                    self.is_selecting = False
+                    self.selection_start = None
+                    self.selection_end = None
+                
+                elif action_type in ("block_indent", "block_unindent", "comment_block", "uncomment_block"):
+                    changes = last_action.get("changes", []) # List of dicts
+                    if not changes:
+                        logging.warning(f"Undo ({action_type}): No 'changes' data in action. Action: {last_action}")
+                    
+                    for change_item in reversed(changes): # Restore original_text in reverse order of application
+                        idx = change_item["line_index"]
+                        original_line_text = change_item.get("original_text")
+                        if original_line_text is None:
+                            logging.warning(f"Undo ({action_type}): Missing 'original_text' for line {idx}. Skipping.")
+                            continue
+                        if idx < len(self.text):
+                            if self.text[idx] != original_line_text:
+                                self.text[idx] = original_line_text
+                                content_or_selection_changed_by_this_undo = True
+                        else:
+                            logging.warning(f"Undo ({action_type}): Line index {idx} out of bounds for text len {len(self.text)}. Skipping.")
+                    
+                    # Restore selection and cursor state as it was *before* the original operation
+                    selection_state_before_op = last_action.get("selection_before")
+                    cursor_state_no_sel_before_op = last_action.get("cursor_before_no_selection")
+
+                    # Store current selection/cursor to compare *after* attempting to restore
+                    current_sel_is, current_sel_start, current_sel_end = self.is_selecting, self.selection_start, self.selection_end
+                    current_curs_y, current_curs_x = self.cursor_y, self.cursor_x
+
+                    if selection_state_before_op and isinstance(selection_state_before_op, tuple) and len(selection_state_before_op) == 2:
+                        # Assumes selection_before is (sel_start_coords, sel_end_coords)
+                        # The full state was (is_selecting, sel_start_coords, sel_end_coords)
+                        # Let's assume "selection_before" from actions like block_indent stores the tuple (start_coords, end_coords)
+                        # and implies is_selecting = True.
+                        # If it stores (is_selecting, start_coords, end_coords), then adjust accordingly.
+                        # Based on block_indent, it stores (start_coords, end_coords).
+                        self.is_selecting = True
+                        self.selection_start, self.selection_end = selection_state_before_op[0], selection_state_before_op[1]
+                        if self.is_selecting and self.selection_end: # Position cursor at end of restored selection
+                            self.cursor_y, self.cursor_x = self.selection_end
+                    elif cursor_state_no_sel_before_op and isinstance(cursor_state_no_sel_before_op, tuple):
+                        self.is_selecting = False
+                        self.selection_start, self.selection_end = None, None
+                        self.cursor_y, self.cursor_x = cursor_state_no_sel_before_op
+                    else: # Fallback if no specific state stored, clear selection
+                        self.is_selecting = False
+                        self.selection_start, self.selection_end = None, None
+                        # Cursor might have been affected by text changes if any.
+                    
+                    # Check if selection or cursor state actually changed due to restoration
+                    if (self.is_selecting != current_sel_is or 
+                        self.selection_start != current_sel_start or 
+                        self.selection_end != current_sel_end or
+                        (self.cursor_y, self.cursor_x) != (current_curs_y, current_curs_x) ):
+                        content_or_selection_changed_by_this_undo = True
+                
+                else:
+                    logging.warning(f"Undo: Unknown action type '{action_type}'. Cannot undo. Action: {last_action}")
+                    self.action_history.append(last_action) # Put it back on history if not handled
+                    self._set_status_message(f"Undo failed: Unknown action type '{action_type}'")
+                    return True # Status changed
+
+            except IndexError as e_idx: # Catch errors from list/string indexing during undo logic
+                logging.error(f"Undo: IndexError during undo of '{action_type}': {e_idx}", exc_info=True)
+                self._set_status_message(f"Undo error for '{action_type}': Index out of bounds.")
+                self.action_history.append(last_action) # Attempt to put action back
+                return True # Status changed, state might be inconsistent
+            except Exception as e_undo_general: # Catch any other unexpected errors
+                logging.exception(f"Undo: Unexpected error during undo of '{action_type}': {e_undo_general}")
+                self._set_status_message(f"Undo error for '{action_type}': {str(e_undo_general)[:60]}...")
+                self.action_history.append(last_action) # Attempt to put action back
+                return True # Status changed
+
+            # If undo logic completed (even if it raised an error that was caught and handled above by returning True)
+            self.undone_actions.append(last_action) # Move the undone action to the redo stack
+            
+            # Determine `self.modified` state after undo
+            if not self.action_history: # If history is now empty
+                self.modified = False # All changes undone, back to last saved or new state
+                logging.debug("Undo: Action history empty, file considered not modified.")
+            else:
+                # Check if the current text matches the state of the last item in history
+                # This is complex. A simpler heuristic: if there's history, it's modified.
+                # A more robust system would store a "saved_checkpoint" in history.
+                self.modified = True 
+                logging.debug(f"Undo: Action history not empty ({len(self.action_history)} items), file considered modified.")
+            
+            # Ensure cursor and scroll are valid after any operation
+            self._ensure_cursor_in_bounds()
+            scroll_changed_by_clamp = self._clamp_scroll_and_check_change(pre_undo_scroll_pos)
+
+            # Determine if a redraw is needed based on actual state changes
+            final_redraw_needed = False
+            if (content_or_selection_changed_by_this_undo or
+                tuple(self.text) != pre_undo_text_tuple or 
+                (self.cursor_y, self.cursor_x) != pre_undo_cursor_pos or
+                scroll_changed_by_clamp or
+                (self.is_selecting, self.selection_start, self.selection_end) != pre_undo_selection_state or
+                self.modified != pre_undo_modified_flag):
+                final_redraw_needed = True
+            
+            if final_redraw_needed:
+                self._set_status_message("Action undone")
+                logging.debug(f"Undo successful, state changed for action type '{action_type}'. Redraw needed.")
+            else:
+                # This implies the undo operation resulted in the exact same state as before it ran
+                if self.status_message == original_status : 
+                    self._set_status_message("Undo: No effective change from current state")
+                logging.debug(f"Undo for action type '{action_type}' resulted in no effective change from current state.")
+            
+            # Return True if a redraw is needed due to state changes OR if status message changed
+            return final_redraw_needed or (self.status_message != original_status)
+
+    # 13. Redo    
+    def redo(self) -> bool:
+        """
+        Redoes the last undone action from the undone_actions stack.
+        Restores the text, cursor position, selection state, and modified status
+        to what it was after the original action was performed (and before it was undone).
+
+        Returns:
+            bool: True if the editor's state (text, cursor, scroll, selection, modified flag,
+                  or status message) changed as a result of the redo operation, False otherwise.
+        """
+        with self._state_lock:
+            original_status = self.status_message # For checking if status message changes at the end
+
+            if not self.undone_actions:
+                self._set_status_message("Nothing to redo")
+                return self.status_message != original_status # Redraw if status message changed
+
+            # Store current state to compare against after redoing the action
+            pre_redo_text_tuple = tuple(self.text)
+            pre_redo_cursor_pos = (self.cursor_y, self.cursor_x)
+            pre_redo_scroll_pos = (self.scroll_top, self.scroll_left)
+            pre_redo_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
+            pre_redo_modified_flag = self.modified
+
+            action_to_redo = self.undone_actions.pop()
+            action_type = action_to_redo.get("type")
+            # This flag tracks if the core data (text, selection, cursor) was changed by this redo
+            content_or_selection_changed_by_this_redo = False 
+
+            logging.debug(f"Redo: Attempting to redo action of type '{action_type}' with data: {action_to_redo}")
+
+            try:
+                if action_type == "insert":
+                    # To redo an insert, we re-insert the text.
+                    # 'text' is the text that was originally inserted.
+                    # 'position' is (row, col) where insertion originally started.
+                    text_to_re_insert = action_to_redo["text"]
+                    row, col = action_to_redo["position"]
+                    # insert_text_at_position updates cursor and self.modified
+                    if self.insert_text_at_position(text_to_re_insert, row, col):
+                        content_or_selection_changed_by_this_redo = True
+                    # Cursor is set by insert_text_at_position to be after the inserted text.
+
+                elif action_type == "delete_char":
+                    # To redo a delete_char, we re-delete the character.
+                    # 'text' is the character that was originally deleted.
+                    # 'position' is (y,x) where the character was (and where cursor stayed).
+                    y, x = action_to_redo["position"]
+                    # Ensure the character that was re-inserted by 'undo' is still there to be 're-deleted'.
+                    # This also implies the line length and content should match expectations.
+                    char_that_was_reinserted_by_undo = action_to_redo["text"]
+                    if not (0 <= y < len(self.text) and 
+                            0 <= x < len(self.text[y]) and 
+                            self.text[y][x] == char_that_was_reinserted_by_undo):
+                        raise IndexError(
+                            f"Redo delete_char: Text mismatch or invalid position ({y},{x}) for re-deletion. "
+                            f"Expected '{char_that_was_reinserted_by_undo}' at position. Action: {action_to_redo}"
+                        )
+                    self.text[y] = self.text[y][:x] + self.text[y][x + 1:]
+                    self.cursor_y, self.cursor_x = y, x # Cursor stays at the position of deletion
+                    content_or_selection_changed_by_this_redo = True
+                
+                elif action_type == "delete_newline":
+                    # To redo a delete_newline (merge), we re-merge the lines.
+                    # 'text' is the content of the line that was merged up.
+                    # 'position' is (y,x) where cursor ended after original merge.
+                    y_target_line, x_cursor_after_merge = last_action["position"]
+                    # To redo, we expect line y_target_line to exist, and line y_target_line + 1
+                    # (which was re-created by undo) to also exist and match 'text'.
+                    if not (0 <= y_target_line < len(self.text) - 1 and 
+                            self.text[y_target_line + 1] == last_action["text"]):
+                        raise IndexError(f"Redo delete_newline: State mismatch for re-merging at line {y_target_line}. Action: {last_action}")
+
+                    self.text[y_target_line] += self.text.pop(y_target_line + 1)
+                    self.cursor_y, self.cursor_x = y_target_line, x_cursor_after_merge
+                    content_or_selection_changed_by_this_redo = True
+
+                elif action_type == "delete_selection":
+                    # To redo a delete_selection, we re-delete the selection.
+                    # 'start' and 'end' are the normalized coordinates of the original selection.
+                    start_y, start_x = action_to_redo["start"]
+                    end_y, end_x = action_to_redo["end"]
+                    # delete_selected_text_internal updates cursor and self.modified
+                    # It expects normalized coordinates.
+                    deleted_segments_again = self.delete_selected_text_internal(start_y, start_x, end_y, end_x)
+                    # Check if something was actually deleted this time.
+                    if deleted_segments_again or (start_y,start_x) != (end_y,end_x) :
+                        content_or_selection_changed_by_this_redo = True
+                    # Cursor is set by delete_selected_text_internal to (start_y, start_x)
+                
+                elif action_type in ("block_indent", "block_unindent", "comment_block", "uncomment_block"):
+                    # These actions store 'changes': list of {"line_index", "original_text", "new_text"}
+                    # and 'selection_after', 'cursor_after_no_selection' which represent the state
+                    # *after* the original operation was performed.
+                    # To redo, we re-apply the "new_text" for each change and restore "after" states.
+                    changes = action_to_redo.get("changes", [])
+                    if not changes:
+                        logging.warning(f"Redo ({action_type}): No 'changes' data in action. Action: {action_to_redo}")
+
+                    for change_item in changes: # Apply in the original order
+                        idx = change_item["line_index"]
+                        new_line_text = change_item.get("new_text")
+                        if new_line_text is None:
+                             logging.warning(f"Redo ({action_type}): Missing 'new_text' for line {idx}. Skipping.")
+                             continue
+                        if idx < len(self.text):
+                            if self.text[idx] != new_line_text:
+                                self.text[idx] = new_line_text
+                                content_or_selection_changed_by_this_redo = True
+                        else:
+                            logging.warning(f"Redo ({action_type}): Line index {idx} out of bounds. Skipping.")
+                    
+                    selection_state_after_op = action_to_redo.get("selection_after")
+                    cursor_state_no_sel_after_op = action_to_redo.get("cursor_after_no_selection")
+
+                    current_sel_is, current_sel_start, current_sel_end = self.is_selecting, self.selection_start, self.selection_end
+                    current_curs_y, current_curs_x = self.cursor_y, self.cursor_x
+
+                    if selection_state_after_op and isinstance(selection_state_after_op, tuple) and len(selection_state_after_op) == 3:
+                        self.is_selecting, self.selection_start, self.selection_end = selection_state_after_op
+                        if self.is_selecting and self.selection_end:
+                            self.cursor_y, self.cursor_x = self.selection_end
+                    elif cursor_state_no_sel_after_op and isinstance(cursor_state_no_sel_after_op, tuple):
+                        self.is_selecting = False
+                        self.selection_start, self.selection_end = None, None
+                        self.cursor_y, self.cursor_x = cursor_state_no_sel_after_op
+                    else: # Fallback
+                        self.is_selecting = False 
+                        self.selection_start, self.selection_end = None, None
+                    
+                    if (self.is_selecting != current_sel_is or 
+                        self.selection_start != current_sel_start or 
+                        self.selection_end != current_sel_end or
+                        (self.cursor_y, self.cursor_x) != (current_curs_y, current_curs_x) ):
+                        content_or_selection_changed_by_this_redo = True
+                    
+                    if not changes and not content_or_selection_changed_by_this_redo :
+                        pass # No change by this redo
+                    elif not content_or_selection_changed_by_this_redo and changes: # Text didn't change but selection/cursor might have
+                        content_or_selection_changed_by_this_redo = True
+
+                else:
+                    logging.warning(f"Redo: Unknown action type '{action_type}'. Cannot redo. Action: {action_to_redo}")
+                    self.undone_actions.append(action_to_redo) # Put it back on undone stack
+                    self._set_status_message(f"Redo failed: Unknown action type '{action_type}'")
+                    return True # Status changed
+
+            except IndexError as e_idx: 
+                logging.error(f"Redo: IndexError during redo of '{action_type}': {e_idx}", exc_info=True)
+                self._set_status_message(f"Redo error for '{action_type}': Index out of bounds or text mismatch.")
+                self.undone_actions.append(action_to_redo) 
+                return True 
+            except Exception as e_redo_general: 
+                logging.exception(f"Redo: Unexpected error during redo of '{action_type}': {e_redo_general}")
+                self._set_status_message(f"Redo error for '{action_type}': {str(e_redo_general)[:60]}...")
+                self.undone_actions.append(action_to_redo)
+                return True 
+
+            # If redo logic completed for a known action type
+            self.action_history.append(action_to_redo) # Move action back to main history
+            
+            # A redo operation always implies the document is modified from its last saved state,
+            # because it's re-applying a change that was previously undone.
+            if content_or_selection_changed_by_this_redo : # If redo actually did something
+                self.modified = True
+            
+            self._ensure_cursor_in_bounds()
+            scroll_changed_by_clamp = self._clamp_scroll_and_check_change(pre_redo_scroll_pos)
+
+            final_redraw_needed = False
+            if (content_or_selection_changed_by_this_redo or
+                tuple(self.text) != pre_redo_text_tuple or 
+                (self.cursor_y, self.cursor_x) != pre_redo_cursor_pos or
+                scroll_changed_by_clamp or
+                (self.is_selecting, self.selection_start, self.selection_end) != pre_redo_selection_state or
+                self.modified != pre_redo_modified_flag):
+                final_redraw_needed = True
+            
+            if final_redraw_needed:
+                self._set_status_message("Action redone")
+                logging.debug(f"Redo successful and state changed for action type '{action_type}'. Redraw needed.")
+            else:
+                if self.status_message == original_status: 
+                    self._set_status_message("Redo: No effective change from current state")
+                logging.debug(f"Redo for action type '{action_type}' resulted in no effective change from current state.")
+            
+            return final_redraw_needed or (self.status_message != original_status)
+        
+
+    # III. Управление выделением (косвенно связано с видимым курсором, который обычно на конце выделения):
+    # extend_selection_right(self)
+    # extend_selection_left(self)
+    # extend_selection_up(self)
+    # extend_selection_down(self)
+    # select_to_home(self)
+    # select_to_end(self)
+    # select_all(self)
+
+        
+    ############### Selection Handling ####################
+    # 1. Selection Right
+    def extend_selection_right(self) -> bool:
+        """
+        Extends the selection one character to the right.
+        If no selection is active, starts a new selection from the current cursor position.
+        Moves the cursor to the new end of the selection.
+        Adjusts scroll if necessary.
+
+        Returns:
+            bool: True if the cursor position, selection state/boundaries, or scroll position changed, 
+                  False otherwise.
+        """
+        # Store initial state for comparison
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
+        original_selection_start = self.selection_start
+        original_selection_end = self.selection_end
+        original_is_selecting_flag = self.is_selecting
+        # No status message is typically set by this kind of fine-grained action
+
+        changed_state = False
+
+        with self._state_lock:
+            current_line_idx = self.cursor_y
+            if current_line_idx >= len(self.text): # Should not happen with valid cursor
+                logging.warning(f"extend_selection_right: cursor_y {current_line_idx} out of bounds.")
+                return False # No change possible
+
+            current_line_content = self.text[current_line_idx]
+            current_line_length = len(current_line_content)
+
+            # If selection is not active, start it from the current cursor position.
+            if not self.is_selecting:
+                self.selection_start = (self.cursor_y, self.cursor_x)
+                self.is_selecting = True
+                # This itself is a state change if original_is_selecting_flag was False
+            
+            # Move the cursor logically one character to the right, if not at the end of the line.
+            # This also becomes the new end of the selection.
+            if self.cursor_x < current_line_length:
+                self.cursor_x += 1
+                # Skip over zero-width characters if any (though less common for simple right extension)
+                while self.cursor_x < current_line_length and wcwidth(current_line_content[self.cursor_x]) == 0:
+                    self.cursor_x += 1
+            # If at the end of the line, cursor_x does not move further right on this line.
+            # Extending selection to the next line is typically handled by extend_selection_down then extend_selection_left/right.
+            # This method focuses on extending right on the *current* line or starting selection.
+
+            # Update the end of the selection to the new cursor position.
+            self.selection_end = (self.cursor_y, self.cursor_x)
+            
+            # Ensure scrolling is adjusted if the cursor moved out of view.
+            self._clamp_scroll()
+
+        # Determine if any relevant state actually changed.
+        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
+             (self.scroll_top, self.scroll_left) != original_scroll_pos or
+             self.is_selecting != original_is_selecting_flag or
+             self.selection_start != original_selection_start or
+             self.selection_end != original_selection_end ):
+            changed_state = True
+            logging.debug(
+                f"extend_selection_right: New cursor ({self.cursor_y},{self.cursor_x}), "
+                f"selection_end ({self.selection_end}). Changed: {changed_state}"
+            )
+        else:
+            logging.debug("extend_selection_right: No change in cursor, scroll, or selection state.")
+            
+        return changed_state
+
+    # 2. Selection Left --------------------
+    def extend_selection_left(self) -> bool:
+        """
+        Extends the selection one character to the left.
+        If no selection is active, starts a new selection from the current cursor position.
+        Moves the cursor to the new end of the selection (which is to the left).
+        Adjusts scroll if necessary.
+
+        Returns:
+            bool: True if the cursor position, selection state/boundaries, or scroll position changed, 
+                  False otherwise.
+        """
+        # Store initial state for comparison
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
+        original_selection_start = self.selection_start
+        original_selection_end = self.selection_end
+        original_is_selecting_flag = self.is_selecting
+        
+        changed_state = False
+
+        with self._state_lock:
+            current_line_idx = self.cursor_y
+            if current_line_idx >= len(self.text): # Should not happen with valid cursor
+                logging.warning(f"extend_selection_left: cursor_y {current_line_idx} out of bounds.")
+                return False # No change possible
+
+            # If selection is not active, start it from the current cursor position.
+            # When extending left, the initial cursor position becomes the 'anchor' or 'selection_start'
+            # if we consider selection_end to be the moving part.
+            # Or, if self.selection_start is the fixed point and self.selection_end moves with cursor:
+            if not self.is_selecting:
+                self.selection_start = (self.cursor_y, self.cursor_x) # Anchor point
+                self.is_selecting = True
+            
+            # Move the cursor logically one character to the left.
+            if self.cursor_x > 0:
+                self.cursor_x -= 1
+                # If moving left lands on a zero-width character, keep moving left
+                # until a non-zero-width character is found or beginning of line.
+                # This ensures the selection "jumps over" combining characters.
+                current_line_content = self.text[current_line_idx]
+                while self.cursor_x > 0 and wcwidth(current_line_content[self.cursor_x]) == 0:
+                    self.cursor_x -= 1
+            # If at the beginning of the current line (self.cursor_x == 0),
+            # this method does not currently extend to the previous line.
+            # That would typically be handled by extend_selection_up then extend_selection_right/end.
+
+            # Update the end of the selection to the new cursor position.
+            # If selection_start was (y, X) and cursor moves to (y, X-1),
+            # selection_end becomes (y, X-1).
+            self.selection_end = (self.cursor_y, self.cursor_x)
+            
+            # Ensure scrolling is adjusted if the cursor moved out of view.
+            self._clamp_scroll()
+
+        # Determine if any relevant state actually changed.
+        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
+             (self.scroll_top, self.scroll_left) != original_scroll_pos or
+             self.is_selecting != original_is_selecting_flag or
+             self.selection_start != original_selection_start or # Could change if is_selecting was false
+             self.selection_end != original_selection_end ):      # Will always change if cursor_x changed
+            changed_state = True
+            logging.debug(
+                f"extend_selection_left: New cursor ({self.cursor_y},{self.cursor_x}), "
+                f"selection_end ({self.selection_end}). Changed: {changed_state}"
+            )
+        else:
+            logging.debug("extend_selection_left: No change in cursor, scroll, or selection state.")
+            
+        return changed_state
+
+    # 3. Selection Up
+    def extend_selection_up(self) -> bool:
+        """
+        Extends the selection one line upwards.
+        If no selection is active, starts a new selection from the current cursor position.
+        The cursor moves to the corresponding column in the line above, clamped by line length.
+        The new cursor position becomes the (moving) end of the selection.
+
+        Returns:
+            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
+                  False otherwise.
+        """
+        # Store initial state for comparison
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
+        original_selection_start = self.selection_start
+        original_selection_end = self.selection_end
+        original_is_selecting_flag = self.is_selecting
+        
+        changed_state = False
+
+        with self._state_lock:
+            # If selection is not active, start it from the current cursor position.
+            # This current position becomes the 'anchor' (selection_start).
+            if not self.is_selecting:
+                self.selection_start = (self.cursor_y, self.cursor_x)
+                self.is_selecting = True
+            
+            # Move the cursor logically one line up, if not already at the first line.
+            if self.cursor_y > 0:
+                self.cursor_y -= 1
+                # Maintain the horizontal cursor column if possible, clamping to the new line's length.
+                # self.cursor_x (the "desired" column) is preserved from the previous line.
+                self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+            # If at the first line (self.cursor_y == 0), no further upward movement is possible.
+            
+            # Update the end of the selection to the new cursor position.
+            self.selection_end = (self.cursor_y, self.cursor_x)
+            
+            # Adjust scroll if necessary.
+            self._clamp_scroll()
+
+        # Determine if any relevant state actually changed.
+        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
+             (self.scroll_top, self.scroll_left) != original_scroll_pos or
+             self.is_selecting != original_is_selecting_flag or
+             self.selection_start != original_selection_start or # Could change if is_selecting was false
+             self.selection_end != original_selection_end ):      # Will change if cursor_y or cursor_x changed
+            changed_state = True
+            logging.debug(
+                f"extend_selection_up: New cursor ({self.cursor_y},{self.cursor_x}), "
+                f"selection_end ({self.selection_end}). Changed: {changed_state}"
+            )
+        else:
+            logging.debug("extend_selection_up: No change in cursor, scroll, or selection state.")
+            
+        return changed_state
+
+    # 4. Selection Down
+    def extend_selection_down(self) -> bool:
+        """
+        Extends the selection one line downwards.
+        If no selection is active, starts a new selection from the current cursor position.
+        The cursor moves to the corresponding column in the line below, clamped by line length.
+        The new cursor position becomes the (moving) end of the selection.
+
+        Returns:
+            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
+                  False otherwise.
+        """
+        # Store initial state for comparison
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
+        original_selection_start = self.selection_start
+        original_selection_end = self.selection_end
+        original_is_selecting_flag = self.is_selecting
+        
+        changed_state = False
+
+        with self._state_lock:
+            # If selection is not active, start it from the current cursor position.
+            if not self.is_selecting:
+                self.selection_start = (self.cursor_y, self.cursor_x)
+                self.is_selecting = True
+            
+            # Move the cursor logically one line down, if not already at the last line.
+            if self.cursor_y < len(self.text) - 1:
+                self.cursor_y += 1
+                # Maintain the horizontal cursor column if possible, clamping to the new line's length.
+                self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
+            # If at the last line, no further downward movement.
+            
+            # Update the end of the selection to the new cursor position.
+            self.selection_end = (self.cursor_y, self.cursor_x)
+            
+            # Adjust scroll if necessary.
+            self._clamp_scroll()
+
+        # Determine if any relevant state actually changed.
+        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
+             (self.scroll_top, self.scroll_left) != original_scroll_pos or
+             self.is_selecting != original_is_selecting_flag or
+             self.selection_start != original_selection_start or
+             self.selection_end != original_selection_end ):
+            changed_state = True
+            logging.debug(
+                f"extend_selection_down: New cursor ({self.cursor_y},{self.cursor_x}), "
+                f"selection_end ({self.selection_end}). Changed: {changed_state}"
+            )
+        else:
+            logging.debug("extend_selection_down: No change in cursor, scroll, or selection state.")
+            
+        return changed_state
+
+    # 5. Selection Home ---------------
+    def select_to_home(self) -> bool:
+        """
+        Extends the selection from the current cursor position to the beginning of the current line.
+        If no selection is active, starts a new selection.
+        The cursor moves to the beginning of the line (column 0).
+
+        Returns:
+            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
+                  False otherwise.
+        """
+        # Store initial state for comparison
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left) # Specifically scroll_left
+        original_selection_start = self.selection_start
+        original_selection_end = self.selection_end
+        original_is_selecting_flag = self.is_selecting
+        
+        changed_state = False
+
+        with self._state_lock:
+            current_line_idx = self.cursor_y
+            if current_line_idx >= len(self.text): # Should not happen with valid cursor
+                logging.warning(f"select_to_home: cursor_y {current_line_idx} out of bounds.")
+                return False # No change possible
+
+            # If selection is not active, start it from the current cursor position.
+            # This current position becomes the 'anchor' (selection_start).
+            if not self.is_selecting:
+                self.selection_start = (self.cursor_y, self.cursor_x)
+                self.is_selecting = True
+            
+            # Move the cursor to the beginning of the current line (column 0).
+            self.cursor_x = 0
+            
+            # Update the end of the selection to the new cursor position (beginning of the line).
+            self.selection_end = (self.cursor_y, self.cursor_x)
+            
+            # Adjust horizontal scroll if necessary, as cursor moved to column 0.
+            # _clamp_scroll will handle if self.cursor_x (now 0) is less than self.scroll_left.
+            self._clamp_scroll()
+
+        # Determine if any relevant state actually changed.
+        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
+             (self.scroll_top, self.scroll_left) != original_scroll_pos or # Check both scroll dimensions
+             self.is_selecting != original_is_selecting_flag or
+             self.selection_start != original_selection_start or
+             self.selection_end != original_selection_end ):
+            changed_state = True
+            logging.debug(
+                f"select_to_home: New cursor ({self.cursor_y},{self.cursor_x}), "
+                f"selection_end ({self.selection_end}). Changed: {changed_state}"
+            )
+        else:
+            logging.debug("select_to_home: No change in cursor, scroll, or selection state.")
+            
+        return changed_state
+
+    # 6. Selection End
+    def select_to_end(self) -> bool:
+        """
+        Extends the selection from the current cursor position to the end of the current line.
+        If no selection is active, starts a new selection.
+        The cursor moves to the end of the line.
+
+        Returns:
+            bool: True if the cursor position, selection state/boundaries, or scroll position changed,
+                  False otherwise.
+        """
+        # Store initial state for comparison
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
+        original_selection_start = self.selection_start
+        original_selection_end = self.selection_end
+        original_is_selecting_flag = self.is_selecting
+        
+        changed_state = False
+
+        with self._state_lock:
+            current_line_idx = self.cursor_y
+            if current_line_idx >= len(self.text): # Should not happen with valid cursor
+                logging.warning(f"select_to_end: cursor_y {current_line_idx} out of bounds.")
+                return False # No change possible
+
+            current_line_content = self.text[current_line_idx]
+            current_line_length = len(current_line_content)
+
+            # If selection is not active, start it from the current cursor position.
+            # This current position becomes the 'anchor' (selection_start).
+            if not self.is_selecting:
+                self.selection_start = (self.cursor_y, self.cursor_x)
+                self.is_selecting = True
+            
+            # Move the cursor to the end of the current line.
+            self.cursor_x = current_line_length
+            
+            # Update the end of the selection to the new cursor position (end of the line).
+            self.selection_end = (self.cursor_y, self.cursor_x)
+            
+            # Adjust scroll if necessary, as cursor may have moved far right.
+            self._clamp_scroll()
+
+        # Determine if any relevant state actually changed.
+        if ( (self.cursor_y, self.cursor_x) != original_cursor_pos or
+             (self.scroll_top, self.scroll_left) != original_scroll_pos or
+             self.is_selecting != original_is_selecting_flag or
+             self.selection_start != original_selection_start or
+             self.selection_end != original_selection_end ):
+            changed_state = True
+            logging.debug(
+                f"select_to_end: New cursor ({self.cursor_y},{self.cursor_x}), "
+                f"selection_end ({self.selection_end}). Changed: {changed_state}"
+            )
+        else:
+            logging.debug("select_to_end: No change in cursor, scroll, or selection state.")
+            
+        return changed_state
+
+    # 7. Selection ALL
+    def select_all(self) -> bool:
+        """
+        Selects all text in the document.
+        Moves the cursor to the end of the selection.
+        Sets a status message.
+        Adjusts scroll to ensure the end of the selection (and cursor) is visible.
+
+        Returns:
+            bool: True, as this action always changes the selection state, 
+                  cursor position, potentially scroll, and status message,
+                  thus requiring a redraw.
+        """
+        logging.debug("select_all called")
+
+        # Store original state for comparison, though this action almost always changes it
+        original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
+        original_cursor_pos = (self.cursor_y, self.cursor_x)
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
+        original_status = self.status_message
+        
+        with self._state_lock: # Ensure atomicity of state changes
+            if not self.text: # Should not happen if text is always at least [""]
+                self.text = [""] # Ensure there's at least one line
+                logging.warning("select_all: Text buffer was unexpectedly empty, initialized to [''].")
+
+            # Set selection start to the beginning of the document
+            self.selection_start = (0, 0)
+
+            # Determine the end of the document
+            # If the buffer is [""] (one empty line), last_line_idx is 0, len(self.text[0]) is 0.
+            # So selection_end will be (0,0).
+            # If buffer has content, e.g. ["abc", "de"], last_line_idx is 1, len(self.text[1]) is 2.
+            # So selection_end will be (1,2).
+            last_line_idx = max(0, len(self.text) - 1)
+            self.selection_end = (last_line_idx, len(self.text[last_line_idx]))
+            
+            self.is_selecting = True # Mark that selection is active
+
+            # Move the cursor to the end of the new selection
+            self.cursor_y, self.cursor_x = self.selection_end
+            
+            self._set_status_message("All text selected")
+            
+            # Adjust scroll to make the new cursor position (end of selection) visible
+            self._clamp_scroll() 
+
+        # Determine if a redraw is needed by comparing relevant state aspects
+        # For select_all, it's virtually guaranteed to change state.
+        if (self.is_selecting != original_selection_state[0] or
+            self.selection_start != original_selection_state[1] or
+            self.selection_end != original_selection_state[2] or
+            (self.cursor_y, self.cursor_x) != original_cursor_pos or
+            (self.scroll_top, self.scroll_left) != original_scroll_pos or
+            self.status_message != original_status):
+            return True
+        
+        return False # Should technically not be reached if "All text selected" is always set.
+
+
+    ## Методы блочных отступов/комментирования ===============================================
+    # 
+    # (также влияют на self.cursor_x/y после изменения выделения)
+    # 1. handle_block_indent(self)
+    # 2. handle_block_unindent(self)
+    # 3. unindent_current_line(self)
+    # 4. comment_lines(self, ...)
+    # 5. uncomment_lines(self, ...)
+
+    # 1.
+    def handle_block_indent(self) -> bool:
+        """
+        Increases indentation for all lines within the current selection.
+        Updates selection, cursor, modified status, and action history.
+
+        Returns:
+            bool: True if any lines were indented or if the status message changed,
+                  indicating a redraw is needed. False if no selection was active.
+        """
+        if not self.is_selecting or not self.selection_start or not self.selection_end:
+            self._set_status_message("No selection to indent.")
+            return True # Status message changed
+
+        original_status = self.status_message
+        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
+        original_cursor_tuple = (self.cursor_y, self.cursor_x)
+        
+        made_actual_text_change = False
+
+        with self._state_lock:
+            norm_range = self._get_normalized_selection_range()
+            if not norm_range: 
+                logging.warning("handle_block_indent: Could not get normalized selection range despite active selection.")
+                self._set_status_message("Selection error during indent.")
+                return True 
+
+            start_coords, end_coords = norm_range
+            start_y_idx, start_x_in_line_sel = start_coords 
+            end_y_idx, end_x_in_line_sel = end_coords     
+            
+            tab_size = self.config.get("editor", {}).get("tab_size", 4)
+            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+            indent_string = " " * tab_size if use_spaces else "\t"
+            indent_char_length = len(indent_string) 
+
+            undo_changes_list: List[Dict[str, Any]] = []
+            indented_line_count = 0
+
+            for current_y in range(start_y_idx, end_y_idx + 1):
+                if current_y >= len(self.text): 
+                    continue
+                
+                original_line_content = self.text[current_y]
+                self.text[current_y] = indent_string + original_line_content
+                
+                undo_changes_list.append({
+                    "line_index": current_y,
+                    "original_text": original_line_content,
+                    "new_text": self.text[current_y]
+                })
+                indented_line_count += 1
+                made_actual_text_change = True
+            
+            if made_actual_text_change:
+                self.modified = True
+                
+                new_selection_start_x = start_x_in_line_sel + indent_char_length
+                new_selection_end_x = end_x_in_line_sel + indent_char_length
+                
+                self.selection_start = (start_y_idx, new_selection_start_x)
+                self.selection_end = (end_y_idx, new_selection_end_x)
+                
+                self.cursor_y, self.cursor_x = self.selection_end 
+
+                self.action_history.append({
+                    "type": "block_indent", 
+                    "changes": undo_changes_list,
+                    "indent_str_used": indent_string, 
+                    "start_y": start_y_idx, 
+                    "end_y": end_y_idx, 
+                    "selection_before": original_selection_tuple[1:], 
+                    "cursor_before_no_selection": None, 
+                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
+                    "cursor_after_no_selection": None
+                })
+                self.undone_actions.clear()
+                self._set_status_message(f"Indented {indented_line_count} line(s)")
+                logging.debug(
+                    f"Block indent: {indented_line_count} lines from {start_y_idx}-{end_y_idx} "
+                    f"indented by '{indent_string}'. New selection: {self.selection_start} -> {self.selection_end}"
+                )
+                return True
+            else:
+                if self.status_message == original_status:
+                     self._set_status_message("No lines selected for indent operation.")
+                return self.status_message != original_status
+        # Default return if somehow lock isn't acquired or other paths missed
+        return False
+    
+    # 2.
+    def handle_block_unindent(self) -> bool:
+        """
+        Decreases indentation for all lines within the current selection.
+        Updates selection, cursor, modified status, and action history.
+
+        Returns:
+            bool: True if any lines were unindented or if the status message changed,
+                  False otherwise (e.g., no selection or nothing to unindent).
+        """
+        if not self.is_selecting or not self.selection_start or not self.selection_end:
+            self._set_status_message("No selection to unindent.")
+            return True # Status message changed
+
+        original_status = self.status_message
+        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
+        
+        made_actual_text_change = False
+
+        with self._state_lock:
+            norm_range = self._get_normalized_selection_range()
+            if not norm_range:
+                logging.warning("handle_block_unindent: Could not get normalized selection range despite active selection.")
+                self._set_status_message("Selection error during unindent.")
+                return True
+
+            start_coords, end_coords = norm_range
+            start_y_idx, start_x_in_line_sel = start_coords
+            end_y_idx, end_x_in_line_sel = end_coords
+            
+            tab_size = self.config.get("editor", {}).get("tab_size", 4)
+            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+            # Number of characters to attempt to remove for unindentation
+            unindent_char_count_to_try = tab_size if use_spaces else 1
+            
+            undo_changes_list: List[Dict[str, Any]] = []
+            unindented_line_count = 0
+            
+            # Store characters actually removed per line for accurate cursor/selection adjustment
+            chars_removed_from_sel_start_line = 0
+            chars_removed_from_sel_end_line = 0
+
+            for current_y in range(start_y_idx, end_y_idx + 1):
+                if current_y >= len(self.text):
+                    continue
+
+                original_line_content = self.text[current_y]
+                line_to_modify = self.text[current_y]
+                prefix_that_was_removed = ""
+                
+                if use_spaces:
+                    actual_spaces_to_remove = 0
+                    for i in range(min(len(line_to_modify), unindent_char_count_to_try)):
+                        if line_to_modify[i] == ' ':
+                            actual_spaces_to_remove += 1
+                        else:
+                            break
+                    if actual_spaces_to_remove > 0:
+                        prefix_that_was_removed = line_to_modify[:actual_spaces_to_remove]
+                        self.text[current_y] = line_to_modify[actual_spaces_to_remove:]
+                else: # use_tabs
+                    if line_to_modify.startswith('\t'):
+                        prefix_that_was_removed = '\t'
+                        self.text[current_y] = line_to_modify[1:]
+                
+                if prefix_that_was_removed:
+                    undo_changes_list.append({
+                        "line_index": current_y,
+                        "original_text": original_line_content,
+                        "new_text": self.text[current_y]
+                    })
+                    unindented_line_count += 1
+                    made_actual_text_change = True
+                    if current_y == start_y_idx:
+                        chars_removed_from_sel_start_line = len(prefix_that_was_removed)
+                    if current_y == end_y_idx: # Could be same as start_y_idx
+                        chars_removed_from_sel_end_line = len(prefix_that_was_removed)
+            
+            if made_actual_text_change:
+                self.modified = True
+                
+                new_selection_start_x = max(0, start_x_in_line_sel - chars_removed_from_sel_start_line)
+                new_selection_end_x = max(0, end_x_in_line_sel - chars_removed_from_sel_end_line)
+                
+                self.selection_start = (start_y_idx, new_selection_start_x)
+                self.selection_end = (end_y_idx, new_selection_end_x)
+                
+                self.cursor_y, self.cursor_x = self.selection_end
+
+                self.action_history.append({
+                    "type": "block_unindent", # Specific type for undo/redo
+                    "changes": undo_changes_list,
+                    # "unindent_str_len_map": {y: len_removed for y, len_removed in ...} # Optional, if redo needs it
+                    "start_y": start_y_idx, "end_y": end_y_idx,
+                    "selection_before": original_selection_tuple[1:],
+                    "cursor_before_no_selection": None,
+                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
+                    "cursor_after_no_selection": None
+                })
+                self.undone_actions.clear()
+                self._set_status_message(f"Unindented {unindented_line_count} line(s)")
+                logging.debug(
+                    f"Block unindent: {unindented_line_count} lines from {start_y_idx}-{end_y_idx} unindented. "
+                    f"New selection: {self.selection_start} -> {self.selection_end}"
+                )
+                return True
+            else:
+                if self.status_message == original_status:
+                    self._set_status_message("Nothing to unindent in selection.")
+                return self.status_message != original_status
+
+    # 3.
+    def unindent_current_line(self) -> bool:
+        """
+        Decreases indentation of the current line if there is no active selection.
+        Returns True if the line was unindented or status message changed, False otherwise.
+        """
+        if self.is_selecting: 
+            # This action is intended for when there's no selection.
+            # Block unindent is handled by handle_smart_unindent -> handle_block_unindent.
+            return False 
+
+        original_status = self.status_message
+        original_line_content = ""
+        original_cursor_pos = (self.cursor_y, self.cursor_x) # For history and change detection
+        made_text_change = False
+
+        with self._state_lock:
+            current_y = self.cursor_y
+            if current_y >= len(self.text): 
+                logging.warning(f"unindent_current_line: cursor_y {current_y} out of bounds.")
+                return False 
+
+            original_line_content = self.text[current_y] # Save for undo
+            line_to_modify = self.text[current_y]
+
+            if not line_to_modify or not (line_to_modify.startswith(' ') or line_to_modify.startswith('\t')):
+                self._set_status_message("Nothing to unindent at line start.")
+                return self.status_message != original_status
+
+            tab_size = self.config.get("editor", {}).get("tab_size", 4)
+            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+            unindent_char_count_to_try = tab_size if use_spaces else 1
+            
+            chars_removed_from_line = 0
+
+            if use_spaces:
+                actual_spaces_to_remove = 0
+                for i in range(min(len(line_to_modify), unindent_char_count_to_try)):
+                    if line_to_modify[i] == ' ':
+                        actual_spaces_to_remove += 1
+                    else:
+                        break
+                if actual_spaces_to_remove > 0:
+                    self.text[current_y] = line_to_modify[actual_spaces_to_remove:]
+                    chars_removed_from_line = actual_spaces_to_remove
+            else: # use_tabs
+                if line_to_modify.startswith('\t'):
+                    self.text[current_y] = line_to_modify[1:]
+                    chars_removed_from_line = 1 
+            
+            if chars_removed_from_line > 0:
+                made_text_change = True
+                self.modified = True
+                # Adjust cursor: move left by the number of characters removed, but not before column 0
+                self.cursor_x = max(0, self.cursor_x - chars_removed_from_line)
+                
+                self.action_history.append({
+                    "type": "block_unindent", # Re-use for consistency with undo/redo logic
+                    "changes": [{
+                        "line_index": current_y,
+                        "original_text": original_line_content,
+                        "new_text": self.text[current_y]
+                    }],
+                    "selection_before": None, # No selection was active
+                    "cursor_before_no_selection": original_cursor_pos,
+                    "selection_after": None,
+                    "cursor_after_no_selection": (self.cursor_y, self.cursor_x)
+                })
+                self.undone_actions.clear()
+                self._set_status_message("Line unindented.")
+                logging.debug(f"Unindented line {current_y}. Removed {chars_removed_from_line} char(s). Cursor at {self.cursor_x}")
+                return True
+            else:
+                if self.status_message == original_status:
+                     self._set_status_message("Nothing effectively unindented on current line.")
+                return self.status_message != original_status
+
+    # 4.  ───────────────────── Commenting lines ─────────────────────
+    def comment_lines(self, start_y: int, end_y: int, comment_prefix: str) -> bool:
+        """
+        Comments a range of lines by prepending the comment_prefix.
+        Avoids double-commenting if a line already starts with the prefix (after indent).
+        Updates action history and modified status.
+
+        Args:
+            start_y (int): The starting line index (0-based).
+            end_y (int): The ending line index (0-based).
+            comment_prefix (str): The comment prefix to add (e.g., "// ", "# ").
+
+        Returns:
+            bool: True if any lines were actually commented, False otherwise.
+                  (Status message changes are handled separately by the caller or here).
+        """
+        made_actual_text_change = False
+        original_status = self.status_message # To check if only status changes
+
+        # Store original selection/cursor states for action history
+        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
+        original_cursor_tuple = (self.cursor_y, self.cursor_x) # if not selecting
+
+        with self._state_lock: 
+            undo_changes_list: List[Dict[str, Any]] = []
+            min_indent = float('inf')
+            non_empty_lines_in_block_indices = []
+
+            # First pass: determine minimum indentation of non-empty lines in the block
+            for y_scan in range(start_y, end_y + 1):
+                if y_scan >= len(self.text): continue
+                line_content_scan = self.text[y_scan]
+                if line_content_scan.strip(): # If line is not blank
+                    non_empty_lines_in_block_indices.append(y_scan)
+                    indent_len = len(line_content_scan) - len(line_content_scan.lstrip())
+                    min_indent = min(min_indent, indent_len)
+            
+            if not non_empty_lines_in_block_indices: # All lines in selection are blank or whitespace
+                min_indent = 0 # Add comment at the beginning of whitespace lines or col 0 for empty
+            
+            lines_actually_commented_count = 0
+            
+            # Store original texts before modification for undo
+            original_texts_map = {
+                y_iter: self.text[y_iter] for y_iter in range(start_y, end_y + 1) if y_iter < len(self.text)
+            }
+
+            for y_iter in range(start_y, end_y + 1):
+                if y_iter >= len(self.text): continue
+                
+                line_content_to_modify = self.text[y_iter]
+                
+                # Determine insertion position for the comment prefix
+                # For non-blank lines: at min_indent
+                # For blank/whitespace-only lines: at the start of non-space whitespace, or col 0
+                insert_pos: int
+                is_blank_line = not line_content_to_modify.strip()
+                
+                if is_blank_line:
+                    # For blank lines, find first non-space char (e.g. tab) or end of string
+                    first_non_space = 0
+                    for i, char_in_line in enumerate(line_content_to_modify):
+                        if char_in_line != ' ':
+                            first_non_space = i
+                            break
+                    else: # Line is all spaces or empty
+                        first_non_space = len(line_content_to_modify)
+                    insert_pos = first_non_space
+                else: # Non-blank line
+                    insert_pos = int(min_indent) # Ensure min_indent is int if not float('inf')
+
+                # --- Check if already commented with the exact same prefix at insert_pos ---
+                # This check needs to be robust.
+                # We check if line[insert_pos:] starts with comment_prefix.
+                already_commented = False
+                if len(line_content_to_modify) >= insert_pos + len(comment_prefix):
+                    if line_content_to_modify[insert_pos:].startswith(comment_prefix):
+                        already_commented = True
+                        logging.debug(f"Line {y_iter+1} already commented with '{comment_prefix}', skipping.")
+
+                if not already_commented:
+                    self.text[y_iter] = (line_content_to_modify[:insert_pos] + 
+                                         comment_prefix + 
+                                         line_content_to_modify[insert_pos:])
+                    
+                    undo_changes_list.append({
+                        "line_index": y_iter, 
+                        "original_text": original_texts_map.get(y_iter, line_content_to_modify), 
+                        "new_text": self.text[y_iter]
+                    })
+                    lines_actually_commented_count += 1
+                    made_actual_text_change = True
+
+            if made_actual_text_change:
+                self.modified = True
+                
+                # Adjust selection and cursor
+                # If selection was active, its x-coordinates might shift by len(comment_prefix)
+                # if the comment was inserted before or within the selection's x-range on those lines.
+                if self.is_selecting and self.selection_start and self.selection_end:
+                    s_y, s_x = self.selection_start
+                    e_y, e_x = self.selection_end
+                    
+                    # A simple shift if the comment was added at or before the selection start on the line
+                    new_s_x = s_x
+                    if s_y >= start_y and s_y <= end_y and insert_pos <= s_x : # Check if insert_pos is defined if loop didn't run
+                         new_s_x = s_x + len(comment_prefix)
+                    
+                    new_e_x = e_x
+                    if e_y >= start_y and e_y <= end_y and insert_pos <= e_x:
+                         new_e_x = e_x + len(comment_prefix)
+
+                    self.selection_start = (s_y, new_s_x)
+                    self.selection_end = (e_y, new_e_x)
+                    self.cursor_y, self.cursor_x = self.selection_end
+                elif not self.is_selecting: # Single line comment at cursor_y
+                    if self.cursor_y >= start_y and self.cursor_y <= end_y and insert_pos <= self.cursor_x:
+                         self.cursor_x += len(comment_prefix)
+
+                self.action_history.append({
+                    "type": "comment_block", # Use a specific type
+                    "changes": undo_changes_list, 
+                    "comment_prefix": comment_prefix, # Store for redo/context
+                    "start_y": start_y, "end_y": end_y, 
+                    "selection_before": original_selection_tuple[1:], # (start_coords, end_coords)
+                    "cursor_before_no_selection": original_cursor_tuple if not original_selection_tuple[0] else None,
+                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
+                    "cursor_after_no_selection": (self.cursor_y, self.cursor_x) if not self.is_selecting else None
+                })
+                self.undone_actions.clear()
+                self._set_status_message(f"Commented {lines_actually_commented_count} line(s)")
+                return True
+            else:
+                # No lines were actually commented (e.g., all were already commented)
+                if self.status_message == original_status:
+                    self._set_status_message("Selected lines already commented.")
+                return self.status_message != original_status
+            
+    # 5.  ───────────────────── Uncommenting  lines ───────────────────── 
+    # Note: This method is used to uncomment lines that were previously commented with the same prefix.
+    def uncomment_lines(self, start_y: int, end_y: int, comment_prefix: str) -> bool:
+        """
+        Uncomments a range of lines by removing the specified comment_prefix.
+        Updates action history and modified status.
+
+        Args:
+            start_y (int): The starting line index (0-based).
+            end_y (int): The ending line index (0-based).
+            comment_prefix (str): The comment prefix to remove (e.g., "// ", "# ").
+
+        Returns:
+            bool: True if any lines were actually unindented, False otherwise.
+                  (Status message changes are handled by the caller or set here and will
+                   trigger redraw via main loop's status check).
+        """
+        made_actual_text_change = False
+        original_status = self.status_message # To check if only status changes
+        
+        # Store original selection/cursor states for action history
+        original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
+        original_cursor_tuple = (self.cursor_y, self.cursor_x)
+
+
+        with self._state_lock: 
+            undo_changes_list = []
+            prefix_to_remove_stripped = comment_prefix.strip() 
+            
+            # For adjusting selection, track how much was removed from start/end lines of selection
+            chars_removed_from_sel_start_line = 0
+            chars_removed_from_sel_end_line = 0
+
+            for y_iter in range(start_y, end_y + 1):
+                if y_iter >= len(self.text): 
+                    continue
+                
+                original_line_text = self.text[y_iter]
+                line_to_modify = self.text[y_iter]
+                current_line_unindented = False
+                
+                # Determine leading whitespace
+                leading_whitespace = ""
+                for char_idx, char_val in enumerate(line_to_modify):
+                    if char_val.isspace():
+                        leading_whitespace += char_val
+                    else:
+                        break
+                
+                content_after_indent = line_to_modify[len(leading_whitespace):]
+                prefix_actually_removed_len = 0
+
+                if content_after_indent.startswith(comment_prefix): # Exact prefix match (including trailing space if any)
+                    self.text[y_iter] = leading_whitespace + content_after_indent[len(comment_prefix):]
+                    prefix_actually_removed_len = len(comment_prefix)
+                    current_line_unindented = True
+                elif content_after_indent.startswith(prefix_to_remove_stripped): 
+                    # If exact prefix (with space) didn't match, try stripped prefix.
+                    # This handles cases where user might have `comment_prefix = "# "` but line is `#comment`
+                    # or `comment_prefix = "#"` and line is `# comment`
+                    # We should only remove the stripped prefix then.
+                    # Check if there's a space after the stripped prefix that should also be removed
+                    # if the original comment_prefix had a trailing space.
+                    len_stripped = len(prefix_to_remove_stripped)
+                    if comment_prefix.endswith(' ') and \
+                       len(content_after_indent) > len_stripped and \
+                       content_after_indent[len_stripped] == ' ':
+                        self.text[y_iter] = leading_whitespace + content_after_indent[len_stripped + 1:]
+                        prefix_actually_removed_len = len_stripped + 1
+                    else:
+                        self.text[y_iter] = leading_whitespace + content_after_indent[len_stripped:]
+                        prefix_actually_removed_len = len_stripped
+                    current_line_unindented = True
+
+                if current_line_unindented:
+                    made_actual_text_change = True
+                    undo_changes_list.append({
+                        "line_index": y_iter,
+                        "original_text": original_line_text,
+                        "new_text": self.text[y_iter]
+                    })
+                    if y_iter == original_selection_tuple[1][0] if original_selection_tuple[1] else -1 : # start_y of selection
+                        chars_removed_from_sel_start_line = prefix_actually_removed_len
+                    if y_iter == original_selection_tuple[2][0] if original_selection_tuple[2] else -1 : # end_y of selection
+                        chars_removed_from_sel_end_line = prefix_actually_removed_len
+
+
+            if made_actual_text_change: 
+                self.modified = True
+                
+                # Adjust selection and cursor
+                if self.is_selecting and self.selection_start and self.selection_end:
+                    s_y, s_x = self.selection_start
+                    e_y, e_x = self.selection_end
+                    # Adjust based on characters removed from the specific lines of selection start/end
+                    self.selection_start = (s_y, max(0, s_x - chars_removed_from_sel_start_line))
+                    self.selection_end = (e_y, max(0, e_x - chars_removed_from_sel_end_line))
+                    self.cursor_y, self.cursor_x = self.selection_end
+                elif not self.is_selecting: # If it was a single line unindent without selection
+                     # current_y should be self.cursor_y here
+                     self.cursor_x = max(0, self.cursor_x - chars_removed_from_sel_start_line) # Assuming single line op
+
+                self.action_history.append({
+                    "type": "uncomment_block", # Or "block_unindent" if separating logic
+                    "changes": undo_changes_list,
+                    "comment_prefix": comment_prefix, # Store for context if needed by redo
+                    "start_y": start_y, "end_y": end_y,
+                    "selection_before": original_selection_tuple[1:], # (start_coords, end_coords)
+                    "cursor_before_no_selection": original_cursor_tuple if not original_selection_tuple[0] else None,
+                    "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
+                    "cursor_after_no_selection": (self.cursor_y, self.cursor_x) if not self.is_selecting else None
+                })
+                self.undone_actions.clear()
+                self._set_status_message(f"Uncommented {len(undo_changes_list)} line(s)")
+                return True # Indicates actual text change
+            else:
+                self._set_status_message(f"Nothing to uncomment in lines {start_y+1}-{end_y+1} with prefix '{comment_prefix}'")
+                return self.status_message != original_status # True if status changed
+            
 
     def handle_char_input(self, key):
         """
@@ -5427,34 +5918,6 @@ class SwayEditor:
         else:
             logging.debug(f"Unhandled control key: {key_code}")
 
-
-    def handle_enter(self) -> bool:
-        """
-        Handles the Enter key.
-        If text is selected, it's deleted by insert_text first. 
-        Then a newline character is inserted.
-        Manages action history via the insert_text method.
-        Returns True as these actions (deletion of selection or insertion of newline) 
-        always change the text content or selection state.
-        """
-        changed_state = False
-        with self._state_lock:
-            # self.insert_text will handle:
-            # 1. Deleting selection if active (and recording "delete_selection" action).
-            # 2. Inserting the newline character (and recording "insert" action).
-            # 3. Returning True if any modification occurred.
-            if self.insert_text("\n"):
-                changed_state = True
-            
-        if changed_state:
-            logging.debug("Handled Enter key: Text or selection modified.")
-        else:
-            # This case should ideally not be reached if insert_text correctly inserts a newline
-            # or if a selection was present (which would be cleared).
-            logging.debug("Handled Enter key: No effective change (unexpected for Enter).")
-            
-        return changed_state # Should always be True due to newline insertion
-    
 
     def parse_key(self, key_str: str) -> int:
         """
@@ -7249,89 +7712,6 @@ class SwayEditor:
             changed_state = True
             
         return changed_state
-    
-    def _goto_match(self, match_index: int) -> None: # Added type hint and English docstring
-        """
-        Moves the cursor and adjusts the scroll view to the search match
-        specified by `match_index`.
-
-        This method assumes `self.search_matches` is populated and `match_index` is valid.
-        It updates `self.cursor_y`, `self.cursor_x`, `self.scroll_top`, and `self.scroll_left`
-        as necessary to make the match visible, ideally near the center of the screen.
-
-        Args:
-            match_index (int): The index of the desired match in `self.search_matches`.
-        """
-        # 1. Validate the match_index and ensure search_matches is populated.
-        if not self.search_matches or not (0 <= match_index < len(self.search_matches)):
-            logging.warning(
-                f"_goto_match called with invalid index {match_index} for "
-                f"{len(self.search_matches)} available matches. No action taken."
-            )
-            return # Invalid index or no matches to go to
-
-        # 2. Get the coordinates of the target match.
-        # search_matches stores tuples: (row_index, column_start_index, column_end_index)
-        target_row, target_col_start, _ = self.search_matches[match_index] # We only need start for cursor
-
-        logging.debug(
-            f"_goto_match: Navigating to match {match_index + 1}/{len(self.search_matches)} "
-            f"at (row:{target_row}, col:{target_col_start})."
-        )
-
-        # 3. Move the logical cursor to the start of the match.
-        # Ensure target_row and target_col_start are valid within the current text buffer.
-        # This is a safeguard; _collect_matches should provide valid indices.
-        if target_row >= len(self.text):
-            logging.error(f"_goto_match: Match row {target_row} is out of bounds for text length {len(self.text)}.")
-            return
-        if target_col_start > len(self.text[target_row]): # Allow being at the end of the line
-            logging.error(f"_goto_match: Match col_start {target_col_start} is out of bounds for line {target_row} (len {len(self.text[target_row])}).")
-            # Optionally clamp target_col_start or return
-            # target_col_start = len(self.text[target_row]) # Clamp to end of line
-            return
-
-        self.cursor_y = target_row
-        self.cursor_x = target_col_start
-        
-        # 4. Adjust scroll to ensure the new cursor position is visible.
-        # self._clamp_scroll() handles both vertical and horizontal scrolling
-        # to bring self.cursor_y and self.cursor_x into view.
-        # It also attempts to center the cursor line if it's far off-screen.
-        
-        # The previous logic for adjusting scroll_top was a simplified centering.
-        # _clamp_scroll provides a more comprehensive adjustment.
-        # Let's review _clamp_scroll's behavior for centering.
-        # Current _clamp_scroll:
-        #   if self.cursor_y < self.scroll_top: self.scroll_top = self.cursor_y
-        #   elif self.cursor_y >= self.scroll_top + text_height: self.scroll_top = self.cursor_y - text_height + 1
-        # This ensures visibility but doesn't explicitly center.
-        # To achieve better centering for _goto_match, we can pre-adjust scroll_top here.
-        
-        if self.visible_lines > 0: # visible_lines should be height - 2 (status/number bars)
-            text_area_height = self.visible_lines
-            
-            # Desired scroll_top to center the cursor_y, or bring it into view if near edges.
-            # Try to place the target line roughly in the middle third of the screen.
-            desired_scroll_top = self.cursor_y - (text_area_height // 3)
-            
-            # Clamp desired_scroll_top to valid range: [0, max_scroll_possible]
-            max_scroll_possible = max(0, len(self.text) - text_area_height)
-            self.scroll_top = max(0, min(desired_scroll_top, max_scroll_possible))
-            
-            logging.debug(f"_goto_match: Tentative scroll_top set to {self.scroll_top} to center line {self.cursor_y}.")
-        
-        # Now, call _clamp_scroll() to finalize both vertical and horizontal scroll based on
-        # the new cursor_y, cursor_x, and the tentative scroll_top.
-        # _clamp_scroll will also handle horizontal scrolling for cursor_x.
-        self._clamp_scroll() 
-        
-        logging.debug(
-            f"_goto_match: Final state after _clamp_scroll: "
-            f"Cursor=({self.cursor_y},{self.cursor_x}), Scroll=({self.scroll_top},{self.scroll_left})"
-        )
-        # This method modifies editor state (cursor, scroll) but does not directly
-        # return a bool for redraw; the caller (find_prompt or find_next) handles that.
 
 
     def validate_filename(self, filename: str) -> bool:
@@ -8159,121 +8539,6 @@ class SwayEditor:
             logging.debug("Git status updated: no repo found.")
 
 
-    # === GOTO LINE ============================================================
-    def goto_line(self) -> bool:
-        """
-        Moves the cursor to a specified line number. Supports absolute numbers,
-        relative numbers (+N, -N), and percentages (N%).
-        Returns True if the cursor, scroll position, or status message changed, 
-        False otherwise (e.g., invalid input but status didn't change from original).
-        """
-        original_status = self.status_message
-        original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_top = self.scroll_top
-        
-        # The prompt itself will temporarily change the status bar.
-        # We need to capture the status *after* the prompt to see if the prompt interaction
-        # itself should be considered the "final" status change for this operation if parsing fails.
-        prompt_text = f"Go to line (1-{len(self.text)}, ±N, %): "
-        raw_input_str = self.prompt(prompt_text)
-        
-        status_after_prompt = self.status_message # Status might have been restored by prompt's finally block
-
-        if not raw_input_str: # User cancelled the prompt (e.g., pressed Esc or Enter on empty input)
-            # If the prompt itself set a new status (e.g. "Prompt timeout"), that's a change.
-            # If prompt restored original_status, but user cancelled, set "Goto cancelled".
-            if status_after_prompt == original_status:
-                self._set_status_message("Goto cancelled")
-            # Return True if status message is different from what it was *before* the prompt.
-            return self.status_message != original_status
-
-        target_line_num_one_based: Optional[int] = None
-        total_lines = len(self.text)
-        if total_lines == 0: # Should not happen if self.text always has at least [""]
-            self._set_status_message("Cannot go to line: buffer is empty")
-            return self.status_message != original_status
-
-        try:
-            if raw_input_str.endswith('%'):
-                percentage_str = raw_input_str.rstrip('%')
-                if not percentage_str: # Just '%' was entered
-                    raise ValueError("Percentage value missing.")
-                percentage = float(percentage_str)
-                if not (0 <= percentage <= 100):
-                    self._set_status_message("Percentage out of range (0-100)")
-                    return True # Status changed
-                # Calculate target line (1-based), ensuring it's within [1, total_lines]
-                # round() handles .5 by rounding to the nearest even number in Python 3.
-                # int(val + 0.5) is a common way to round half up for positive numbers.
-                # For percentages, simple rounding is usually fine.
-                target_line_num_one_based = max(1, min(total_lines, round(total_lines * percentage / 100.0)))
-                if target_line_num_one_based == 0 and total_lines > 0 : target_line_num_one_based = 1 # Ensure at least line 1
-                logging.debug(f"Goto: Percentage {percentage}%, target line {target_line_num_one_based}")
-            elif raw_input_str.startswith(('+', '-')):
-                if len(raw_input_str) == 1: # Just '+' or '-' was entered
-                    raise ValueError("Relative offset value missing.")
-                relative_offset = int(raw_input_str)
-                # Current line is 0-based (self.cursor_y), target is 1-based
-                target_line_num_one_based = (self.cursor_y + 1) + relative_offset
-                logging.debug(f"Goto: Relative offset {relative_offset}, from line {self.cursor_y + 1}, target line {target_line_num_one_based}")
-            else:
-                target_line_num_one_based = int(raw_input_str)
-                logging.debug(f"Goto: Absolute target line {target_line_num_one_based}")
-
-            # Validate the calculated target_line_num_one_based
-            if target_line_num_one_based is None: # Should not happen if parsing logic is complete
-                 raise ValueError("Line number could not be determined.")
-            if not (1 <= target_line_num_one_based <= total_lines):
-                self._set_status_message(f"Line number out of range (1–{total_lines})")
-                return True # Status changed
-
-            # Convert 1-based target to 0-based for internal use
-            target_y_zero_based = target_line_num_one_based - 1
-
-            # Only proceed if the target is different from the current line
-            if target_y_zero_based == self.cursor_y and self.cursor_x == min(self.cursor_x, len(self.text[target_y_zero_based])):
-                 # If already on the target line and x is valid for it (or will be clamped to valid)
-                 # No actual cursor line change, but check if x needs clamping or status needs update.
-                 self.cursor_x = min(self.cursor_x, len(self.text[target_y_zero_based])) # Ensure x is valid
-                 self._clamp_scroll() # Ensure scroll is correct for current position
-                 if (self.cursor_y, self.cursor_x) != original_cursor_pos or self.scroll_top != original_scroll_top:
-                     self._set_status_message(f"Moved to line {target_line_num_one_based}, column adjusted")
-                     return True
-                 else:
-                     self._set_status_message(f"Already at line {target_line_num_one_based}")
-                     return self.status_message != original_status
-
-            # Move cursor
-            self.cursor_y = target_y_zero_based
-            # Try to maintain horizontal cursor position, clamped to new line length
-            self.cursor_x = min(original_cursor_pos[1], len(self.text[self.cursor_y])) 
-            
-            self._clamp_scroll() # Adjust scroll to make the new cursor position visible
-
-            # Check if cursor or scroll actually changed
-            if (self.cursor_y, self.cursor_x) != original_cursor_pos or \
-               self.scroll_top != original_scroll_top:
-                self._set_status_message(f"Moved to line {target_line_num_one_based}")
-                return True
-            else:
-                # This case should be rare if logic above for "already at line" is correct.
-                # It means target was same as current, and clamp_scroll did nothing.
-                # However, the prompt was shown.
-                if status_after_prompt != original_status: # If prompt itself set a lasting status
-                    return True 
-                # If prompt restored status, but we set a new one (e.g. "already at line")
-                self._set_status_message(f"At line {target_line_num_one_based} (no change)")
-                return self.status_message != original_status
-
-        except ValueError as ve: # Handles errors from int(), float(), or custom raises
-            logging.warning(f"Goto: Invalid input format '{raw_input_str}': {ve}")
-            self._set_status_message(f"Invalid format: {raw_input_str[:30]}")
-            return True # Status changed due to error message
-        except Exception as e: # Catch any other unexpected errors
-            logging.error(f"Unexpected error in goto_line for input '{raw_input_str}': {e}", exc_info=True)
-            self._set_status_message(f"Goto error: {str(e)[:60]}...")
-            return True # Status changed due to error message
-
     def toggle_insert_mode(self) -> bool:
         """
         Toggles between Insert and Replace (Overwrite) modes for text input.
@@ -8381,150 +8646,185 @@ class SwayEditor:
         return None # No match found
 
 
+    # Highlight brackets ----------------------------
     def highlight_matching_brackets(self) -> None:
+        """Highlights the bracket at the cursor and its matching pair.
+
+        This method searches for a bracket character at or immediately to the
+        left of the current cursor position. If a bracket is found, it uses
+        `find_matching_bracket_multiline` to locate its corresponding pair.
+        If both brackets are found and are visible on the screen, they are
+        highlighted using `curses.A_REVERSE`.
+
+        The method accounts for:
+        - Cursor position being at the end of a line or on an empty line.
+        - Vertical and horizontal scrolling to determine visibility.
+        - Display widths of characters (via `self.get_char_width` and `self.get_string_width`).
+
+        This method is typically called as part of the main drawing cycle and
+        modifies the screen directly using `self.stdscr.chgat()`. It does not
+        perform `self.stdscr.refresh()` itself.
+
+        Note:
+            This implementation does NOT currently ignore brackets found within
+            string literals or comments, which can lead to incorrect matches in
+            source code.
         """
-        Highlights the bracket at the cursor and its matching pair, searching across lines.
-        The highlighting is applied directly to the screen using stdscr.chgat.
-        It relies on `find_matching_bracket_multiline` to find the pair.
-        """
-        # 1. Ensure cursor is within text and visible on screen.
+        # 1. Get terminal dimensions and ensure basic conditions are met.
         term_height, term_width = self.stdscr.getmaxyx()
-        # visible_lines is typically term_height - 2 (for status bar, line numbers)
-        # Ensure self.visible_lines is correctly maintained by the editor.
-        
+
         if not (0 <= self.cursor_y < len(self.text)):
-            logging.debug("highlight_matching_brackets: Cursor Y out of text bounds.")
+            logging.debug("highlight_matching_brackets: Cursor Y (%d) is out of text bounds (0-%d).",
+                        self.cursor_y, len(self.text) - 1)
             return
 
-        # Check if the cursor's line is visible (vertically scrolled into view)
         if not (self.scroll_top <= self.cursor_y < self.scroll_top + self.visible_lines):
-            logging.debug("highlight_matching_brackets: Cursor's line is not currently visible on screen.")
+            logging.debug(
+                "highlight_matching_brackets: Cursor's line (%d) is not currently visible on screen (scroll_top: %d, visible_lines: %d).",
+                self.cursor_y, self.scroll_top, self.visible_lines
+            )
             return
 
         current_line_text = self.text[self.cursor_y]
-        if not current_line_text: # Empty line
-            logging.debug("highlight_matching_brackets: Cursor is on an empty line.")
+        if not current_line_text and self.cursor_x == 0:
+            logging.debug("highlight_matching_brackets: Cursor is on an empty line at column 0.")
             return
 
-        # 2. Determine the bracket character at/near the cursor.
-        # If cursor is at the end of the line, check the char before it.
-        # If cursor is on a char, check that char.
-        char_y, char_x = self.cursor_y, self.cursor_x
-        
-        if char_x >= len(current_line_text): # Cursor is just after the last character
-            if char_x > 0 : # Try character to the left of cursor if at EOL
-                char_x_to_check = char_x -1
-                if current_line_text[char_x_to_check] in ")]}": # Only look for closing if at EOL
-                     char_x = char_x_to_check
-                else: return # Not on/after a closing bracket at EOL
-            else: return # Empty line or cursor at 0 on empty line
+        # 2. Determine the bracket character at or near the cursor to be matched.
+        char_y_cursor_line = self.cursor_y
+        char_x_cursor_pos_ref = self.cursor_x
 
-        if char_x < 0 : return # Should not happen with valid cursor_x
+        bracket_char_to_match: Optional[str] = None
+        # These will store the coordinates of the bracket that is actually being considered for matching.
+        final_char_y_for_first_bracket: Optional[int] = None # CORRECTLY RENAMED
+        final_char_x_for_first_bracket: Optional[int] = None # CORRECTLY RENAMED
 
-        # Check if char_x is now valid for the possibly adjusted char_x
-        if char_x >= len(current_line_text):
+        brackets_map_chars = "(){}[]"
+
+        # Scenario A: Check character directly AT the cursor's X position.
+        if char_x_cursor_pos_ref < len(current_line_text):
+            char_at_cursor = current_line_text[char_x_cursor_pos_ref]
+            if char_at_cursor in brackets_map_chars:
+                bracket_char_to_match = char_at_cursor
+                final_char_y_for_first_bracket = char_y_cursor_line # USE RENAMED
+                final_char_x_for_first_bracket = char_x_cursor_pos_ref # USE RENAMED
+                logging.debug(f"highlight_matching_brackets: Candidate bracket '{bracket_char_to_match}' AT cursor ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket}).")
+
+        # Scenario B: If no bracket AT cursor, check character to the LEFT.
+        if bracket_char_to_match is None and char_x_cursor_pos_ref > 0:
+            char_x_left = char_x_cursor_pos_ref - 1
+            if char_x_left < len(current_line_text):
+                char_left_of_cursor = current_line_text[char_x_left]
+                if char_left_of_cursor in brackets_map_chars:
+                    bracket_char_to_match = char_left_of_cursor
+                    final_char_y_for_first_bracket = char_y_cursor_line # USE RENAMED
+                    final_char_x_for_first_bracket = char_x_left       # USE RENAMED
+                    logging.debug(f"highlight_matching_brackets: Candidate bracket '{bracket_char_to_match}' LEFT of cursor ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket}).")
+
+        # If no bracket was identified, exit.
+        if bracket_char_to_match is None or final_char_x_for_first_bracket is None or final_char_y_for_first_bracket is None:
+            logging.debug(f"highlight_matching_brackets: No suitable bracket found near cursor ({char_y_cursor_line},{char_x_cursor_pos_ref}) for matching.")
             return
 
+        # 3. Find the matching bracket.
+        # Use the definitive coordinates.
+        match_coords = self.find_matching_bracket_multiline(final_char_y_for_first_bracket, final_char_x_for_first_bracket)
 
-        bracket_char_at_cursor = self.text[char_y][char_x]
-        brackets_to_match = "(){}[]"
-        if bracket_char_at_cursor not in brackets_to_match:
-            # If not directly on a bracket, check char to the left (common for closing bracket highlighting)
-            if char_x > 0:
-                char_x_left = char_x -1
-                char_left_of_cursor = self.text[char_y][char_x_left]
-                if char_left_of_cursor in brackets_to_match:
-                    char_x = char_x_left # Use the bracket to the left
-                    bracket_char_at_cursor = char_left_of_cursor
-                else:
-                    logging.debug(f"highlight_matching_brackets: No bracket at or immediately left of cursor ({char_y},{self.cursor_x}).")
-                    return
-            else:
-                logging.debug(f"highlight_matching_brackets: No bracket at cursor ({char_y},{char_x}) and no char to the left.")
-                return
-        
-        # At this point, (char_y, char_x) points to a bracket character.
-
-        # 3. Find the matching bracket using the multiline finder.
-        match_coords = self.find_matching_bracket_multiline(char_y, char_x)
         if not match_coords:
-            logging.debug(f"highlight_matching_brackets: No matching bracket found for '{bracket_char_at_cursor}' at ({char_y},{char_x}).")
-            return # No pair found
+            logging.debug(f"highlight_matching_brackets: No matching bracket found for '{bracket_char_to_match}' at ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket}).")
+            return
 
         match_y, match_x = match_coords
         
-        # Ensure matched coordinates are valid (should be, if find_matching_bracket_multiline is correct)
         if not (0 <= match_y < len(self.text) and 0 <= match_x < len(self.text[match_y])):
-            logging.warning(f"highlight_matching_brackets: Matching bracket coords ({match_y},{match_x}) out of bounds.")
+            logging.warning(f"highlight_matching_brackets: Matching bracket coords ({match_y},{match_x}) are out of text bounds.")
             return
 
-        # 4. Calculate screen coordinates for both brackets.
-        # This helper needs to be part of the class or defined locally with access to self.
-        # Assuming line_num_width is available or calculated (e.g., self._text_start_x from DrawScreen)
-        line_num_display_width = getattr(self.drawer, '_text_start_x', len(str(len(self.text))) + 1)
+        # 4. Define helper to calculate screen coordinates.
+        line_num_display_width = len(str(max(1, len(self.text)))) + 1
+        if hasattr(self.drawer, '_text_start_x') and isinstance(self.drawer._text_start_x, int) and self.drawer._text_start_x >= 0:
+            line_num_display_width = self.drawer._text_start_x
+        else:
+            logging.debug("highlight_matching_brackets: self.drawer._text_start_x not available or invalid, calculating line_num_display_width locally.")
 
-        def get_screen_coords(r_idx: int, c_idx: int) -> Optional[Tuple[int, int]]:
-            """Calculates screen (y,x) for a text coordinate (r_idx, c_idx)."""
-            if not (self.scroll_top <= r_idx < self.scroll_top + self.visible_lines):
-                return None # Row is not visible
+        def get_screen_coords_for_highlight(text_row_idx: int, text_col_idx: int) -> Optional[Tuple[int, int]]:
+            """Calculates screen (y,x) for a text coordinate.
 
-            screen_y_coord = r_idx - self.scroll_top
-            
-            # Calculate display width of the part of the line before the character
-            # This is the character's logical start column on screen, before horizontal scroll.
-            char_logical_screen_x_unscrolled = self.editor.get_string_width(self.text[r_idx][:c_idx])
-            
-            # Apply line number width and horizontal scroll
-            screen_x_coord = line_num_display_width + char_logical_screen_x_unscrolled - self.scroll_left
-            
-            # Check if horizontally visible
-            char_display_width = self.editor.get_char_width(self.text[r_idx][c_idx])
-            if screen_x_coord + char_display_width <= line_num_display_width or screen_x_coord >= term_width:
-                return None # Character is not horizontally visible
-                
-            return screen_y_coord, max(line_num_display_width, screen_x_coord) # Clamp to text area start
+            Args:
+                text_row_idx: The 0-based row index in the text buffer.
+                text_col_idx: The 0-based character column index in the line.
 
-        coords1_on_screen = get_screen_coords(char_y, char_x)
-        coords2_on_screen = get_screen_coords(match_y, match_x)
+            Returns:
+                A tuple (screen_y, screen_x) if the coordinate is visible,
+                otherwise None.
+            """
+            if not (self.scroll_top <= text_row_idx < self.scroll_top + self.visible_lines):
+                return None 
+            screen_y_coord = text_row_idx - self.scroll_top
+            try:
+                if not (0 <= text_row_idx < len(self.text)):
+                    logging.warning(f"get_screen_coords_for_highlight: text_row_idx {text_row_idx} out of bounds for self.text.")
+                    return None
+                clamped_text_col_idx = max(0, min(text_col_idx, len(self.text[text_row_idx])))
+                prefix_width_unscrolled = self.get_string_width(self.text[text_row_idx][:clamped_text_col_idx])
+            except IndexError:
+                logging.warning(f"get_screen_coords_for_highlight: IndexError accessing text for ({text_row_idx},{text_col_idx}).")
+                return None
+            screen_x_coord = line_num_display_width + prefix_width_unscrolled - self.scroll_left
+            char_display_width_at_coord: int
+            if text_col_idx >= len(self.text[text_row_idx]):
+                logging.warning(f"get_screen_coords_for_highlight: text_col_idx {text_col_idx} is at or past EOL for line {text_row_idx} (len {len(self.text[text_row_idx])}). Cannot get char width for highlighting.")
+                return None
+            else:
+                char_display_width_at_coord = self.get_char_width(self.text[text_row_idx][text_col_idx])
+            if char_display_width_at_coord <= 0:
+                logging.debug(f"get_screen_coords_for_highlight: Character at ({text_row_idx},{text_col_idx}) has width {char_display_width_at_coord}, not highlighting directly.")
+                return None
+            if screen_x_coord >= term_width or (screen_x_coord + char_display_width_at_coord) <= line_num_display_width:
+                return None
+            return screen_y_coord, max(line_num_display_width, screen_x_coord)
 
-        # 5. Highlight both brackets if they are visible on screen.
-        # Use A_BOLD or A_REVERSE or a specific color pair for highlighting.
-        highlight_attr = curses.A_REVERSE # Example attribute
+        # Calculate screen coordinates for the original bracket and its match.
+        # *** THE CRITICAL FIX IS HERE: Use the correctly named variables ***
+        coords1_on_screen = get_screen_coords_for_highlight(final_char_y_for_first_bracket, final_char_x_for_first_bracket)
+        coords2_on_screen = get_screen_coords_for_highlight(match_y, match_x)
 
-        highlight_applied = False
+        # 5. Apply highlighting if brackets are visible on screen.
+        highlight_attr = curses.A_REVERSE
+
         if coords1_on_screen:
             scr_y1, scr_x1 = coords1_on_screen
-            char1_width = self.editor.get_char_width(self.text[char_y][char_x])
-            if scr_x1 < term_width and char1_width > 0 : # Ensure it's within bounds and has width
-                try:
-                    self.stdscr.chgat(scr_y1, scr_x1, char1_width, highlight_attr)
-                    highlight_applied = True
-                    logging.debug(f"Highlighted bracket 1 at screen ({scr_y1},{scr_x1}), text ({char_y},{char_x})")
-                except curses.error as e:
-                    logging.warning(f"Curses error highlighting bracket 1 at screen ({scr_y1},{scr_x1}): {e}")
+            # Use the definitive coordinates for getting the character and its width
+            char1_width = self.get_char_width(self.text[final_char_y_for_first_bracket][final_char_x_for_first_bracket])
+            
+            if scr_x1 < term_width and char1_width > 0:
+                visible_cells_of_char1 = min(char1_width, term_width - scr_x1)
+                if visible_cells_of_char1 > 0:
+                    try:
+                        self.stdscr.chgat(scr_y1, scr_x1, visible_cells_of_char1, highlight_attr)
+                        logging.debug(
+                            f"Highlighted bracket 1 ('{bracket_char_to_match}') at screen ({scr_y1},{scr_x1}) for {visible_cells_of_char1} cells, "
+                            f"text ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket})"
+                        )
+                    except curses.error as e:
+                        logging.warning(f"Curses error highlighting bracket 1 at screen ({scr_y1},{scr_x1}): {e}")
         
         if coords2_on_screen:
             scr_y2, scr_x2 = coords2_on_screen
-            char2_width = self.editor.get_char_width(self.text[match_y][match_x])
-            if scr_x2 < term_width and char2_width > 0:
-                try:
-                    self.stdscr.chgat(scr_y2, scr_x2, char2_width, highlight_attr)
-                    highlight_applied = True
-                    logging.debug(f"Highlighted bracket 2 at screen ({scr_y2},{scr_x2}), text ({match_y},{match_x})")
-                except curses.error as e:
-                    logging.warning(f"Curses error highlighting bracket 2 at screen ({scr_y2},{scr_x2}): {e}")
-        
-        # if highlight_applied:
-            # self.stdscr.refresh() # The main draw loop should handle refresh.
-            # No need to refresh here, as this is usually called within the main draw cycle.
+            char2_width = self.get_char_width(self.text[match_y][match_x])
 
-        # Важные моменты и дальнейшие улучшения:
-        # Игнорирование строк и комментариев в find_matching_bracket_multiline: Это самое большое ограничение текущей реализации. Для полноценной работы в редакторе кода необходимо добавить логику, которая бы пропускала скобки внутри строковых литералов (например, "this is a (string)") и комментариев (например, /* a (comment) */ или # a (comment)). Это можно сделать:
-        # Простым конечным автоматом: Отслеживать состояние "внутри строки", "внутри однострочного комментария", "внутри многострочного комментария" во время сканирования.
-        # Использованием Pygments: Если возможно, получить информацию о токенах для сканируемых строк и проверять тип токена (Comment.*, String.*), прежде чем обрабатывать скобку. Это может быть медленно, если токенизировать каждую строку на лету во время поиска.
-        # Производительность find_matching_bracket_multiline: Для очень больших файлов сканирование большого количества строк может быть медленным. Можно ограничить глубину поиска (например, не более N строк вверх/вниз).
-        # line_num_display_width: В highlight_matching_brackets я предположил, что ширина области номеров строк (line_num_display_width) доступна, например, через self.drawer._text_start_x. Убедитесь, что это значение корректно получается.
-        # Обновление экрана: highlight_matching_brackets применяет chgat напрямую. Этот метод обычно вызывается внутри основного цикла отрисовки DrawScreen.draw(), поэтому отдельный refresh() здесь не нужен.
+            if scr_x2 < term_width and char2_width > 0:
+                visible_cells_of_char2 = min(char2_width, term_width - scr_x2)
+                if visible_cells_of_char2 > 0:
+                    try:
+                        self.stdscr.chgat(scr_y2, scr_x2, visible_cells_of_char2, highlight_attr)
+                        logging.debug(
+                            f"Highlighted bracket 2 ('{self.text[match_y][match_x]}') at screen ({scr_y2},{scr_x2}) for {visible_cells_of_char2} cells, "
+                            f"text ({match_y},{match_x})"
+                        )
+                    except curses.error as e:
+                        logging.warning(f"Curses error highlighting bracket 2 at screen ({scr_y2},{scr_x2}): {e}")
+
 
 
     # ==================== HELP ==================================
@@ -9929,4 +10229,3 @@ if __name__ == "__main__":
             print("--- End Final Traceback ---", file=sys.stderr)
             
         sys.exit(1) # Exit with an error code
-        
