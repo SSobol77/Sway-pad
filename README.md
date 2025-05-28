@@ -50,7 +50,7 @@
 *  Terminal-first UI optimized for SSH and server environments
 *  Instant startup and low memory usage — perfect for remote systems
 *  Easy configuration via `.swayterm.toml`
-*  Cross-platform: Linux, FreeBSD, macOS, Windows (via WSL)
+*  Cross-platform: Linux, FreeBSD, macOS, Windows (via PowerShell)
 *  Built-in **Git integration**: stage, commit, push and view diffs — without leaving the editor
 
 🎯 **Ideal For:**
