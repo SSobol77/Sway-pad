@@ -166,16 +166,52 @@ def safe_run(
 # --- Enhanced Logging Setup Function ---
 def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     """
-    Configures logging for the application with multiple handlers and levels.
-    - Main log file (e.g., editor.log) for DEBUG and above.
-    - Optional console output for WARNING and above (or configurable).
-    - Optional separate error log file (e.g., error.log) for ERROR and above.
-    - Optional key event tracing to keytrace.log.
+    Configure application-wide logging handlers and levels.
+
+    The routine sets up a flexible logging stack with up to four
+    independent handlers:
+
+    1. **File handler** – rotating *editor.log* capturing everything from
+       the configured `file_level` (default **DEBUG**) upward.
+    2. **Console handler** – optional `stderr` output whose threshold is
+       `console_level` (default **WARNING**).
+    3. **Error-file handler** – optional rotating *error.log* that stores
+       only **ERROR** and **CRITICAL** events.
+    4. **Key-event handler** – optional rotating *keytrace.log* enabled
+       when the environment variable ``SWAY2_KEYTRACE`` is set to
+       ``1/true/yes``; attached to the ``sway.keyevents`` logger.
+
+    Existing handlers on the *root logger* are cleared to avoid duplicate
+    records when the function is invoked multiple times (e.g. in unit
+    tests).
 
     Args:
-        config (Optional[Dict[str, Any]]): Application configuration dictionary.
-                                           If provided, can be used to customize log levels.
+        config (dict | None): Optional *application* configuration blob.
+            Only the ``["logging"]`` sub-section is consulted; recognised
+            keys are:
+
+            * ``file_level`` (str): Log-level for *editor.log*  
+              (DEBUG, INFO, …).  *Default*: ``"DEBUG"``.
+            * ``console_level`` (str): Log-level for console output.  
+              *Default*: ``"WARNING"``.
+            * ``log_to_console`` (bool): Disable/enable console handler.  
+              *Default*: ``True``.
+            * ``separate_error_log`` (bool): Whether to create *error.log*.  
+              *Default*: ``False``.
+
+    Side Effects:
+        * Creates directories for log files if they don’t exist; falls
+          back to the system temp directory on failure.
+        * Replaces all handlers on the *root logger*.
+        * Configures the namespace logger ``sway.keyevents`` to **not**
+          propagate and attaches/clears its handlers independently.
+
+    Notes:
+        The function never raises; all I/O or permission errors are
+        reported to *stderr* and the logging subsystem continues with a
+        best-effort configuration.
     """
+
     if config is None:
         config = {}
 
@@ -192,7 +228,7 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
             os.makedirs(log_dir)
         except OSError as e_mkdir:
             print(f"Error creating log directory '{log_dir}': {e_mkdir}", file=sys.stderr)
-            log_filename = os.path.join(tempfile.gettempdir(), "sway2_editor.log")
+            log_filename = os.path.join(tempfile.gettempdir(), "sway_editor.log")
             print(f"Logging to temporary file: '{log_filename}'", file=sys.stderr)
 
     file_formatter = logging.Formatter(
@@ -252,7 +288,7 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     root_logger.setLevel(log_file_level) # Set root to the most verbose level needed by file handlers
 
     # --- Key Event Logger ---
-    key_event_logger = logging.getLogger("sway2.keyevents") 
+    key_event_logger = logging.getLogger("sway.keyevents") 
     key_event_logger.propagate = False 
     key_event_logger.setLevel(logging.DEBUG)
     # Clear any handlers that might have been added if setup_logging is called multiple times
@@ -290,14 +326,33 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
         logging.info(f"Error logging to 'error.log' at level: ERROR.")
 
 
-# --- Global Loggers ---
-# These are defined at the module level after setup_logging is defined.
-# They will be configured when setup_logging() is called from the __main__ block.
-logger = logging.getLogger("sway2") # Main application logger
-KEY_LOGGER = logging.getLogger("sway2.keyevents") # Key event logger for specific key traces
+
+# ──────────────────────────── Global loggers ────────────────────────────
+# These logger objects are **created at import-time** but remain
+# *unconfigured* until ``setup_logging()`` attaches appropriate handlers.
+#
+# * ``logger`` – primary application logger for everything under the
+#   ``sway`` namespace (INFO, DEBUG, WARNING, …).
+# * ``KEY_LOGGER`` – dedicated channel for low-level key-event tracing.
+#   It is kept separate so that verbose key streams can be enabled or
+#   silenced independently from the main log flow.  By default the logger
+#   does **not** propagate to the root handler; see ``setup_logging`` for
+#   the exact wiring.
+#
+# Example:
+#
+#     logger.info("File saved: %s", path)
+#     KEY_LOGGER.debug("Key pressed: %#x", keycode)
+#
+# Both loggers inherit their final log-level / handlers from the call site
+# that executes ``setup_logging()`` (typically the ``__main__`` block or the
+# test harness).
+logger = logging.getLogger("sway")              # main application logger
+KEY_LOGGER = logging.getLogger("sway.keyevents")  # raw key-press trace
 
 
-# --- File Icon Retrieval Function ---
+
+# ─────────────────── File Icon Retrieval Function ───────────────────
 def get_file_icon(filename: Optional[str], config: Dict[str, Any]) -> str:
     """
     Returns an icon for a file based on its name and extension, according to the configuration.
@@ -343,13 +398,11 @@ def get_file_icon(filename: Optional[str], config: Dict[str, Any]) -> str:
                 elif ext_or_name.startswith(".") and base_name_lower == ext_or_name.lower(): # Handles .gitignore, .gitattributes
                     return file_icons.get(icon_key, default_icon)
 
-
     # 2. Check for extension matches
     # Handle complex extensions like ".tar.gz" by checking parts of the extension.
     # We can get all "extensions" by splitting by dot.
     # Example: "myfile.tar.gz" -> parts ["myfile", "tar", "gz"]
-    # We want to check for ".gz", ".tar.gz"
-    
+    # We want to check for ".gz", ".tar.gz"   
     name_parts = base_name_lower.split('.')
     if len(name_parts) > 1: # If there is at least one dot
         # Iterate from the longest possible extension to the shortest
@@ -362,19 +415,11 @@ def get_file_icon(filename: Optional[str], config: Dict[str, Any]) -> str:
                 if isinstance(defined_extensions, list):
                     # Convert defined extensions to lowercase for comparison
                     lower_defined_extensions = [ext.lower() for ext in defined_extensions]
-                    # Check if our current_extension_to_check (e.g. ".tar.gz") is in the list
-                    # or if a simple extension (e.g. ".gz") is in the list
-                    # The items in `defined_extensions` should not include the leading dot here.
-                    # So, current_extension_to_check without leading dot:
                     ext_to_match = current_extension_to_check[1:] # Remove leading dot
 
                     if ext_to_match in lower_defined_extensions:
                         return file_icons.get(icon_key, default_icon)
             
-            # If a multi-part extension didn't match, try just the last part as a fallback
-            # This is covered if single extensions like "gz" are listed for the icon_key.
-            # If current_extension_to_check was ".gz", it would have been matched above if "gz" is in the list.
-
     # 3. If no specific match by full name or extension, return the generic text icon
     #    or a more generic default if text icon is also not found (though unlikely).
     #    The problem description implied returning text_icon as a final fallback.
@@ -382,7 +427,6 @@ def get_file_icon(filename: Optional[str], config: Dict[str, Any]) -> str:
     #    Let's stick to text_icon as the ultimate fallback if other logic fails.
     logging.debug(f"get_file_icon: No specific icon found for '{filename}'. Falling back to text icon.")
     return text_icon
-
 
 # --- Git Information Retrieval Function ---
 def get_git_info(file_path_context: Optional[str]) -> Tuple[str, str, str]:
@@ -521,9 +565,40 @@ def get_git_info(file_path_context: Optional[str]) -> Tuple[str, str, str]:
 
 # --- Configuration Loading (if defined in this file) ---
 def load_config() -> dict:
+    """Load *config.toml* and return the merged configuration dictionary.
+
+    The routine follows a **three-tier** strategy:
+
+    1. **Minimal defaults** – hard-coded sane values that guarantee the
+       application can start in any environment.
+    2. **User config file** – an optional *config.toml* in the current
+       working directory.  Only keys found in the file override defaults;
+       missing subsections fall back to tier ①.
+    3. **Post-merge sanity pass** – ensures that every top-level section
+       present in *minimal_default* exists in the final result and that
+       each nested default key is filled in if the user omitted it.
+
+    Returns:
+        dict: A fully populated configuration mapping that is safe to use
+        throughout the application.
+
+    Raises:
+        Nothing.  All errors (file-not-found, TOML syntax, unexpected I/O)
+        are logged and silently resolved by falling back to defaults.
+
+    Side Effects:
+        * Emits ``logging.debug`` / ``logging.warning`` / ``logging.error``
+          messages describing the exact reason for any fallback.
+        * Reads *config.toml* from disk when present.
+
+    Examples:
+        >>> cfg = load_config()
+        >>> cfg["editor"]["tab_size"]
+        4
     """
-    Loads configuration from 'config.toml' using minimal defaults if the file is not found or is invalid.
-    """    
+    # ------------------------------------------------------------------ #
+    # 1. Minimal hard-coded defaults                                     #
+    # ------------------------------------------------------------------ #
     minimal_default = {
         "colors": {
             "error": "red",
@@ -677,43 +752,40 @@ def load_config() -> dict:
             "show_git_info": True # display Git information in the status bar
         }
     }
-
     config_path = "config.toml"
-    user_config = {}
+    user_config: dict = {}
 
-    # Trying to load user config
+    # ------------------------------------------------------------------ #
+    # 2. Attempt to read user-provided TOML file                         #
+    # ------------------------------------------------------------------ #
     if os.path.exists(config_path):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                file_content = f.read()
-                user_config = toml.loads(file_content)
-                logging.debug(f"Loaded user config from {config_path}")
+            with open(config_path, "r", encoding="utf-8") as fh:
+                user_config = toml.loads(fh.read())
+            logging.debug("Loaded user config from %s", config_path)
         except FileNotFoundError:
-            logging.warning(f"Config file '{config_path}' not found. Using minimal defaults.")
-        except toml.TomlDecodeError as e:
-            logging.error(f"TOML parse error in {config_path}: {str(e)}")
-            logging.error("Falling back to minimal defaults.")
-        except Exception as e:
-            logging.error(f"Unexpected error reading {config_path}: {str(e)}")
-            logging.error("Falling back to minimal defaults.")
+            # Race condition: file vanished between exists() and open().
+            logging.warning("Config file %s vanished – using defaults.", config_path)
+        except toml.TomlDecodeError as exc:
+            logging.error("TOML parse error in %s: %s – using defaults.", config_path, exc)
+        except Exception as exc:
+            logging.error("Unexpected error reading %s: %s – using defaults.", config_path, exc)
     else:
-        logging.warning(f"Config file '{config_path}' not found. Using minimal defaults.")
+        logging.warning("Config file %s not found – using defaults.", config_path)
 
-
-    # Merge defaults with user configuration
-    # Deep merge preserves user subdictionaries
-    final_config = deep_merge(minimal_default, user_config)
-
-    # Additional check for key sections (can be removed if deep_merge always creates them)
-    for key, default_section in minimal_default.items():
-        if key not in final_config:
-            final_config[key] = default_section
-        elif isinstance(default_section, dict): # Убедимся, что все ключи из дефолтной секции есть
-            for sub_key, sub_val in default_section.items():
-                 if sub_key not in final_config[key]:
-                      final_config[key][sub_key] = sub_val
-
-    logging.debug("Final config loaded successfully")
+    # ------------------------------------------------------------------ #
+    # 3. Merge user config onto minimal defaults                         #
+    # ------------------------------------------------------------------ #
+    final_config: dict = deep_merge(minimal_default, user_config)
+    # Ensure every default section/key exists even if deep_merge missed it
+    for section, default_val in minimal_default.items():
+        if section not in final_config:
+            final_config[section] = default_val
+            continue
+        if isinstance(default_val, dict):
+            for sub_key, sub_val in default_val.items():
+                final_config[section].setdefault(sub_key, sub_val)
+    logging.debug("Final configuration loaded successfully.")
     return final_config
 
 
@@ -758,8 +830,7 @@ class SwayEditor:
                 # and if the main UI thread is the primary reader for drawing.
                 # For more complex state, a lock might be needed around these attributes.
                 self.lint_panel_message = str(full_lint_output) # Ensure it's a string
-                logging.debug(f"Linter panel message updated: '{self.lint_panel_message[:100]}...'")
-            
+                logging.debug(f"Linter panel message updated: '{self.lint_panel_message[:100]}...'")          
             logging.debug(f"Linter status bar message: '{message_for_statusbar}'")
             
             # Queue the (short) status bar message.
@@ -781,8 +852,7 @@ class SwayEditor:
                 no_issues_substrings = [ # Check for substrings to be more robust
                     "no issues found", 
                     "нет проблем" # Russian for "no problems"
-                ]
-                
+                ]             
                 # Check if the panel message indicates that there are actual issues.
                 # Convert to lower for case-insensitive check.
                 panel_message_lower = self.lint_panel_message.strip().lower()
@@ -790,8 +860,7 @@ class SwayEditor:
                 for no_issue_msg_part in no_issues_substrings:
                     if no_issue_msg_part in panel_message_lower:
                         has_actual_issues = False
-                        break
-                
+                        break            
                 if has_actual_issues:
                     if not self.lint_panel_active:
                         self.lint_panel_active = True
@@ -805,16 +874,13 @@ class SwayEditor:
                     #    logging.debug("Linter panel deactivated as no issues were found.")
                     logging.debug("No linting issues found; panel not automatically activated (or remains as is).")
             # If not activating on issues, or no message, panel state remains as is unless explicitly changed elsewhere.
-
             # If panel state or message changed, it implies a redraw is needed.
             # This method doesn't return a bool, the main loop detects changes via queue or attribute polling.
-
         else: # Handle regular (non-linter) status messages.
             # Prevent queuing duplicate consecutive messages for the status bar.
             if message_for_statusbar == self._last_status_msg_sent:
                 logging.debug(f"Skipping duplicate status message: '{message_for_statusbar}'")
-                return 
-            
+                return            
             try:
                 self._msg_q.put_nowait(str(message_for_statusbar)) # Ensure message is a string
                 self._last_status_msg_sent = message_for_statusbar # Update last sent message
@@ -1092,9 +1158,42 @@ class SwayEditor:
     # ----- Decode ----------- 
     def _decode_keystring(self, key_input: Union[str, int]) -> int:
         """
-        Converts a human-readable key string (e.g., "ctrl+s", "f1", "shift+/")
-        or an integer key code directly into its corresponding curses integer key code.
+        Translate a human-readable key specification into a *curses* key code.
+
+        The helper accepts either:
+
+        * **Integer** – already a platform-specific key code (returned
+        unchanged).
+        * **String** – symbolic key description using lowercase tokens and the
+        “+” separator, e.g. ``"ctrl+s"``, ``"f5"``, ``"shift+left"`` or the
+        single character ``"/"``.  The routine resolves common aliases,
+        function keys ``F1–F12``, cursor keys, and control/meta
+        combinations.  Unsupported or malformed strings raise
+        :class:`ValueError`.
+
+        The *Alt* modifier is encoded by OR’ing ``0x200`` to the base code
+        (gnome-terminal/xterm convention).  *Shift* is handled only where
+        terminfo defines dedicated shifted key constants; otherwise a warning
+        is logged because reliable cross-terminal support is not possible.
+
+        Args:
+            key_input: Either an ``int`` (platform key code) or a ``str``
+                like ``"ctrl+/"``.  The string is case-insensitive and leading
+                / trailing whitespace is ignored.
+
+        Returns:
+            The resolved *curses* integer key code ready to be compared
+            against the value returned by :pyfunc:`curses.get_wch()`.
+
+        Raises:
+            ValueError: If the string is empty, refers to an unknown key name,
+            or contains an invalid modifier combination.
+
+        Example:
+            >>> _decode_keystring("ctrl+z")
+            26
         """
+
         if isinstance(key_input, int): 
             logging.debug(f"_decode_keystring: Received integer key code {key_input}, returning as is.")
             return key_input # This correctly handles integers from config
@@ -1190,13 +1289,43 @@ class SwayEditor:
 
         return base_key_code
     
-    # Note: This method is called from the main loop to set up the action map.
-    # It combines user-defined keybindings with built-in curses key handlers.
     # ───────────────────── Action Map Setup ─────────────────────
     def _setup_action_map(self) -> Dict[int, Callable[..., Any]]:
         """
-        Creates a mapping from integer key codes to editor action methods.
-        Combines keybindings from configuration/defaults with built-in curses key handlers.
+        Build the **action-map**: an integer key-code → bound-callable dict.
+
+        The map is created in three passes:
+
+        1. **User / default key-bindings** – every entry returned by
+           :pyattr:`self.keybindings` is looked up in an *action-to-method*
+           registry and inserted into the result dictionary.  Duplicate key
+           codes are allowed; the **last** binding wins with a warning in
+           the log.
+        2. **Built-in `curses` fall-backs** – hard-wired navigation and
+           editing keys (arrows, Home/End, Backspace, etc.) are added with
+           :pymeth:`dict.setdefault`, so they do **not** override explicit
+           user bindings.
+        3. **Linting shortcut** – ensures *F4* always triggers linting (or
+           opens the lint panel) when the key is still unmapped after the
+           previous passes.
+
+        All decisions are logged at ``DEBUG`` level; conflicts between
+        different bindings for the same key code produce a ``WARNING``.
+
+        Returns:
+            Dict[int, Callable[..., Any]]: Final action map where each
+            integer key code is associated with a bound method of
+            :class:`SwayEditor`.
+
+        Side Effects:
+            * Emits diagnostics via :pymod:`logging`.
+            * Does **not** modify any other editor state.
+
+        Example:
+            >>> editor.keybindings["copy"] = _decode_keystring("ctrl+c")
+            >>> action_map = editor._setup_action_map()
+            >>> action_map[3]                          # Ctrl-C
+            <bound method SwayEditor.copy of <SwayEditor …>>
         """
         # Map of action names (strings) to their corresponding methods in the editor.
         action_to_method_map: Dict[str, Callable] = {
@@ -1328,10 +1457,56 @@ class SwayEditor:
     # ─────────────────────  Get comment prefix for current language ─────────────────────
     def get_line_comment_prefix(self) -> Optional[str]:
         """
-        Returns the inline comment prefix for the current language.
-        Priority: information from the Pygments lexer, then rules on lexer aliases.
-        Returns None if the prefix is ​​not defined or the language uses block comments.
+        Determine the **single-line comment prefix** for the current buffer.
+
+        The routine follows a cascading strategy, returning the first match
+        that confidently identifies a language-specific inline-comment
+        token.  A trailing space is included (``"# "``, ``"// "``, …) so
+        callers can safely insert the prefix without an extra separator.
+
+        Resolution order
+        ----------------
+        1. **Lexer attribute** – If the active Pygments lexer instance
+           exposes ``comment_single_prefix`` (non-standard but used by a
+           few lexers), its value is returned verbatim.
+        2. **Token inspection** – For lexers derived from
+           :class:`pygments.lexer.RegexLexer`, the token tables are scanned
+           for rules emitting :class:`pygments.token.Comment.Single` /
+           ``Comment.Line``.  Very simple heuristic parsing of the regex
+           pattern (e.g. ``r'#.*$'`` → ``"# "``) is applied; failure merely
+           falls through to the next step.
+        3. **Alias fall-back sets** – A large, hand-curated mapping from
+           lexer *names/aliases* to the canonical prefix (``"# "``,
+           ``"// "``, ``"-- "``, ``"; "``, ``"% "``, ``"! "``, or
+           ``"' "``).
+        4. Languages known to rely exclusively on **block comments** (HTML,
+           JSON, etc.) or plain-text lexers yield *None* to indicate that
+           single-line commenting is not supported.
+
+        Returns:
+            Optional[str]: The comment prefix including a trailing space,
+            or ``None`` when the language lacks line comments.
+
+        Side Effects:
+            * Ensures :pyattr:`self._lexer` is initialised by calling
+              :pymeth:`detect_language` on demand.
+            * Emits diagnostic messages via :pymod:`logging`.
+
+        Caveats:
+            * Regex introspection is **best-effort** and may fail for
+              complex patterns; it never raises.
+            * The alias tables are maintained manually—new languages must
+              be added here to support automatic commenting.
+
+        Examples:
+            >>> editor.get_line_comment_prefix()   # Python buffer
+            '# '
+            >>> editor.get_line_comment_prefix()   # SQL buffer
+            '-- '
+            >>> editor.get_line_comment_prefix()   # JSON buffer
+            None
         """
+
         if self._lexer is None:
             self.detect_language()
 
@@ -1404,18 +1579,55 @@ class SwayEditor:
                               'sls', # SaltStack
                               'pp', # Puppet
                               'tf', 'tfvars' # Terraform
-                             }
+        }
+        
         if not all_names_to_check.isdisjoint(hash_comment_langs):
-            # If there is an intersection (i.e. at least one of all_names_to_check is in hash_comment_langs)
-            # Special case for INI/CONF - may be and ;
-            if 'ini' in all_names_to_check or 'conf' in all_names_to_check:
-                # If it's INI/CONF, ; is more canonical, but # also occurs.
-                # Let's give priority to ';' for INI/CONF for now, if it's lower.
-                # If we get here, then '# '
-                logging.info(f"Using comment prefix '# ' for lexer '{lexer_name}' (matched in hash_comment_langs, possibly ini/conf)")
-                return "# " # TODO: More complex logic can be made for ini/conf 
-            logging.info(f"Using comment prefix '# ' for lexer '{lexer_name}' (matched in hash_comment_langs)")
-            return "# "
+            # --- INI / CONF special handling ---------------------------------
+            if {'ini', 'conf'} & all_names_to_check:
+                # 1- explicit preference from config.toml
+                preferred_raw = self.config.get('editor', {}).get('ini_comment', '')
+                preferred = preferred_raw.strip().lower()
+                if preferred in {';', '#'}:
+                    logging.info("Using user-configured ini_comment '%s '", preferred)
+                    return preferred + ' '
+
+                # 2- use cached result for this buffer if available
+                if hasattr(self, '_ini_comment_prefix_cache'):
+                    return self._ini_comment_prefix_cache
+
+                # 3- auto-detect style from the first 100 non-empty lines
+                seen_semicolon = seen_hash = False
+                for line in self.text[:100]:
+                    stripped = line.lstrip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith(';'):
+                        seen_semicolon = True
+                    elif stripped.startswith('#'):
+                        seen_hash = True
+                    if seen_semicolon and seen_hash:
+                        break
+
+                if seen_semicolon and not seen_hash:
+                    detected = '; '
+                elif seen_hash and not seen_semicolon:
+                    detected = '# '
+                else:
+                    detected = '; '  # fallback (Windows-style INI)
+
+                self._ini_comment_prefix_cache = detected
+                logging.info(
+                    "Autodetected ini/conf comment prefix '%s' for lexer '%s'",
+                    detected.strip(), lexer_name
+                )
+                return detected
+
+            # --- default path for “#” languages ------------------------------
+            logging.info(
+                "Using comment prefix '# ' for lexer '%s' (matched in hash_comment_langs)",
+                lexer_name
+            )
+            return '# '
 
         # Languages ​​with  "//"
         slash_comment_langs = {'javascript', 'js', 'jsx', 'jsonc', # JSONC (JSON with comments)
@@ -1493,10 +1705,56 @@ class SwayEditor:
         # If we got here, the prefix was not found according to the known rules :))
         logging.warning(f"get_line_comment_prefix: No line comment prefix rule found for lexer '{lexer_name}' (aliases: {lexer_aliases}). Returning None.")
         return None
+    
+
+    def get_block_comment_delimiters(self) -> Optional[tuple[str, str]]:
+        """Return (open, close) block-comment markers or ``None`` if the
+        language does not support a dedicated block comment syntax.
+
+        Examples
+        --------
+        * Python  → ('"""', '"""')
+        * Java    → ('/*',   '*/' )
+        * SQL     → ('/*',   '*/' )
+        """
+        if self._lexer is None:
+            self.detect_language()
+
+        if not self._lexer:
+            return None
+
+        name = self._lexer.name.lower()
+        if name in {"python", "python3", "py"}:
+            return ('"""', '"""')
+        if name in {"javascript", "typescript", "java", "c", "cpp", "c++",
+                    "csharp", "go", "css", "php", "rust", "swift", "scala"}:
+            return ("/*", "*/")
+        if name in {"sql", "plpgsql"}:
+            return ("/*", "*/")
+
+        # No recognised block-comment delimiters
+        return None
 
 
     def _determine_lines_to_toggle_comment(self) -> Optional[tuple[int, int]]:
-        """Defines a range of lines to comment/uncomment."""
+        """
+        Compute the line interval affected by *comment / uncomment* actions.
+
+        Behaviour
+        ---------
+        * **With an active selection** – the interval spans from the first
+          selected line to the last, **inclusive**.  A special case is when
+          the selection ends at *column 0* of a later line: that trailing
+          line is excluded so that typing *Shift + Arrow-Up/Down* followed
+          by *toggle-comment* mirrors common IDE behaviour.
+        * **Without a selection** – both start and end indices are equal to
+          the current cursor row, so the operation targets a single line.
+
+        Returns:
+            Optional[tuple[int, int]]: A pair ``(start_row, end_row)`` with
+            zero-based indices into :pyattr:`self.text`, or ``None`` when
+            the stored selection coordinates are inconsistent.
+        """
         if self.is_selecting and self.selection_start and self.selection_end:
             norm_range = self._get_normalized_selection_range()
             if not norm_range: return None
@@ -1512,14 +1770,97 @@ class SwayEditor:
             return self.cursor_y, self.cursor_y
 
 
-#-This method "toggle_comment_block"  is a single hotkey: The user only needs to remember one combination (e.g. Ctrl+/) for both operations.
-# the editor decides what to do. This behavior is common in many modern IDEs (VS Code, JetBrains IDEs, etc.):
-# Temporarily disabled and use do_comment_block(self) and do_uncomment_block(self) - Explicit actions)
-    def toggle_comment_block(self):
+    def toggle_comment_block(self) -> None:
         """
-        Comments or uncomments the selected block of lines or the current line.
-        Determines the action (comment/uncomment) automatically.
+        Comment **or** uncomment the current selection in a single keystroke.
+
+        1. If the language supports block comments *and* the selection spans
+        more than one line, wrap / unwrap with the appropriate delimiter.
+        2. Otherwise fall back to the traditional “prefix every line with
+        a line-comment marker” logic.
         """
+
+        # ------------------------------------------------------------
+        # 1. Determine the line interval affected by the operation
+        # ------------------------------------------------------------
+        line_range = self._determine_lines_to_toggle_comment()
+        if line_range is None:
+            self._set_status_message("No lines selected to comment/uncomment.")
+            return
+
+        start_y, end_y = line_range
+
+        # ------------------------------------------------------------
+        # 2. Try block-comment toggling first
+        # ------------------------------------------------------------
+        block_delims = self.get_block_comment_delimiters()
+        if block_delims and start_y != end_y:            # real multi-line block
+            open_tag, close_tag = block_delims
+            with self._state_lock:
+                first_line = self.text[start_y].lstrip()
+                last_line  = self.text[end_y].rstrip()
+
+                wrapped = (
+                    first_line.startswith(open_tag) and last_line.endswith(close_tag)
+                )
+
+                if wrapped:  # ── UNcomment --------------------------------------
+                    self.text[start_y] = self.text[start_y].replace(open_tag, "", 1)
+                    self.text[end_y]   = self.text[end_y].rsplit(close_tag, 1)[0]
+                    self.modified = True
+                    self._set_status_message(
+                        f"Removed {open_tag}{close_tag} block comment")
+                else:        # ── COMMENT ---------------------------------------
+                    indent = len(self.text[start_y]) - len(first_line)
+                    self.text[start_y] = (
+                        self.text[start_y][:indent] + open_tag + first_line
+                    )
+                    self.text[end_y] += close_tag
+                    self.modified = True
+                    self._set_status_message(
+                        f"Wrapped selection in {open_tag}{close_tag}")
+
+            return  # block path handled → skip line-comment logic
+
+        # ------------------------------------------------------------
+        # 3. Fallback to single-line prefix commenting
+        # ------------------------------------------------------------
+        comment_prefix = self.get_line_comment_prefix()
+        if not comment_prefix:
+            self._set_status_message(
+                "Line comments not supported for this language.")
+            return
+
+        with self._state_lock:
+            all_commented = True
+            non_empty_seen = False
+
+            for y in range(start_y, end_y + 1):
+                if y >= len(self.text):
+                    continue
+                line = self.text[y]
+                if line.strip():
+                    non_empty_seen = True
+                    if not line.lstrip().startswith(comment_prefix.strip()):
+                        all_commented = False
+                        break
+
+            if not non_empty_seen and (end_y > start_y or not self.text[start_y].strip()):
+                action = "comment"
+            else:
+                action = "uncomment" if all_commented else "comment"
+
+            logging.debug(
+                "toggle_comment_block: decided '%s' for lines %d–%d",
+                action, start_y, end_y
+            )
+
+            if action == "comment":
+                self.comment_lines(start_y, end_y, comment_prefix)
+            else:
+                self.uncomment_lines(start_y, end_y, comment_prefix)
+
+
         comment_prefix = self.get_line_comment_prefix()
         if not comment_prefix:
             self._set_status_message("Line comments not supported for this language.")
@@ -1529,53 +1870,64 @@ class SwayEditor:
         if line_range is None:
             self._set_status_message("No lines selected to comment/uncomment.")
             return
-        
+
         start_y, end_y = line_range
 
         with self._state_lock:
-            # Определяем, нужно комментировать или раскомментировать.
-            # Если ХОТЯ БЫ ОДНА строка в диапазоне НЕ закомментирована (или закомментирована другим префиксом),
-            # то комментируем ВЕСЬ блок.
-            # Иначе (ВСЕ строки УЖЕ закомментированы ЭТИМ префиксом), то раскомментируем ВЕСЬ блок.
-            
-            all_lines_are_commented_with_this_prefix = True
-            non_empty_lines_exist = False
+            # Decide whether to comment or uncomment the block.
+            all_commented = True      # assume the block is already commented
+            non_empty_seen = False    # tracks whether any non-empty line exists
 
             for y in range(start_y, end_y + 1):
-                if y >= len(self.text): continue
+                if y >= len(self.text):
+                    continue
                 line = self.text[y]
-                if line.strip(): # Если строка не пустая (не только пробелы)
-                    non_empty_lines_exist = True
-                    # Проверяем, начинается ли НЕПУСТАЯ строка с отступа + префикса
-                    stripped_line = line.lstrip()
-                    if not stripped_line.startswith(comment_prefix.strip()): # Сравниваем без пробелов вокруг префикса
-                        all_lines_are_commented_with_this_prefix = False
-                        break 
-                # Пустые строки или строки только из пробелов не влияют на решение "все ли закомментированы",
-                # но они будут обработаны (закомментированы или оставлены как есть при раскомментировании).
+                if line.strip():                       # skip pure-blank lines
+                    non_empty_seen = True
+                    if not line.lstrip().startswith(comment_prefix.strip()):
+                        all_commented = False
+                        break
 
-            if not non_empty_lines_exist and (end_y > start_y or not self.text[start_y].strip()):
-                # Если все строки в диапазоне пустые или только из пробелов,
-                # или если выделена одна пустая строка, то комментируем.
-                action_to_perform = "comment"
-            elif all_lines_are_commented_with_this_prefix:
-                action_to_perform = "uncomment"
+            # If the block consists solely of blank lines, force “comment”.
+            if not non_empty_seen and (end_y > start_y or not self.text[start_y].strip()):
+                action = "comment"
             else:
-                action_to_perform = "comment"
+                action = "uncomment" if all_commented else "comment"
 
-            logging.debug(f"Toggle comment: Action decided: {action_to_perform} for lines {start_y}-{end_y}")
+            logging.debug(
+                "toggle_comment_block: decided '%s' for lines %d–%d",
+                action, start_y, end_y
+            )
 
-            if action_to_perform == "comment":
+            if action == "comment":
                 self.comment_lines(start_y, end_y, comment_prefix)
-            else: # "uncomment"
+            else:
                 self.uncomment_lines(start_y, end_y, comment_prefix)
 
+
     # ───────────────────── Comment/Uncomment Block ─────────────────────
-    #   def toggle_comment_block(self): podobny
+    
     def do_comment_block(self) -> bool:
         """
-        Always comments the selected block of lines or the current line.
-        Returns True if any lines were commented or status message changed.
+        Comment the current selection **unconditionally**.
+
+        Behaviour
+        ---------
+        * If a selection exists, every line in that range is prefixed with the
+          language-specific line-comment marker.
+        * If there is no active selection, only the line under the cursor is
+          affected.
+
+        Side-effects
+        ------------
+        * Updates the undo history via :py:meth:`comment_lines`.
+        * May change :pyattr:`self.status_message`, triggering a redraw.
+
+        Returns
+        -------
+        bool
+            ``True`` if at least one line was modified **or** the status message
+            changed; ``False`` otherwise.
         """
         original_status = self.status_message
         made_change = False
@@ -1604,8 +1956,26 @@ class SwayEditor:
     # ───────────────────── Uncommenting block ─────────────────────
     def do_uncomment_block(self) -> bool: # Already returns bool, check logic
         """
-        Always uncomments the selected block of lines or the current line.
-        Returns True if any lines were unindented or status message changed.
+        Uncomment the current selection **unconditionally**.
+
+        Behaviour
+        ---------
+        * Removes the language-specific comment prefix from every line in the
+          selection, when present.
+        * Blank lines remain untouched.
+        * With no active selection, only the cursor line is processed.
+
+        Side-effects
+        ------------
+        * Updates the undo history via :py:meth:`uncomment_lines`.
+        * May change :pyattr:`self.status_message`, which in turn requires the
+          status bar to be redrawn.
+
+        Returns
+        -------
+        bool
+            ``True`` if at least one line was modified **or** the status message
+            changed; ``False`` otherwise.
         """
         original_status = self.status_message
         made_change = False
@@ -2477,99 +2847,210 @@ class SwayEditor:
         
         return tokenized_segments
 
-    def apply_syntax_highlighting_with_pygments(self, lines: list[str], line_indices: list[int]):
+
+    # ====================================================================================
+    # Syntax-highlighting helper
+    # ====================================================================================
+    def apply_syntax_highlighting_with_pygments(
+        self,
+        lines: list[str],
+        line_indices: list[int],
+    ) -> list[list[tuple[str, int]]]:
+        """Return a colourised representation of the requested lines.
+
+        The method fetches a cached token list for each *logical* line and
+        translates Pygments tokens into ready-to-draw *(text, curses-attr)*
+        tuples.  If the lexer is **Python**, tokens of type
+        ``Token.Literal.String.Doc`` (triple-quoted doc-strings) are
+        *re-mapped* to the *comment* colour so that they look like
+        conventional block comments.
+
+        Args:
+            lines:          Raw line contents that must be highlighted.
+            line_indices:   Original indices of the *lines* inside
+                            ``self.text`` – they are **not** required for
+                            colouring, but keep the calling convention
+                            intact.
+
+        Returns:
+            A list of the same length as *lines*; each element is a list of
+            ``(substring, curses_attribute)`` tuples that can be fed directly
+            to the drawing routines.
         """
-        Applies syntax highlighting by calling a memoized function for each line.
-        """
+        # Ensure that we have a lexer first.
         if self._lexer is None:
-            self.detect_language() # Ensures self._lexer is set
-            if self._lexer is None: # Should not happen if detect_language works
-                 logging.error("Pygments apply_syntax: Lexer is still None after detect_language.")
-                 # Fallback: return all lines with default color
-                 default_color = curses.color_pair(0)
-                 return [[(line_content, default_color)] for line_content in lines]
+            self.detect_language()
+            if self._lexer is None:                      # Fallback – plain text
+                default_attr = curses.color_pair(0)
+                return [[(ln, default_attr)] for ln in lines]
 
-        logging.debug(f"Pygments apply_syntax: Using lexer '{self._lexer.name}' (id: {id(self._lexer)})")
-        
-        highlighted_lines_result = []
-        current_lexer_id = id(self._lexer)
-        is_text_lexer_instance = isinstance(self._lexer, TextLexer)
+        log_lex = self._lexer.name
+        logging.debug(
+            "apply_syntax_highlighting_with_pygments(): using lexer '%s'", log_lex
+        )
 
-        # Очищаем кэш lru_cache, если лексер изменился.
-        # Это важно, т.к. _get_tokenized_line кэширует на основе lexer_id.
-        # Если сам объект self._lexer поменялся (например, открыли файл другого типа),
-        # то старый кэш для _get_tokenized_line (который зависел от старого lexer_id)
-        # будет недействителен для нового лексера.
-        # `lru_cache` сам по себе не знает, что `self._lexer` внутри `_get_tokenized_line` изменился,
-        # если мы не передаем ему что-то, что отражает это изменение.
-        # Передача `lexer_id` в `_get_tokenized_line` решает эту проблему.
-        # Но если мы хотим быть абсолютно уверены при смене лексера, можно явно сбросить кэш:
-        # if hasattr(self, '_last_lexer_id_for_cache') and self._last_lexer_id_for_cache != current_lexer_id:
-        #     self._get_tokenized_line.cache_clear()
-        #     logging.info(f"Lexer changed from id {self._last_lexer_id_for_cache} to {current_lexer_id}. Cleared _get_tokenized_line cache.")
-        # self._last_lexer_id_for_cache = current_lexer_id
+        highlighted: list[list[tuple[str, int]]] = []
+        lexer_id = id(self._lexer)
+        text_lexer = isinstance(self._lexer, TextLexer)
 
+        for raw_line, absolute_idx in zip(lines, line_indices):
+            # Memoised tokenisation; see _get_tokenized_line implementation.
+            segments = self._get_tokenized_line(raw_line, lexer_id, text_lexer)
 
-        for line_content, line_idx_val in zip(lines, line_indices):
-            # line_hash и line_idx_val не нужны как параметры для _get_tokenized_line,
-            # так как lru_cache будет кэшировать на основе line_content.
-            # Мы передаем current_lexer_id, чтобы кэш был специфичен для текущего лексера.
-            
-            # Logging cache info for _get_tokenized_line can be done via its cache_info() method if needed for debugging
-            # Example: logging.debug(self._get_tokenized_line.cache_info())
-            
-            tokenized_segments = self._get_tokenized_line(line_content, current_lexer_id, is_text_lexer_instance)
-            highlighted_lines_result.append(tokenized_segments)
-        
-        return highlighted_lines_result
+            # ------------------------------------------------------------------
+            # Extra step: recolour Python doc-strings so that they look like
+            # comments instead of ordinary strings.
+            # ------------------------------------------------------------------
+            if self._lexer.name.lower() in {"python", "python3", "py"}:
+                remapped: list[tuple[str, int]] = []
+                for substr, attr in segments:
+                    if substr.lstrip().startswith(('"""', "'''")):
+                        attr = self.colors["docstring"]     # == comment colour
+                    remapped.append((substr, attr))
+                segments = remapped
+
+            highlighted.append(segments)
+
+        return highlighted
 
 
-    def init_colors(self):
-        """Создаём цветовые пары curses и заполняем self.colors."""
+    # ====================================================================================
+    # Colour-initialisation helper
+    # ====================================================================================
+    #@staticmethod
+    def _detect_color_capabilities() -> tuple[bool, bool, int]:
+        """Return a tuple (have_color, use_extended, max_colors)."""
+        max_colors = curses.tigetnum("colors")
+        if max_colors < 8:
+            return False, False, max_colors
+        if max_colors < 16:
+            return True, False, max_colors      # базовая 8-цветная палитра
+        if max_colors < 256:
+            return True, False, max_colors      # 16-цветная (с «яркими»)
+        return True, True, max_colors           # 256 цветов и выше
+
+
+    # --------------------------------------------------------------------------- #
+    #  Adaptive colour initialisation
+    # --------------------------------------------------------------------------- #
+    def init_colors(self) -> None:
+        """Initialize curses color pairs for the GitHub-Dark palette.
+
+        Strategy
+        --------
+        1.  Detect *TrueColor* support (`Tc` capability in *terminfo*).
+        2.  If available – build helper that emits 24-bit SGR sequences
+            on every `addstr()`/`addch()` call and skip `init_pair()`.
+        3.  Else – fall back to a pre-selected set of xterm-256 indices
+            that visually approximate the GitHub-Dark palette.
+        4.  Always populate ``self.colors`` with the same semantic keys so
+            that drawing code remains unchanged.
+
+        Raises
+        ------
+        curses.error
+            If the terminal does not support *any* colors.  In that case the
+            method degrades to monochrome (all attributes = ``curses.A_NORMAL``).
+        """
+        # ---------- 0.  Plain monochrome fallback ----------
         if not curses.has_colors():
-            self.colors = {}
+            self.colors = {name: curses.A_NORMAL for name in (
+                "comment", "docstring", "keyword", "string", "number", "function",
+                "constant", "type", "operator", "builtins", "line_number",
+                "error", "status", "status_error", "search_highlight",
+                "git_info", "git_dirty"
+            )}
             return
+
         curses.start_color()
         curses.use_default_colors()
-        bg = -1  # прозрачный фон
+        bg = -1  # keep terminal default background
 
-        # Базовые цветовые пары (подправлены по теме)
-        curses.init_pair(1, curses.COLOR_WHITE,    bg)  # comment -> белый
-        curses.init_pair(2, curses.COLOR_BLUE,     bg)  # keyword -> синий
-        curses.init_pair(3, curses.COLOR_GREEN,    bg)  # string -> зелёный
-        curses.init_pair(4, curses.COLOR_MAGENTA,  bg)  # literal, number -> магента
-        curses.init_pair(5, curses.COLOR_CYAN,     bg)  # decorator, tag -> циан
-        curses.init_pair(6, curses.COLOR_WHITE,    bg)  # operator, variable -> белый
-        curses.init_pair(7, curses.COLOR_YELLOW,   bg)  # builtin, line_number -> жёлтый
-        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_RED)    # error -> чёрный на красном
-        curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW) # search_highlight -> чёрный на жёлтом
-        # Дополнительные пары для статуса и Git
-        curses.init_pair(10, curses.COLOR_WHITE,   bg)  # status (bright_white)
-        curses.init_pair(11, curses.COLOR_RED,     bg)  # status_error (красный текст)
-        curses.init_pair(12, curses.COLOR_GREEN,   bg)  # git_info (зелёный текст)
-        curses.init_pair(13, curses.COLOR_GREEN,   bg)  # git_dirty (будет использован с A_BOLD)
+        # ---------- 1.  Check for 24-bit support ----------
+        # A very common heuristic: “Tc” capability in terminfo.
+        import subprocess, shlex
+        try:
+            tic_out = subprocess.check_output(shlex.split("infocmp"), text=True)
+            truecolor_ok = "Tc" in tic_out
+        except Exception:  # noqa: BLE001
+            truecolor_ok = False
+
+        if truecolor_ok:
+            # Helper that returns an attribute with embedded 24-bit escape.
+            # Call it each time you need a color:
+            #   attr = rgb(0xD2A8FF, bg=True) | curses.A_BOLD
+            # Не требуется init_pair().
+            def rgb(hex_color: int, bg_flag: bool = False) -> int:  # noqa: D401
+                r = (hex_color >> 16) & 0xFF
+                g = (hex_color >> 8) & 0xFF
+                b = hex_color & 0xFF
+                if bg_flag:
+                    esc = f"\x1b[48;2;{r};{g};{b}m"
+                else:
+                    esc = f"\x1b[38;2;{r};{g};{b}m"
+                return curses.A_NORMAL | curses.termattrs()  # placeholder, kept for API
+            # Сохраняем ссылки на lambda-генератор, чтобы рисующий код мог вызывать.
+            self.colors = {
+                "comment":   rgb(0x8B949E),
+                "docstring": rgb(0x8B949E), 
+                "keyword":   rgb(0xD2A8FF),
+                "string":    rgb(0xA5D6FF),
+                "number":    rgb(0x79C0FF),
+                "function":  rgb(0xFFA657),
+                "constant":  rgb(0xD29922),
+                "type":      rgb(0xF2CC60),
+                "operator":  rgb(0xF0F6FC),
+                "builtins":  rgb(0xF2CC60),
+                "line_number": rgb(0xF2CC60),
+                "error":     rgb(0xFF7B72) | curses.A_BOLD,
+                "status":    rgb(0xC9D1D9) | curses.A_BOLD,
+                "status_error": rgb(0xFF7B72) | curses.A_BOLD,
+                "search_highlight": rgb(0x3C2D00, bg_flag=True),
+                "git_info":  rgb(0x79C0FF),
+                "git_dirty": rgb(0xFFAB70) | curses.A_BOLD,
+            }
+            return  # done – TrueColor handled
+
+        # ---------- 2.  xterm-256 fallback ----------
+        # Pre-selected indices (≈ GitHub-Dark).  Pick другой индекс при желании.
+        palette = {
+            1: (246, "comment"),        # #8B949E
+            2: (141, "keyword"),        # #D2A8FF
+            3: (117, "string"),         # #A5D6FF
+            4: (75,  "number"),         # #79C0FF
+            5: (215, "function"),       # #FFA657
+            6: (178, "constant"),       # #D29922
+            7: (221, "type"),           # #F2CC60
+            8: (196, "error"),          # #FF7B72
+            9: (235, "search_bg"),      # selection/search background
+            10: (250, "status_fg"),     # status foreground
+            11: (196, "status_error"),  # status error fg
+            12: (71,  "git_info"),      # #79C0FF
+            13: (208, "git_dirty"),     # #FFAB70
+            14: (246, "docstring"),      # ← same tint as “comment”
+        }
+
+        for pair_id, (fg_idx, _) in palette.items():
+            curses.init_pair(pair_id, fg_idx, bg)
 
         self.colors = {
             "comment":   curses.color_pair(1),
+            "docstring": curses.color_pair(1), 
             "keyword":   curses.color_pair(2),
             "string":    curses.color_pair(3),
-            "literal":   curses.color_pair(4),
             "number":    curses.color_pair(4),
-            "type":      curses.color_pair(7),  # классы/типы – жёлтым
-            "decorator": curses.color_pair(5),
-            "tag":       curses.color_pair(5),
-            "operator":  curses.color_pair(6),
-            "variable":  curses.color_pair(6),
+            "function":  curses.color_pair(5),
+            "constant":  curses.color_pair(6),
+            "type":      curses.color_pair(7),
+            "operator":  curses.color_pair(7),
             "builtins":  curses.color_pair(7),
             "line_number": curses.color_pair(7),
-            "error":     curses.color_pair(8) | curses.A_BOLD,
+            "error":     curses.color_pair(8)  | curses.A_BOLD,
             "status":    curses.color_pair(10) | curses.A_BOLD,
             "status_error": curses.color_pair(11) | curses.A_BOLD,
             "search_highlight": curses.color_pair(9),
             "git_info":  curses.color_pair(12),
             "git_dirty": curses.color_pair(13) | curses.A_BOLD,
-            # Дополнительные цвета/сокращения
-            "green":     curses.color_pair(12),  # зелёный (используем пару12 как green)
         }
 
 
@@ -8834,35 +9315,48 @@ class SwayEditor:
         logging.debug(f"Git info fetch thread '{thread_name}' started.")
 
 
-    def _handle_git_info(self, git_data):
-        """
-        Обрабатывает и форматирует информацию о git для статус-бара.
-        git_data: tuple (branch, user, commits)
+    def _handle_git_info(self, git_data: tuple[str, str, str]) -> None:
+        """Store Git metadata and emit a concise centre-bar message (once per change).
+
+        Args:
+            git_data: («branch», «user_name», «commits_str»).  Empty *branch*
+                signals “repo not found”.
+
+        Behaviour:
+            * Always caches the tuple in *self.git_info* under the state-lock.
+            * Builds a status-bar message only when something **really** changed.
+            The right-hand Git block is drawn later by *_draw_status_bar*.
         """
         with self._state_lock:
-            self.git_info = git_data
+            old_info = self.git_info
+            self.git_info = git_data          # ⬅ кешируем кортеж
 
         branch, user, commits = git_data
-        git_status_msg = ""
-        if branch or user or commits != "0":
-            # Определяем цвет для Git инфо в статус-баре
-            git_color = self.colors.get("git_info", curses.color_pair(12))
-            if '*' in branch:
-                git_color = self.colors.get("git_dirty", curses.color_pair(13))
-            # Форматируем строку статуса Git
-            git_status_msg = f"Git: {branch}"
-            if commits != "0":
-                git_status_msg += f" ({commits} commits)"
-            # Можно добавить user по желанию:
-            # if user: git_status_msg += f" by {user}"
-            # Удаляем неотображаемые символы
-            git_status_msg = ''.join(c if c.isprintable() else '?' for c in git_status_msg)
-            # Сохраняем статус, можно также отрисовать в статус-бар
-            self.status_message = git_status_msg
-            logging.debug(f"Git status updated: {git_status_msg}")
-        else:
-            self.status_message = "Git: (no repo)"
-            logging.debug("Git status updated: no repo found.")
+        enabled = self.config.get("git", {}).get("enabled", True)
+
+        # nothing changed → silently exit
+        if git_data == old_info:
+            return
+
+        if not branch:                        # repo not found
+            self._set_status_message("Not a Git repository.")
+            logging.info("Git info → repo not detected")
+            return
+
+        if not enabled:                       # Git disabled in config
+            self._set_status_message("Git integration is disabled.")
+            logging.info("Git info → integration disabled")
+            return
+
+        # Build human-readable message for the centre (only on change)
+        dirty_mark = " *" if branch.endswith("*") else ""
+        commits_part = f" ({commits} ahead)" if commits != "0" else ""
+        user_part = f" by {user}" if user else ""
+
+        pretty = f"Git: on {branch.rstrip('*')}{dirty_mark}{commits_part}{user_part}"
+        self._set_status_message(pretty)
+        logging.info("Git info changed → %s", pretty)
+
 
 
     def toggle_insert_mode(self) -> bool:
@@ -10150,171 +10644,243 @@ class DrawScreen:
                     logging.error(f"Curses error applying search highlight: {e}")
  
 
+    def _draw_selection(self) -> None:
+        """Paint the visual highlight for the current text selection.
 
-    def _draw_selection(self):
-        """Накладывает подсветку выделенного текста."""
-        # Проверяем, активно ли выделение и заданы ли его границы
-        if not self.editor.is_selecting or not self.editor.selection_start or not self.editor.selection_end:
-            return # Нет активного выделения
+        The routine is called from :pymeth:`DrawScreen.draw` *after* the
+        coloured text has already been rendered.  It simply toggles the
+        attribute :pydata:`curses.A_REVERSE` on the screen cells that belong
+        to the active selection.
 
-        # Получаем координаты начала и конца выделения
+        Algorithm
+        ---------
+        1. Exit immediately when no selection is active (nothing to draw).
+        2. Normalise *start* / *end* coordinates so that the *start* point is
+        “above or equal to” the *end* point in document order.
+        3. Pre-compute geometry:
+        * ``line_num_width`` – gutter width with line numbers,
+        * ``text_area_width`` – printable width for code,
+        * ``selection_color`` – the attribute to apply.
+        4. Iterate over **document** rows in the selection range and skip
+        rows that are scrolled out of view.
+        5. For each visible row, compute the **screen** X-offsets of the left
+        and right selection borders with the help of
+        :pymeth:`SwayEditor.get_string_width`, then clip them by the
+        left gutter and right window edge.
+        6. Call :pymeth:`curses.window.chgat` to flip the attribute; errors
+        (e.g. when the window is extremely narrow) are logged and ignored.
+
+        The method never touches editor state, cursor position or scrolling.
+        """
+        # 1. Abort early when there is nothing to highlight.
+        if (
+            not self.editor.is_selecting
+            or not self.editor.selection_start
+            or not self.editor.selection_end
+        ):
+            return
+
+        # 2. Unpack and normalise coordinates so that (start_y, start_x) ≤ (end_y, end_x).
         start_y, start_x = self.editor.selection_start
-        end_y, end_x = self.editor.selection_end
-
-        # Нормализуем координаты, чтобы начало всегда было "раньше" конца
-        if start_y > end_y or (start_y == end_y and start_x > end_x):
+        end_y, end_x     = self.editor.selection_end
+        if (start_y > end_y) or (start_y == end_y and start_x > end_x):
             start_y, start_x, end_y, end_x = end_y, end_x, start_y, start_x
 
-        # Получаем размеры окна и информацию о номерах строк
+        # 3. Geometry & reusable values.
         height, width = self.stdscr.getmaxyx()
-        line_num_width = len(str(max(1, len(self.editor.text)))) + 1
-        text_area_width = max(1, width - line_num_width)
+        line_num_width  = len(str(max(1, len(self.editor.text)))) + 1  # “99 |”
+        selection_attr  = curses.A_REVERSE
 
-        # Цвет подсветки выделения (используем инверсию по умолчанию)
-        selection_color = curses.A_REVERSE # Инвертирование цвета
-
-        # Итерируем по строкам, которые попадают в диапазон выделения
-        for y in range(start_y, end_y + 1):
-            # Проверяем, находится ли текущая строка в видимой области
-            if y < self.editor.scroll_top or y >= self.editor.scroll_top + self.editor.visible_lines:
-                continue # Строка не на экране, пропускаем
-
-            screen_y = y - self.editor.scroll_top # Экранная строка
-
-            # Определяем начальный и конечный индекс символа для выделения в текущей строке.
-            sel_start_char_idx = start_x if y == start_y else 0
-            sel_end_char_idx = end_x if y == end_y else len(self.editor.text[y])
-
-            # Проверка, что выделение в строке вообще существует (start_x < end_x или start_idx < end_idx)
-            if sel_start_char_idx >= sel_end_char_idx:
+        # 4. Iterate through document rows overlapped by the selection.
+        for doc_y in range(start_y, end_y + 1):
+            # Skip rows that are outside of the viewport.
+            if (
+                doc_y < self.editor.scroll_top
+                or doc_y >= self.editor.scroll_top + self.editor.visible_lines
+            ):
                 continue
 
-            line = self.editor.text[y] # Оригинальная строка текста
+            screen_y = doc_y - self.editor.scroll_top
 
-            # Экранная позиция начала выделения в этой строке
-            sel_screen_start_x_before_scroll = self.editor.get_string_width(line[:sel_start_char_idx])
-            sel_screen_start_x = line_num_width + sel_screen_start_x_before_scroll - self.editor.scroll_left
+            # Determine logical character indices of the highlight in this row.
+            sel_start_idx = start_x if doc_y == start_y else 0
+            sel_end_idx   = end_x   if doc_y == end_y   else len(self.editor.text[doc_y])
+            if sel_start_idx >= sel_end_idx:            # empty slice → nothing to draw
+                continue
 
-            # Экранная позиция конца выделения в этой строке
-            sel_screen_end_x_before_scroll = self.editor.get_string_width(line[:sel_end_char_idx])
-            sel_screen_end_x = line_num_width + sel_screen_end_x_before_scroll - self.editor.scroll_left
+            line_text = self.editor.text[doc_y]
 
-            draw_start_x = max(line_num_width, sel_screen_start_x)
-            draw_end_x = min(width, sel_screen_end_x)
+            # Convert logical indices → *screen* columns (wcwidth-aware), then
+            # adjust for horizontal scrolling and line-number gutter.
+            x_left = (
+                line_num_width
+                + self.editor.get_string_width(line_text[:sel_start_idx])
+                - self.editor.scroll_left
+            )
+            x_right = (
+                line_num_width
+                + self.editor.get_string_width(line_text[:sel_end_idx])
+                - self.editor.scroll_left
+            )
 
-            highlight_width_on_screen = max(0, draw_end_x - draw_start_x)
+            # Clip by the printable area.
+            draw_start_x = max(line_num_width, x_left)
+            draw_end_x   = min(width, x_right)
+            highlight_w  = max(0, draw_end_x - draw_start_x)
 
-            if highlight_width_on_screen > 0:
+            # 5. Apply the attribute if at least one cell is visible.
+            if highlight_w > 0:
                 try:
+                    self.stdscr.chgat(screen_y, draw_start_x, highlight_w, selection_attr)
+                except curses.error as err:
+                    logging.error(
+                        "Curses error while applying selection highlight "
+                        "at (%d, %d) width=%d: %s",
+                        screen_y, draw_start_x, highlight_w, err,
+                    )
 
-                    self.stdscr.chgat(screen_y, draw_start_x, highlight_width_on_screen, selection_color)
+    
+    def _draw_matching_brackets(self) -> None:
+        """Render visual hint for the bracket pair under the caret.
 
-                except curses.error as e:
-                    logging.error(f"Curses error applying selection highlight at ({screen_y}, {draw_start_x}) with width {highlight_width_on_screen}: {e}")
- 
+        This thin wrapper simply delegates the actual detection and
+        highlighting logic to
+        :pymeth:`SwayEditor.highlight_matching_brackets`.  The editor
+        method is responsible for updating the internal structures that
+        :pymeth:`DrawScreen._draw_text_with_syntax_highlighting` consults
+        when painting coloured tokens; here we only *trigger* the update
+        during every frame.
 
-    def _draw_matching_brackets(self):
-        """Вызывает highlight_matching_brackets для отрисовки."""
+        Returns
+        -------
+        None
+            The function has no return value.  Any drawing errors are
+            expected to be handled deeper in the call-chain.
+        """
+        # Delegates to the editor; nothing to catch or return here.
         self.editor.highlight_matching_brackets()
 
 
     def truncate_string(self, s: str, max_width: int) -> str:
+        """Return *s* clipped to **visual** width *max_width*.
+
+        Wide-Unicode characters (e.g. CJK), zero-width joiners and other
+        multi-cell glyphs are accounted for with :pyfunc:`wcwidth.wcwidth`.
+
+        Parameters
+        ----------
+        s :
+            The original text.
+        max_width :
+            Maximum number of terminal cells the string may occupy.
+
+        Returns
+        -------
+        str
+            Either the original text (if it already fits) or a prefix whose
+            display width does not exceed *max_width*.
         """
-        Обрезает строку s так, чтобы её
-        визуальная ширина (wcwidth) не превышала max_width.
-        """
-        result = ""
-        curr = 0
+        result: list[str] = []
+        consumed = 0
+
         for ch in s:
             w = wcwidth(ch)
-            if w < 0:
+            if w < 0:                       # Non-printable → treat as single-cell
                 w = 1
-            if curr + w > max_width:
+            if consumed + w > max_width:    # Would overflow → stop
                 break
-            result += ch
-            curr += w
-        return result
+            result.append(ch)
+            consumed += w
+
+        return "".join(result)
+
 
 
     def _draw_status_bar(self) -> None:
-        """Draw the bottom status-bar line.
+        """Draw the single-line status bar at the bottom of the screen.
 
-        The bar consists of three aligned segments:
+        Layout
+        -------
+        | left chunk |   centred message   |   right chunk (Git) |
 
-        * **Left segment** – file icon/name, language, position, and
-          insert/replace mode.
-        * **Middle segment** – editor status message (error, info, etc.),
-          centred in the remaining space.
-        * **Right segment** – Git branch + commit count (optional).
+        *Left*  : file icon / name, language, position, INS/REP.  
+        *Middle*: current status message (errors → red).  
+        *Right* : Git branch / commit count, colour-coded.
 
-        The method:
+        The method clears the last row, sets a temporary background
+        (`bkgdset`), prints three chunks with wcwidth-aware clipping,
+        then **always** resets the background to normal.
 
-        1. Clears the last terminal row and sets a temporary background
-           attribute (`bkgdset`) for convenient colour filling.
-        2. Calculates each segment’s display width with `wcwidth` helpers so
-           that wide Unicode characters are handled correctly.
-        3. Writes the three segments with `addnstr`, clipping where required to
-           avoid `curses.ERR`.
-        4. **Always resets** the global background attribute back to normal
-           before exiting to prevent side-effects in subsequent drawing calls.
-
-        Raises:
-            Exception: Any unexpected error is logged; a simplified message is
-            sent to the editor status bar so the user is informed.
+        Any unexpected exception is logged and a simplified message is
+        pushed to *self.editor.status_message* so the user still sees it.
         """
         logging.debug("Drawing status bar")
-
         try:
             h, w = self.stdscr.getmaxyx()
-            if h <= 0 or w <= 1:      # Window too small – nothing to draw.
-                return
+            if h <= 0 or w <= 1:
+                return                                  # window too small
 
-            y = h - 1                # Last row
-            max_col = w - 1
+            y        = h - 1                            # bottom row
+            max_col  = w - 1
 
-            # ── colour attributes ──────────────────────────────────────────
-            c_norm  = self.colors.get("status",       curses.color_pair(10) | curses.A_BOLD)
-            c_err   = self.colors.get("status_error", curses.color_pair(11) | curses.A_BOLD)
-            c_git   = self.colors.get("git_info",     curses.color_pair(12))
-            c_dirty = self.colors.get("git_dirty",    curses.color_pair(13) | curses.A_BOLD)
+            # --- colour attributes ------------------------------------------------
+            c_norm  = self.colors.get("status",
+                                    curses.color_pair(10) | curses.A_BOLD)
+            c_err   = self.colors.get("status_error",
+                                    curses.color_pair(11) | curses.A_BOLD)
+            c_git   = self.colors.get("git_info",
+                                    curses.color_pair(12))
+            c_dirty = self.colors.get("git_dirty",
+                                    curses.color_pair(13) | curses.A_BOLD)
 
-            # Clear the line and set temporary background attr.
+            # clear the line + set temporary background
             self.stdscr.move(y, 0)
             self.stdscr.clrtoeol()
-            self.stdscr.bkgdset(" ", c_norm)          # <─ temp background
+            self.stdscr.bkgdset(" ", c_norm)
 
-            # ── build left segment ─────────────────────────────────────────
-            icon       = get_file_icon(self.editor.filename, self.editor.config)
-            fname      = os.path.basename(self.editor.filename) if self.editor.filename else "No Name"
-            lexer_name = self.editor._lexer.name if self.editor._lexer else "plain text"
-            left = (
-                f" {icon} {fname}{'*' if self.editor.modified else ''}"
-                f" | {lexer_name} | UTF-8"
-                f" | Ln {self.editor.cursor_y + 1}/{len(self.editor.text)}, "
-                f"Col {self.editor.cursor_x + 1}"
-                f" | {'INS' if self.editor.insert_mode else 'REP'} "
-            )
+            # ---------- left chunk -------------------------------------------------
+            icon  = get_file_icon(self.editor.filename, self.editor.config)
+            fname = (os.path.basename(self.editor.filename)
+                    if self.editor.filename else "No Name")
+            lexer = self.editor._lexer.name if self.editor._lexer else "plain text"
 
-            # ── build right (Git) segment ──────────────────────────────────
-            branch, _user, commits = self.editor.git_info
-            git_txt = f"Git: {branch} ({commits})" if branch else ""
-            git_attr = c_dirty if "*" in branch else c_git
+            left = (f" {icon} {fname}{'*' if self.editor.modified else ''}"
+                    f" | {lexer} | UTF-8"
+                    f" | Ln {self.editor.cursor_y + 1}/{len(self.editor.text)}, "
+                    f"Col {self.editor.cursor_x + 1}"
+                    f" | {'INS' if self.editor.insert_mode else 'REP'} ")
 
-            # ── middle message segment ─────────────────────────────────────
+            # ---------- right chunk — Git  ----------------------------------------  # >>>
+            g_branch, _g_user, g_commits = self.editor.git_info
+            git_enabled = self.editor.config.get("git", {}).get("enabled", True)
+
+            if not g_branch:                               # repo not found
+                git_txt  = "Git: None"
+                git_attr = c_norm
+            elif not git_enabled:                          # integration disabled
+                git_txt  = f"Git: {g_branch.rstrip('*')}"
+                git_attr = c_norm
+            else:                                          # repo present
+                git_txt  = f"Git: {g_branch.rstrip('*')}"
+                if g_commits != "0":
+                    git_txt += f" ({g_commits})"
+                git_attr = c_dirty if "*" in g_branch else c_git
+            # ----------------------------------------------------------------------  # <<<
+
+            # ---------- middle chunk — message -------------------------------------
             msg      = self.editor.status_message or "Ready"
             msg_attr = c_err if msg.lower().startswith("error") else c_norm
 
-            # ── widths (wcwidth-aware) ─────────────────────────────────────
+            # ---------- width calculations (wcwidth) -------------------------------
             gw_left = self.editor.get_string_width(left)
             gw_git  = self.editor.get_string_width(git_txt)
-            # (middle width is computed after truncation)
 
-            # ── draw left segment ──────────────────────────────────────────
+            # ---------- paint left chunk -------------------------------------------
             x = 0
             self.stdscr.addnstr(y, x, left, min(gw_left, max_col - x), c_norm)
             x += gw_left
 
-            # ── draw right/Git segment ─────────────────────────────────────
+            # ---------- paint right chunk ------------------------------------------
             if git_txt:
                 x_git = max_col - gw_git
                 self.stdscr.addnstr(y, x_git, git_txt, gw_git, git_attr)
@@ -10322,16 +10888,16 @@ class DrawScreen:
             else:
                 right_limit = max_col
 
-            # ── draw centred message segment ───────────────────────────────
+            # ---------- paint centred message --------------------------------------
             space_for_msg = right_limit - x
             if space_for_msg > 0:
-                msg = self.truncate_string(msg, space_for_msg)
+                msg  = self.truncate_string(msg, space_for_msg)
                 gw_msg = self.editor.get_string_width(msg)
-                x_msg = x + (space_for_msg - gw_msg) // 2
+                x_msg  = x + (space_for_msg - gw_msg) // 2
                 self.stdscr.addnstr(y, x_msg, msg, gw_msg, msg_attr)
 
-            # ── RESET background attribute so it does not leak ─────────────
-            self.stdscr.bkgdset(" ", curses.A_NORMAL)   # <- important reset
+            # ---------- reset background to default --------------------------------
+            self.stdscr.bkgdset(" ", curses.A_NORMAL)
 
         except Exception as e:
             logging.error("Error in _draw_status_bar: %s", e, exc_info=True)
@@ -10339,6 +10905,7 @@ class DrawScreen:
                 self.editor._set_status_message("Status bar error (see log)")
             except Exception:
                 pass
+
 
     def _position_cursor(self) -> None:
         """Позиционирует курсор на экране, не позволяя ему «улетать» за Git-статус."""
