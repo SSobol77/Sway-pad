@@ -66,18 +66,6 @@
 
 <br>
 
-## 🚀 Features
-
-| **Category**         | **Details**                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| **Core Engine**      | ⚡ Multithreaded Architecture • 🕒 Low Latency (<5ms) • 📦 2MB Memory Footprint |
-| **Syntax Support**   | 40+ Languages (Python, Rust, Go, etc.) • 🎨 Theme Engine • 🔍 Regex Parsing |
-| **Workflow**         | 🖱️ i3wm Integration • 📋 X11 Clipboard (via xclip) • 💻 TMux Compatible • 🧩 Plugin System |
-| **Customization**    | 🔧 TOML Configuration • ⌨️ Keybind Profiles • 🌓 Dark/Light Themes           |
-| **Performance**      | 🚀 <0.1s Startup • 📈 100k LOC Handling • 🔄 Auto-Reload Changed Files       |
-
-<br>
-
 ---
 
 <br>
@@ -85,6 +73,7 @@
 ## ⚡ Quick Start
 
 ### Installation  
+
 ```bash
 # Linux (PyPI) - Required First Step:
 sudo apt-get install xclip || sudo apt-get install xsel  # Must choose one
