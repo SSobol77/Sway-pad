@@ -31,11 +31,38 @@
 <br>
 
 <div align="center">
-  <h1>🌊 Sway-pad</h1>
-  <h3>Cross-Platform Terminal Text Editor</h3>
+  <h1>🌊Sway-pad</h1>
+  <h3>Cross-Platform Terminal Code Editor for DevOps Engineers</h3>
 </div>
 
+<br>
+
 ---
+
+<br>
+
+### 🌊 **Sway-pad** — Lightweight Terminal Code Editor for DevOps Engineers and System Administrators
+
+**Sway-pad** is a fast, minimalist, and highly configurable terminal-based code editor written in Python. Designed specifically for DevOps engineers and system administrators, it combines simplicity with powerful features — all in your terminal.
+
+🧩 **Key Features:**
+
+*  Terminal-first UI optimized for SSH and server environments
+*  Instant startup and low memory usage — perfect for remote systems
+*  Easy configuration via `.swayterm.toml`
+*  Cross-platform: Linux, FreeBSD, macOS, Windows (via WSL)
+*  Built-in **Git integration**: stage, commit, push and view diffs — without leaving the editor
+
+🎯 **Ideal For:**
+
+* Editing scripts, configs, and automation pipelines (YAML, INI, Dockerfile, etc.)
+* Managing infrastructure-as-code and DevOps assets on the fly
+* Working inside terminals, containers, or headless environments
+* Server-side editing via SSH sessions
+
+🧠 **Philosophy:**
+
+> **"As lightweight as `nano`, as powerful as `vim`, as Git-aware as `Magit`, and written in Python — for modern DevOps."**
 
 <br>
 
