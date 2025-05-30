@@ -13,18 +13,11 @@
 [colors]
 line_number = "yellow"
 cursor = "yellow"
-keyword = "blue"
-string = "green"
-comment = "white"
 literal = "magenta"
 decorator = "cyan"
-type = "yellow"
 selector = "magenta"
 property = "cyan"
-punctuation = "white"
-background = "#1E1E1E"
-foreground = "#D4D4D4"
-error = "red"           
+punctuation = "white"   
 status = "bright_white"
 variable = "white"    
 tag = "blue"          
@@ -32,11 +25,25 @@ attribute = "cyan"
 magic = "magenta"      
 builtin = "yellow"     
 exception = "red"      
-function = "blue"     
 class = "yellow"       
-number = "magenta"      
-operator = "white"     
 escape = "cyan"       
+background      = "#0D1117"
+foreground      = "#C9D1D9"
+comment         = "#8B949E"
+keyword         = "#D2A8FF"
+string          = "#A5D6FF"
+number          = "#79C0FF"
+function        = "#FFA657"
+constant        = "#D29922"
+type            = "#F2CC60"
+operator        = "#F0F6FC"
+selection_bg    = "#264F78"
+search_highlight_bg = "#3C2D00"
+status_bg       = "#161B22"
+status_fg       = "#C9D1D9"
+git_clean       = "#79C0FF"
+git_dirty       = "#FFAB70"
+error           = "#FF7B72"
 
 [fonts]
 font_family = "monospace"    # Используется системный моноширинный шрифт
@@ -104,6 +111,11 @@ accent = "#007ACC"
 selection = "#264F78"
 inactive_selection = "#3A3D41"
 cursor = "#AEAFAD"
+
+[linter]
+enabled = true
+auto_install = true
+exclude = [".git", "__pycache__", ".venv"]
 
 [file_icons]
 text = "📝"
