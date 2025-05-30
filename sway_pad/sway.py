@@ -27,6 +27,8 @@ import threading
 import termios
 import curses.ascii
 import signal 
+import json
+import uuid
 
 from pygments import lex
 from pygments.lexer import RegexLexer
@@ -495,7 +497,6 @@ def get_git_info(file_path_context: Optional[str]) -> Tuple[str, str, str]:
         except Exception as e_run: # Other potential errors
             logging.error(f"Error running git command '{' '.join(cmd_parts)}': {e_run}", exc_info=True)
             raise
-
     try:
         # 3. Determine the current branch name.
         try:
@@ -596,9 +597,7 @@ def load_config() -> dict:
         >>> cfg["editor"]["tab_size"]
         4
     """
-    # ------------------------------------------------------------------ #
-    # 1. Minimal hard-coded defaults                                     #
-    # ------------------------------------------------------------------ #
+    # 1. Minimal hard-coded defaults                                     
     minimal_default = {
         "colors": {
             "error": "red",
@@ -666,8 +665,8 @@ def load_config() -> dict:
             "jenkins": "🧑‍✈️",   
             "puppet": "🎎",    
             "saltstack": "🧂", 
-            "git": "🔖",      # .gitignore, .gitattributes)
-            "notebook": "📒", # .ipynb
+            "git": "🔖",     
+            "notebook": "📒",
             "diff": "↔️",     
             "makefile": "🛠️", 
             "ini": "🔩",      
@@ -755,9 +754,7 @@ def load_config() -> dict:
     config_path = "config.toml"
     user_config: dict = {}
 
-    # ------------------------------------------------------------------ #
-    # 2. Attempt to read user-provided TOML file                         #
-    # ------------------------------------------------------------------ #
+    # 2. Attempt to read user-provided TOML file                         
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as fh:
@@ -773,9 +770,7 @@ def load_config() -> dict:
     else:
         logging.warning("Config file %s not found – using defaults.", config_path)
 
-    # ------------------------------------------------------------------ #
-    # 3. Merge user config onto minimal defaults                         #
-    # ------------------------------------------------------------------ #
+    # 3. Merge user config onto minimal defaults                         
     final_config: dict = deep_merge(minimal_default, user_config)
     # Ensure every default section/key exists even if deep_merge missed it
     for section, default_val in minimal_default.items():
@@ -792,10 +787,11 @@ def load_config() -> dict:
 ## Class SwayEditor  --------------------------------------------------------
 class SwayEditor:
     """The main class of the Sway-Pad editor."""
+    
     def _set_status_message(
-        self, 
-        message_for_statusbar: str, 
-        is_lint_status: bool = False, 
+        self,
+        message_for_statusbar: str,
+        is_lint_status: bool = False,
         full_lint_output: Optional[str] = None,
         activate_lint_panel_if_issues: bool = False
     ) -> None:
@@ -808,87 +804,81 @@ class SwayEditor:
             is_lint_status (bool): True if this is a status message originating from a linter.
             full_lint_output (Optional[str]): The full output from the linter, intended for the
                                               linter panel. Used only if is_lint_status is True.
-                                              If None and is_lint_status is True, 
+                                              If None and is_lint_status is True,
                                               self.lint_panel_message is not changed.
             activate_lint_panel_if_issues (bool): If True and is_lint_status is True,
                                                   the linter panel will be activated if full_lint_output
                                                   indicates issues (i.e., not a "no issues" message).
         """
-        # Ensure _last_status_msg_sent attribute exists (usually set in __init__ or first call)
         if not hasattr(self, "_last_status_msg_sent"):
             self._last_status_msg_sent = None
+        if not hasattr(self, "_force_full_redraw"): # Убедимся, что флаг существует
+            self._force_full_redraw = False
 
         if is_lint_status:
-            # Handle messages related to the linter.
-            original_panel_active = self.lint_panel_active
-            original_panel_message = self.lint_panel_message
+            # --- ИЗМЕНЕНИЕ 1: Отслеживаем, изменилось ли что-то в панели ---
+            panel_state_or_content_changed = False
 
-            # Update the linter panel's full message content if provided.
+            # Обновляем сообщение панели линтера, если оно предоставлено
             if full_lint_output is not None:
-                # It's generally safe to assign to self attributes from different threads 
-                # if reads/writes are simple assignments and not complex operations,
-                # and if the main UI thread is the primary reader for drawing.
-                # For more complex state, a lock might be needed around these attributes.
-                self.lint_panel_message = str(full_lint_output) # Ensure it's a string
-                logging.debug(f"Linter panel message updated: '{self.lint_panel_message[:100]}...'")          
+                new_panel_message_str = str(full_lint_output)
+                if self.lint_panel_message != new_panel_message_str:
+                    self.lint_panel_message = new_panel_message_str
+                    logging.debug(f"Linter panel message updated: '{self.lint_panel_message[:100]}...'")
+                    panel_state_or_content_changed = True # Контент панели изменился
+
             logging.debug(f"Linter status bar message: '{message_for_statusbar}'")
-            
-            # Queue the (short) status bar message.
-            # Avoid queuing duplicate consecutive messages for the status bar.
+
+            # Постановка сообщения для статус-бара в очередь
             if message_for_statusbar != self._last_status_msg_sent:
                 try:
-                    # The message queue is thread-safe.
-                    self._msg_q.put_nowait(str(message_for_statusbar)) 
-                    self._last_status_msg_sent = message_for_statusbar 
+                    self._msg_q.put_nowait(str(message_for_statusbar))
+                    self._last_status_msg_sent = message_for_statusbar
                 except queue.Full:
                     logging.error("Status message queue is full (linter message). Dropping message.")
                 except Exception as e:
                     logging.error(f"Failed to add linter status message to queue: {e}", exc_info=True)
 
-            # Decide whether to activate the linter panel.
+            # Решаем, активировать ли панель линтера
             if activate_lint_panel_if_issues and self.lint_panel_message:
-                # Define messages that indicate no linting issues were found.
-                # These could be made configurable or expanded.
-                no_issues_substrings = [ # Check for substrings to be more robust
-                    "no issues found", 
-                    "нет проблем" # Russian for "no problems"
-                ]             
-                # Check if the panel message indicates that there are actual issues.
-                # Convert to lower for case-insensitive check.
+                no_issues_substrings = ["no issues found", "нет проблем"]
                 panel_message_lower = self.lint_panel_message.strip().lower()
-                has_actual_issues = True # Assume issues unless a "no issues" message is found
-                for no_issue_msg_part in no_issues_substrings:
-                    if no_issue_msg_part in panel_message_lower:
-                        has_actual_issues = False
-                        break            
+                has_actual_issues = not any(sub in panel_message_lower for sub in no_issues_substrings)
+
                 if has_actual_issues:
-                    if not self.lint_panel_active:
+                    if not self.lint_panel_active: # Если панель не была активна
                         self.lint_panel_active = True
                         logging.debug("Linter panel activated due to detected issues.")
+                        panel_state_or_content_changed = True # Статус активности панели изменился
                 else:
-                    # No actual issues found, ensure panel is not active (or deactivate if it was).
-                    # Optionally, one might choose to keep it open if user explicitly opened it,
-                    # but for activate_lint_panel_if_issues, deactivating on "no issues" is common.
-                    # if self.lint_panel_active:
-                    #    self.lint_panel_active = False
-                    #    logging.debug("Linter panel deactivated as no issues were found.")
+                    # Если нет реальных проблем, а activate_lint_panel_if_issues=True,
+                    # это означает, что мы НЕ должны активировать панель автоматически.
+                    # Если она была активна, мы ее здесь НЕ деактивируем,
+                    # это делается в cancel_operation или _maybe_hide_lint_panel.
                     logging.debug("No linting issues found; panel not automatically activated (or remains as is).")
-            # If not activating on issues, or no message, panel state remains as is unless explicitly changed elsewhere.
-            # If panel state or message changed, it implies a redraw is needed.
-            # This method doesn't return a bool, the main loop detects changes via queue or attribute polling.
-        else: # Handle regular (non-linter) status messages.
-            # Prevent queuing duplicate consecutive messages for the status bar.
+            
+            # --- ИЗМЕНЕНИЕ 2: Форсируем перерисовку, если панель активна и ее состояние/содержимое изменилось ---
+            if panel_state_or_content_changed and self.lint_panel_active:
+                # Если панель УЖЕ активна и ее содержимое изменилось, ИЛИ
+                # если панель ТОЛЬКО ЧТО стала активной (из-за has_actual_issues)
+                # то нужна перерисовка, чтобы отобразить изменения.
+                self._force_full_redraw = True
+                logging.debug("Forcing full redraw because linter panel state or content changed while panel is (or became) active.")
+
+        else: # Обычные сообщения для статус-бара (не от линтера)
             if message_for_statusbar == self._last_status_msg_sent:
                 logging.debug(f"Skipping duplicate status message: '{message_for_statusbar}'")
-                return            
+                return
             try:
-                self._msg_q.put_nowait(str(message_for_statusbar)) # Ensure message is a string
-                self._last_status_msg_sent = message_for_statusbar # Update last sent message
+                self._msg_q.put_nowait(str(message_for_statusbar))
+                self._last_status_msg_sent = message_for_statusbar
                 logging.debug(f"Queued status message for status bar: '{message_for_statusbar}'")
             except queue.Full:
                 logging.error("Status message queue is full. Dropping message.")
             except Exception as e:
                 logging.error(f"Failed to add status message to queue: '{message_for_statusbar}': {e}", exc_info=True)
+
+        # self._force_full_redraw = current_force_redraw_needed or self._force_full_redraw
 
 
     def __init__(self, stdscr: "curses.window") -> None:
@@ -1026,6 +1016,17 @@ class SwayEditor:
         self._git_q: "queue.Queue[tuple[str,str,str]]" = queue.Queue()
         self._git_cmd_q: "queue.Queue[str]" = queue.Queue()
 
+        # ───────────────────── LSP client state ─────────────────────────────
+        self._lsp_proc: Optional[subprocess.Popen] = None
+        self._lsp_q: "queue.Queue[dict]" = queue.Queue(maxsize=256)
+        self._lsp_reader: Optional[threading.Thread] = None
+        self._lsp_initialized = False
+        self._lsp_seq = 0                    # счётчик id для запросов
+        self._lsp_doc_version: dict[str, int] = {}
+
+        # ───────────────────── Language / LSP metadata ───────────────────────
+        self.current_language: Optional[str] = None
+
         # ───────────────────── Buffer & caret position ───────────────────────
         self.text = [""]
         self.cursor_x = 0
@@ -1088,6 +1089,53 @@ class SwayEditor:
             logging.error("Could not set system locale: %s", exc, exc_info=True)
 
         logging.info("SwayEditor initialised successfully.")
+
+
+    def close(self) -> None:
+        """Завершает работу редактора и корректно освобождает ресурсы.
+
+        Сначала останавливаются фоновые службы (автосохранение, Git-потоки
+        и др.), затем выполняется штатный shutdown LSP-процесса: отправляются
+        сообщения ``shutdown`` и ``exit`` в stdin сервера, после чего процесс
+        завершается.  Поток-читатель stdout (`_lsp_reader`) дожидается join, чтобы
+        не оставлять демонов в памяти.
+
+        Notes:
+            Метод *идемпотентен*: повторный вызов не приведёт к исключению, если
+            сервер уже остановлен или поток-читатель завершился.
+        """
+        # ── 1. Остановка автосохранения и прочих фоновых задач ─────────────────
+        try:
+            self._stop_auto_save_thread()  # если у вас есть такой метод
+        except AttributeError:
+            pass
+
+        # ── 2. Корректно завершаем LSP-сервер ──────────────────────────────────
+        if self._lsp_proc and self._lsp_proc.poll() is None:
+            try:
+                self._send_lsp("shutdown", {})
+                self._send_lsp("exit", {})
+            except Exception as exc:  # noqa: BLE001
+                logging.debug("Could not send LSP shutdown/exit: %s", exc, exc_info=True)
+
+            # Закрываем stdin, чтобы сервер получил EOF.
+            try:
+                self._lsp_proc.stdin.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+
+            # Дадим процессу шанс выйти по-хорошему.
+            self._lsp_proc.terminate()
+            try:
+                self._lsp_proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                self._lsp_proc.kill()
+
+        # ── 3. Дожидаемся чтения stdout, чтобы не висел поток-daemon ───────────
+        if self._lsp_reader and self._lsp_reader.is_alive():
+            self._lsp_reader.join(timeout=0.5)
+
+        logging.info("SwayEditor closed successfully.")
 
     # ───────────────────── Keybinding Initialization ─────────────────────
     def _load_keybindings(self) -> Dict[str, int]:
@@ -1155,7 +1203,7 @@ class SwayEditor:
         return parsed_keybindings
     
 
-    # ----- Decode ----------- 
+    # ----- Decode ----------------------------------------------------------- 
     def _decode_keystring(self, key_input: Union[str, int]) -> int:
         """
         Translate a human-readable key specification into a *curses* key code.
@@ -1341,7 +1389,6 @@ class SwayEditor:
             "redo":       self.redo,
             "handle_home":self.handle_home, # Note: KEY_HOME is also handled below
             "handle_end": self.handle_end,   # Note: KEY_END is also handled below
-            "show_lint_panel": self.show_lint_panel, # Could be same as "lint"
             "extend_selection_right": self.extend_selection_right,
             "extend_selection_left":  self.extend_selection_left,
             "select_to_home":         self.select_to_home,
@@ -1359,7 +1406,8 @@ class SwayEditor:
             "quit":                   self.exit_editor,
             "tab":                    self.handle_smart_tab,
             "shift_tab":              self.handle_smart_unindent,
-            "lint":                   self.run_lint_async, 
+            "lint":                  self.run_lint_async,  # call Ruff-LSP
+            "show_lint_panel": self.show_lint_panel, # Could be same as "lint"
             "comment_selected_lines": self.do_comment_block,
             "uncomment_selected_lines": self.do_uncomment_block,
         }
@@ -1453,7 +1501,6 @@ class SwayEditor:
         
         return final_key_action_map
         
- 
     # ─────────────────────  Get comment prefix for current language ─────────────────────
     def get_line_comment_prefix(self) -> Optional[str]:
         """
@@ -1706,7 +1753,6 @@ class SwayEditor:
         logging.warning(f"get_line_comment_prefix: No line comment prefix rule found for lexer '{lexer_name}' (aliases: {lexer_aliases}). Returning None.")
         return None
     
-
     def get_block_comment_delimiters(self) -> Optional[tuple[str, str]]:
         """Return (open, close) block-comment markers or ``None`` if the
         language does not support a dedicated block comment syntax.
@@ -1734,7 +1780,6 @@ class SwayEditor:
 
         # No recognised block-comment delimiters
         return None
-
 
     def _determine_lines_to_toggle_comment(self) -> Optional[tuple[int, int]]:
         """
@@ -1769,7 +1814,6 @@ class SwayEditor:
         else:
             return self.cursor_y, self.cursor_y
 
-
     def toggle_comment_block(self) -> None:
         """
         Comment **or** uncomment the current selection in a single keystroke.
@@ -1779,10 +1823,7 @@ class SwayEditor:
         2. Otherwise fall back to the traditional “prefix every line with
         a line-comment marker” logic.
         """
-
-        # ------------------------------------------------------------
         # 1. Determine the line interval affected by the operation
-        # ------------------------------------------------------------
         line_range = self._determine_lines_to_toggle_comment()
         if line_range is None:
             self._set_status_message("No lines selected to comment/uncomment.")
@@ -1790,9 +1831,7 @@ class SwayEditor:
 
         start_y, end_y = line_range
 
-        # ------------------------------------------------------------
         # 2. Try block-comment toggling first
-        # ------------------------------------------------------------
         block_delims = self.get_block_comment_delimiters()
         if block_delims and start_y != end_y:            # real multi-line block
             open_tag, close_tag = block_delims
@@ -1822,9 +1861,7 @@ class SwayEditor:
 
             return  # block path handled → skip line-comment logic
 
-        # ------------------------------------------------------------
         # 3. Fallback to single-line prefix commenting
-        # ------------------------------------------------------------
         comment_prefix = self.get_line_comment_prefix()
         if not comment_prefix:
             self._set_status_message(
@@ -1904,9 +1941,7 @@ class SwayEditor:
             else:
                 self.uncomment_lines(start_y, end_y, comment_prefix)
 
-
     # ───────────────────── Comment/Uncomment Block ─────────────────────
-    
     def do_comment_block(self) -> bool:
         """
         Comment the current selection **unconditionally**.
@@ -1952,7 +1987,6 @@ class SwayEditor:
         
         return made_change or (self.status_message != original_status)
     
-
     # ───────────────────── Uncommenting block ─────────────────────
     def do_uncomment_block(self) -> bool: # Already returns bool, check logic
         """
@@ -1998,7 +2032,6 @@ class SwayEditor:
         
         return made_change or (self.status_message != original_status)
     
-
     # Note:  This method is called from the main loop when a key is pressed.
     # --------------------- Input Handler --------------------
     def handle_input(self, key: Union[str, int]) -> bool:
@@ -2122,285 +2155,466 @@ class SwayEditor:
         """Old method name – delegate to new DrawScreen."""
         return self.drawer.draw(*a, **kw)
 
+    # --- LSP --------------------------------------------------------------
+    def _start_lsp_server_if_needed(self) -> None:
+        """Запускает (или переиспользует) процесс **Ruff LSP** для Python-файлов.
 
-    # ───────────────────── Flake8 Linter Integration ─────────────────────
-    def run_flake8_on_code(self, code_string: str, filename: Optional[str] = "<buffer>") -> None:
-        """
-        Runs Flake8 analysis on the provided Python code string in a separate thread.
-        Results (errors/warnings or a 'no issues' message) are posted to
-        self.lint_panel_message (for the lint panel) and a summary to the status bar
-        via self._set_status_message.
+        Алгоритм:
+            1.  Если язык ещё не определён — вызывается :py:meth:`detect_language`.
+            2.  Для всех языков, кроме *python*, метод мгновенно выходит.
+            3.  Если процесс Ruff уже жив и не завершился ― повторно не запускаем.
+            4.  Иначе создаём `subprocess.Popen`, поднимаем поток-читатель stdout,
+                отправляем сообщение ``initialize`` по протоколу LSP, затем уведомление
+                ``initialized`` и помечаем сервер как инициализированный.
 
-        This method itself does not return a redraw status, as its primary work is asynchronous.
-        The asynchronous part will trigger UI updates via _set_status_message.
-
-        Args:
-            code_string (str): The Python source code to be checked.
-            filename (Optional[str]): The name of the file (used for logging and by Flake8).
-                                      Defaults to "<buffer>" if not provided or None.
-        """
-        effective_filename_for_flake8 = filename if filename and filename != "noname" else "<buffer>"
-        
-        # Performance guard: limit analysis for very large files/strings
-        # Check string length first to avoid potentially expensive encoding of huge strings.
-        if len(code_string) > 750_000: # Approx. character limit
-            try:
-                # Check byte size after encoding as a secondary check
-                if len(code_string.encode('utf-8', errors='ignore')) > 1_000_000: # 1MB limit
-                    msg = "Flake8: File too large for analysis (max ~1MB)."
-                    logging.warning(f"{msg} (File: {effective_filename_for_flake8})")
-                    self._set_status_message(
-                        message_for_statusbar=msg, 
-                        is_lint_status=True, 
-                        full_lint_output=msg, 
-                        activate_lint_panel_if_issues=True # Show panel with this size limit message
-                    )
-                    return # Do not proceed with linting
-            except Exception as e_encode:
-                logging.warning(f"Could not check byte size of code string for Flake8 due to encoding error: {e_encode}")
-                # Proceed with caution if size check fails, or could also return here.
-
-        tmp_file_path: Optional[str] = None # Path to the temporary file used for Flake8
-
-        try:
-            # Create a temporary file with a .py suffix so Flake8 recognizes it as Python code.
-            # delete=False is necessary because Flake8 needs to open the file by its name.
-            # The file will be deleted in the _run_flake8_thread's finally block.
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.py', delete=False, 
-                encoding='utf-8', errors='replace'
-            ) as tmp_flake8_file:
-                tmp_file_path = tmp_flake8_file.name
-                tmp_flake8_file.write(code_string)
-            logging.debug(f"Python code for Flake8 analysis written to temporary file: {tmp_file_path}")
-        except Exception as e_tempfile:
-            logging.exception(f"Failed to create temporary file for Flake8 analysis: {e_tempfile}")
-            error_msg = "Flake8: Error creating temporary file for analysis."
-            self._set_status_message(
-                message_for_statusbar=error_msg, 
-                is_lint_status=True, 
-                full_lint_output=f"{error_msg}\nDetails: {str(e_tempfile)}", 
-                activate_lint_panel_if_issues=True
-            )
-            return # Cannot proceed without a temporary file
-
-        # --- Inner function to run Flake8 in a separate thread ---
-        def _run_flake8_in_thread():
-            # This nonlocal reference is crucial for the finally block to access tmp_file_path
-            nonlocal tmp_file_path 
-            
-            final_panel_output: str = "Flake8: Analysis did not run."
-            final_statusbar_msg: str = "Flake8: Not run."
-            activate_panel_on_completion: bool = False 
-
-            try:
-                flake8_cmd_parts = [
-                    sys.executable, "-m", "flake8",
-                    "--isolated",  # Ignore user/project Flake8 config files
-                    # Example: Get max line length from editor config's 'flake8' section
-                    f"--max-line-length={self.config.get('flake8', {}).get('max_line_length', 88)}",
-                    # TODO: Add more configurable Flake8 options from self.config if desired
-                    # e.g., --select=E,W,F --ignore=E123,W404
-                    # select_codes = self.config.get('flake8', {}).get('select')
-                    # if select_codes: flake8_cmd_parts.extend(["--select", select_codes])
-                    # ignore_codes = self.config.get('flake8', {}).get('ignore')
-                    # if ignore_codes: flake8_cmd_parts.extend(["--ignore", ignore_codes])
-                    str(tmp_file_path)  # The temporary file to analyze
-                ]
-                logging.debug(f"Executing Flake8 command: {' '.join(shlex.quote(p) for p in flake8_cmd_parts)}")
-
-                flake8_process = subprocess.run(
-                    flake8_cmd_parts,
-                    capture_output=True, # Capture stdout and stderr
-                    text=True,           # Decode output as text (UTF-8 by default if not specified)
-                    check=False,         # Do not raise CalledProcessError for non-zero exit codes
-                    timeout=self.config.get('flake8', {}).get('timeout', 20), # Timeout for the command
-                    encoding='utf-8',    # Explicitly set encoding for output decoding
-                    errors='replace'     # How to handle decoding errors
-                )
-
-                stdout_raw = flake8_process.stdout.strip()
-                stderr_raw = flake8_process.stderr.strip()
-
-                if stderr_raw:
-                    logging.warning(
-                        f"Flake8 produced stderr output for temp file '{tmp_file_path}' "
-                        f"(original: '{effective_filename_for_flake8}'):\n{stderr_raw}"
-                    )
-
-                if flake8_process.returncode == 0:
-                    # Flake8 found no issues (or all issues were filtered out)
-                    final_panel_output = f"Flake8 ({effective_filename_for_flake8}): No issues found."
-                    final_statusbar_msg = "Flake8: No issues."
-                    activate_panel_on_completion = False # No need to show panel if no issues
-                else:
-                    # Non-zero return code: Flake8 found issues or encountered an error.
-                    if stdout_raw: # Flake8 usually outputs issues to stdout
-                        # Replace the temporary file path in the output with the effective filename
-                        # for better user readability.
-                        if tmp_file_path: # Check if tmp_file_path is not None
-                            # Careful with simple replace if filenames could be substrings of code.
-                            # Using tmp_file_path + ":" is a bit safer.
-                            final_panel_output = stdout_raw.replace(tmp_file_path + ":", effective_filename_for_flake8 + ":")
-                        else:
-                            final_panel_output = stdout_raw
-                        
-                        issue_lines = final_panel_output.splitlines()
-                        num_issues = len(issue_lines)
-                        first_issue_summary = (issue_lines[0][:70] + "..." if issue_lines and len(issue_lines[0]) > 70 
-                                               else (issue_lines[0] if issue_lines else ""))
-                        final_statusbar_msg = f"Flake8: {num_issues} issue(s). ({first_issue_summary})"
-                        activate_panel_on_completion = True
-                    elif stderr_raw: # No stdout, but stderr might indicate a Flake8 configuration error
-                        final_panel_output = (f"Flake8 ({effective_filename_for_flake8}) execution error:\n{stderr_raw}")
-                        final_statusbar_msg = "Flake8: Execution error."
-                        activate_panel_on_completion = True
-                    else: # Non-zero code, but no output on stdout or stderr - unusual
-                        final_panel_output = (f"Flake8 ({effective_filename_for_flake8}): Unknown error "
-                                              f"(exit code {flake8_process.returncode}), no output.")
-                        final_statusbar_msg = f"Flake8: Unknown error (code {flake8_process.returncode})."
-                        activate_panel_on_completion = True
-                
-            except FileNotFoundError: # If sys.executable or flake8 module itself is not found
-                error_message = "Flake8: Executable or module not found. Please ensure Flake8 is installed ('pip install flake8')."
-                logging.error(error_message)
-                final_panel_output = error_message
-                final_statusbar_msg = "Flake8: Not found."
-                activate_panel_on_completion = True
-            except subprocess.TimeoutExpired:
-                timeout_message = f"Flake8 ({effective_filename_for_flake8}): Analysis timed out."
-                logging.warning(timeout_message)
-                final_panel_output = timeout_message
-                final_statusbar_msg = "Flake8: Timeout."
-                activate_panel_on_completion = True
-            except Exception as e_runtime: # Catch any other runtime errors during Flake8 execution
-                logging.exception(
-                    f"Runtime error during Flake8 execution for temp file '{tmp_file_path}' "
-                    f"(original: '{effective_filename_for_flake8}'): {e_runtime}"
-                )
-                short_err_msg = f"Flake8 runtime error: {str(e_runtime)[:60]}..."
-                full_err_msg = f"Flake8 ({effective_filename_for_flake8}) internal runtime error:\n{traceback.format_exc()}"
-                final_panel_output = full_err_msg
-                final_statusbar_msg = short_err_msg
-                activate_panel_on_completion = True
-            finally:
-                # Ensure the temporary file is deleted
-                if tmp_file_path and os.path.exists(tmp_file_path):
-                    try:
-                        os.remove(tmp_file_path)
-                        logging.debug(f"Temporary Flake8 file '{tmp_file_path}' deleted successfully.")
-                    except Exception as e_remove_tmp:
-                        logging.warning(f"Failed to delete temporary Flake8 file '{tmp_file_path}': {e_remove_tmp}")
-            
-            # Update the UI with the results via the main thread's queue/status mechanism
-            # This call to _set_status_message is made from the background thread.
-            # It updates attributes and puts a message in a queue, which is thread-safe.
-            # The main loop processes the queue and updates curses UI elements.
-            self._set_status_message(
-                message_for_statusbar=final_statusbar_msg,
-                is_lint_status=True,
-                full_lint_output=final_panel_output,
-                activate_lint_panel_if_issues=activate_panel_on_completion
-            )
-
-            # удерживаем всплывашку, чтобы она не «мигала»
-            if activate_panel_on_completion:          # есть что показывать
-                self.drawer._keep_lint_panel_alive()  # ≈400 мс по умолчанию
-            # The show_lint_panel method isn't called directly here;
-            # _set_status_message handles the self.lint_panel_active flag.
-
-        # --- Start the Flake8 analysis in the background thread ---
-        linter_thread = threading.Thread(
-            target=_run_flake8_in_thread, 
-            daemon=True, # Thread will exit automatically when the main program exits
-            name=f"Flake8LintThread-{os.path.basename(effective_filename_for_flake8)}"
-        )
-        linter_thread.start()
-        # This method (run_flake8_on_code) now returns, the thread does the work.
-
-
-    def run_lint_async(self, code: Optional[str] = None) -> bool:
-        """
-        Asynchronously runs Flake8 analysis for the current buffer's content
-        if the detected language is Python.
-        Sets initial status messages indicating the linting process has started.
-        The actual lint results are processed and displayed once the async task completes.
-
-        Args:
-            code (Optional[str]): Optionally, the Python source code to check.
-                                  If None, the current content of `self.text` is used.
+        Notes:
+            * Метод идемпотентен — многократный вызов безопасен.
+            * При отсутствии исполняемого файла **ruff** выводится статус-сообщение
+            и сервер не запускается.
 
         Returns:
-            bool: True if an action was taken that changed the status message (e.g.,
-                  "Analysis started" or "Not a Python file"), indicating a redraw is needed.
-                  False if no action was taken (e.g., lexer not yet determined and then
-                  determined not to be Python without any prior status change).
+            None
         """
-        logging.debug(f"run_lint_async called. Provided code: {'Yes' if code is not None else 'No'}")
-        original_status = self.status_message
-        # original_lint_panel_active = self.lint_panel_active # To check if panel state changed *by this call*
-        # original_lint_panel_message = self.lint_panel_message
+        # 1. Убедимся, что знаем язык текущего буфера.
+        if getattr(self, "current_language", None) is None:
+            self.detect_language()  # обновит self.current_language
 
-        # 1. Ensure the lexer is determined for the current buffer.
-        if self._lexer is None:
-            self.detect_language() 
-            # If detect_language() itself changed state (e.g. cleared LRU cache),
-            # it doesn't directly return a redraw flag to here.
-            # The main loop handles redraws based on key input or queue processing.
+        # 2. Поддержка LSP на этом этапе только для Python.
+        if self.current_language != "python":
+            logging.debug("LSP: Not starting, current language is not Python.")
+            return
 
-        # 2. Check if the current language is Python.
-        is_python_language = False
-        if self._lexer: # Lexer should be set after detect_language()
-            lexer_name_lower = self._lexer.name.lower()
-            python_lexer_names = {'python', 'python3', 'py', 'cython', 'ipython', 'sage'} 
-            if lexer_name_lower in python_lexer_names:
-                is_python_language = True
-        
-        if not is_python_language:
-            message = "Flake8: Analysis is only available for Python files."
-            full_output_for_panel = message 
-            logging.info(
-                f"run_lint_async: Skipping linting. Current lexer: "
-                f"'{self._lexer.name if self._lexer else "None"}' is not Python."
+        # 3. Если сервер уже поднят и жив — ничего не делаем.
+        if self._lsp_proc and self._lsp_proc.poll() is None:
+            logging.debug("LSP: Server already running.")
+            # Убедимся, что он был инициализирован, если перезапускаем редактор без перезапуска LSP
+            if not self._lsp_initialized: # Если процесс есть, но флаг сброшен
+                 logging.info("LSP: Process exists but not marked initialized. Re-initializing flow.")
+                 # Отправляем initialize и initialized снова, на случай если предыдущая сессия была прервана
+                 # Это упрощение, в идеале нужно было бы проверять состояние сервера.
+                 root_uri = f"file://{os.getcwd()}" # Пример rootUri, может быть None или каталог проекта
+                 self._send_lsp("initialize", {
+                     "processId": os.getpid(),
+                     "rootUri": root_uri, 
+                     "capabilities": {"textDocument": {"synchronization": {"dynamicRegistration": False, "willSave": False, "willSaveWaitUntil": False, "didSave": True}}},
+                     "clientInfo": {"name": "SwayEditor", "version": "0.1"},
+                     "workspaceFolders": [{"uri": root_uri, "name": os.path.basename(os.getcwd())}] if root_uri else None,
+                 }, is_request=True)
+                 # Сохраняем ID initialize запроса для отслеживания ответа (если нужно будет)
+                 # self._initialize_request_id = self._lsp_seq 
+
+                 # Отправляем уведомление 'initialized' (пустые параметры)
+                 self._send_lsp("initialized", {}) # {} или None для params
+                 self._lsp_initialized = True
+                 logging.info("LSP: Sent initialize and initialized notification (re-init flow).")
+
+            return
+
+        # 4. Запускаем Ruff LSP.
+        cmd = ["ruff", "server", "--preview"]
+        try:
+            # Для LSP лучше использовать кодировку utf-8 для stdin/stdout/stderr
+            # PYTHONIOENCODING=utf-8 должно это обеспечить, но для Popen можно указать явно
+            self._lsp_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, # Ruff LSP может писать полезное в stderr
+                bufsize=0,      # важно: отключаем стандартный буфер для stdin/stdout
+                # encoding='utf-8', # text=True нужно убрать если используем ручное кодирование/декодирование
+                # text=False,       # Работаем с байтами для stdin/stdout
             )
-            # Display this informational message in the lint panel and status bar.
+            logging.info("Ruff LSP started with PID %s", self._lsp_proc.pid)
+        except FileNotFoundError:
+            self._set_status_message("❌ Ruff не найден (pip install ruff)")
+            logging.error("Cannot start Ruff LSP: executable not found.")
+            self._lsp_proc = None # Убедимся, что _lsp_proc сброшен
+            return
+        except Exception as exc: 
+            self._set_status_message(f"❌ Ruff LSP error: {exc}")
+            logging.exception("Cannot start Ruff LSP.")
+            self._lsp_proc = None
+            return
+
+        # 5. Поднимаем поток-читатель stdout.
+        if self._lsp_reader and self._lsp_reader.is_alive(): # Останавливаем старый, если был
+            logging.warning("LSP: Old reader thread was alive. This shouldn't happen.")
+        
+        self._lsp_reader = threading.Thread(
+            target=self._lsp_reader_loop, name="LSP-stdout", daemon=True
+        )
+        self._lsp_reader.start()
+        logging.debug("LSP: Reader thread started.")
+
+        # 6. Инициализируем соединение по протоколу LSP.
+        # capabilities можно расширить, если редактор поддерживает больше фич LSP.
+        # rootUri и workspaceFolders важны для сервера, чтобы понимать контекст проекта.
+        # Если редактор работает с одним файлом без понятия "проекта", rootUri может быть None
+        # или директорией текущего файла. workspaceFolders более современный подход.
+        root_uri_path = None
+        if self.filename and os.path.isfile(self.filename):
+             root_uri_path = os.path.dirname(os.path.abspath(self.filename))
+        elif os.getcwd():
+             root_uri_path = os.getcwd()
+        
+        root_uri = f"file://{root_uri_path}" if root_uri_path else None
+
+        initialize_params = {
+            "processId": os.getpid(),
+            "clientInfo": {"name": "SwayEditor", "version": "0.1.0"}, # Имя и версия вашего редактора
+            "locale": locale.getlocale()[0] if locale.getlocale() and locale.getlocale()[0] else "en-US", # e.g., "en-US"
+            "rootPath": root_uri_path, # Устаревший, но некоторые серверы могут использовать
+            "rootUri": root_uri,
+            "capabilities": { # Минимально необходимые возможности клиента
+                 "textDocument": {
+                     "synchronization": {
+                         "dynamicRegistration": False, # Клиент не поддерживает динамическую регистрацию для этого
+                         "willSave": False,            # Клиент не будет отправлять willSave
+                         "willSaveWaitUntil": False, # Клиент не будет ждать ответа на willSave
+                         "didSave": True             # Клиент будет отправлять didSave
+                     },
+                     "completion": { # Пример, если поддерживаете автодополнение
+                         "completionItem": {"snippetSupport": False}, # Поддерживает ли клиент сниппеты
+                         "dynamicRegistration": False,
+                     },
+                     "hover": {"dynamicRegistration": False}, # Пример для hover
+                     "publishDiagnostics": { # Клиент принимает diagnostics
+                         "relatedInformation": True 
+                     }
+                 },
+                 "workspace": {
+                     "applyEdit": False, # Поддерживает ли клиент команду workspace/applyEdit
+                     "workspaceEdit": {"documentChanges": False},
+                     "didChangeConfiguration": {"dynamicRegistration": False}, # Если меняете конфиг LSP на лету
+                     "didChangeWatchedFiles": {"dynamicRegistration": False}, # Если следите за файлами
+                     "symbol": {"dynamicRegistration": False}, # Поиск символов в воркспейсе
+                     "executeCommand": {"dynamicRegistration": False}, # Выполнение команд
+                     "workspaceFolders": True if root_uri else False, # Поддерживает ли клиент концепцию workspace folders
+                     "configuration": False # Поддерживает ли клиент запрос конфигурации workspace/configuration
+                 }
+            },
+            # "initializationOptions": {}, # Специфичные для сервера опции
+            "trace": "off", # "off", "messages", "verbose"
+        }
+        if root_uri: # Если есть rootUri, добавляем workspaceFolders
+             initialize_params["workspaceFolders"] = [{"uri": root_uri, "name": os.path.basename(root_uri_path) if root_uri_path else "workspace"}]
+        else: # Если нет rootUri, ruff-lsp может работать в режиме одного файла, но лучше указать
+             # Для ruff-lsp, если нет workspace, он может не знать, какой pyproject.toml использовать
+             logging.warning("LSP: rootUri is None, Ruff-LSP might not find project settings (e.g. pyproject.toml).")
+
+        self._send_lsp("initialize", initialize_params, is_request=True)
+        self._send_lsp("initialized", {}) 
+        self._lsp_initialized = True # Теперь сервер "считается" инициализированным для отправки didOpen/didChange
+        logging.info("LSP: Sent 'initialize' request and 'initialized' notification. Marked as initialized.")
+
+    # 1--- Вспомогательные LSP-методы -------------------------------
+    def _send_lsp(
+        self,
+        method: str,
+        params: Optional[dict] = None,
+        *,
+        is_request: bool = False,
+    ) -> None:
+        """Шлёт пакет LSP с корректным заголовком *Content-Length*."""
+        if not self._lsp_proc or self._lsp_proc.stdin is None or self._lsp_proc.poll() is not None:
+            logging.warning(f"LSP send: Process not available or already terminated for method {method}.")
+            return
+
+        if not hasattr(self, "_lsp_seq"):
+            self._lsp_seq = 0
+        
+        payload_dict = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+        if params is not None:
+            payload_dict["params"] = params
+
+        if is_request:
+            self._lsp_seq += 1
+            payload_dict["id"] = self._lsp_seq
+
+        payload_json_string = json.dumps(payload_dict)
+        payload_bytes = payload_json_string.encode('utf-8')
+
+        header_string = f"Content-Length: {len(payload_bytes)}\r\n\r\n"
+        header_bytes = header_string.encode('utf-8')
+        
+        logging.debug(
+            f"LSP SEND -> Method: {method}, ID: {payload_dict.get('id', 'N/A')}, "
+            f"Params: {str(params)[:200]}{'...' if params and len(str(params)) > 200 else ''}"
+        )
+        logging.debug(f"LSP SEND JSON: {payload_json_string}")
+        logging.debug(f"LSP SEND Header: {header_string.strip()}")
+
+        try:
+            if self._lsp_proc.stdin:
+                self._lsp_proc.stdin.write(header_bytes + payload_bytes)
+                self._lsp_proc.stdin.flush()
+            else:
+                logging.error("LSP send: stdin is None, cannot write.")
+        except (BrokenPipeError, OSError) as exc:
+            logging.error("LSP pipe write failed for method %s: %s", method, exc)
+            self._set_status_message(f"❌ Ruff LSP Comms: {exc}")
+            # Возможно, стоит остановить LSP или пометить его как неинициализированный
+            if self._lsp_proc and self._lsp_proc.poll() is None:
+                self._lsp_proc.terminate()
+            self._lsp_proc = None
+            self._lsp_initialized = False
+
+    # -- потокo-читатель --------------------
+    def _lsp_reader_loop(self) -> None:
+        """Считывает ответы LSP-сервера из stdout."""
+        # Этот поток должен завершиться, если _lsp_proc становится None или завершается
+        while True:
+            proc = self._lsp_proc # Копируем ссылку для безопасности в многопоточной среде
+            if not proc or proc.poll() is not None:
+                logging.info("LSP Reader: process is None or has terminated. Exiting loop.")
+                break # Выходим из цикла, если процесса нет или он завершился
+
+            stream = proc.stdout
+            if not stream:
+                logging.error("LSP Reader: stdout stream is None. Exiting loop.")
+                break
+            
+            # Чтение заголовка (Content-Length)
+            header_buffer = b""
+            try:
+                while not header_buffer.endswith(b"\r\n\r\n"):
+                    # Читаем по одному байту, чтобы не заблокироваться надолго, если \r\n\r\n не придет
+                    # или если процесс завершился
+                    byte = stream.read(1)
+                    if not byte: # EOF или процесс завершился
+                        if proc.poll() is not None: # Проверяем, завершился ли процесс
+                            logging.info("LSP Reader: EOF reached and process terminated while reading header. Exiting loop.")
+                        else: # EOF, но процесс еще жив (маловероятно, если pipe закрыт)
+                            logging.warning("LSP Reader: EOF reached on stdout while reading header, but process still alive? Exiting loop.")
+                        return # Завершаем поток
+                    header_buffer += byte
+                    # Защита от бесконечного чтения, если заголовок некорректен
+                    if len(header_buffer) > 4096: # Произвольный лимит на размер заголовка
+                        logging.error("LSP Reader: Header too long, possible corruption. Exiting.")
+                        return
+            except Exception as e_read_header:
+                logging.error(f"LSP Reader: Exception while reading header: {e_read_header}. Exiting loop.")
+                if proc.poll() is None: # Если процесс еще жив, пытаемся его остановить
+                    try: 
+                        proc.terminate()
+                    except Exception: 
+                        pass
+                self._lsp_proc = None # Сбрасываем ссылку
+                return
+
+            header_str = header_buffer.decode('ascii', 'ignore') # Заголовки обычно ASCII
+            content_length = -1
+            # Content-Type не обязателен, но Content-Length - да.
+            match = re.search(r"Content-Length:\s*(\d+)", header_str, re.IGNORECASE)
+            if match:
+                content_length = int(match.group(1))
+            
+            if content_length == -1:
+                logging.error(f"LSP Reader: Failed to parse Content-Length from header: {header_str!r}. Exiting loop.")
+                # Попытаться прочитать что-то, чтобы очистить буфер, или просто выйти
+                try: 
+                    stream.read(1024)
+                except: 
+                    pass
+                continue
+
+            # Чтение тела сообщения
+            body_bytes = b""
+            bytes_to_read = content_length
+            try:
+                while bytes_to_read > 0:
+                    chunk = stream.read(bytes_to_read)
+                    if not chunk: # EOF
+                        logging.error("LSP Reader: EOF reached while reading message body. Expected %d more bytes.", bytes_to_read)
+                        return # Завершаем поток
+                    body_bytes += chunk
+                    bytes_to_read -= len(chunk)
+            except Exception as e_read_body:
+                logging.error(f"LSP Reader: Exception while reading body: {e_read_body}. Exiting loop.")
+                return
+
+            try:
+                body_str = body_bytes.decode('utf-8') # Тело сообщения всегда UTF-8
+                message = json.loads(body_str)
+                logging.debug(
+                    f"LSP RECV <- ID: {message.get('id', 'N/A')}, Method: {message.get('method', 'N/A')}, "
+                    f"Result/Error: {str(message.get('result', message.get('error', 'N/A')))[:200]}"
+                )
+                self._lsp_q.put_nowait(message)
+            except json.JSONDecodeError as exc:
+                logging.error(f"Bad LSP JSON received: {exc}. Body: {body_bytes.decode('utf-8', 'replace')[:500]}")
+            except queue.Full:
+                logging.error("LSP message queue is full. Message dropped.")
+            except Exception as e_proc_msg:
+                logging.exception(f"LSP Reader: Error processing received message: {e_proc_msg}")
+
+    def _process_lsp_queue(self) -> None:
+        """Обрабатывает сообщения из очереди LSP-сервера."""
+        while not self._lsp_q.empty():
+            pkt = self._lsp_q.get_nowait()
+            msg = pkt if isinstance(pkt, dict) else json.loads(pkt)
+
+            if msg.get("method") == "textDocument/publishDiagnostics":
+                self._handle_diagnostics(msg["params"])
+
+    # ───────────────────── LSP utility methods ──────────────────────────────
+    def _lsp_uri(self) -> str:
+        """Return the *file://* URI that идентифицирует текущий буфер.
+
+        Returns:
+            str: Абсолютный URI. Для несохранённого буфера имя «<buffer>»
+            заменяет путь к файлу.
+        """
+        return f"file://{os.path.abspath(self.filename or '<buffer>')}"
+
+    # ───────────────────── LSP document notifications ───────────────────────
+    def _lsp_did_open(self, text: str) -> None:
+        """Отправляет событие *didOpen* с полным содержимым документа.
+
+        Args:
+            text: Полный текст файла, который должен быть проанализирован
+                сервером Ruff-LSP. Передаём сразу весь документ, поскольку
+                это первое сообщение и у сервера ещё нет версии буфера.
+        """
+        uri = self._lsp_uri()
+
+        # версию начинаем с 1
+        self._lsp_doc_version[uri] = 1
+
+        self._send_lsp(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "python",
+                    "version": 1,
+                    "text": text,
+                }
+            },
+        )
+
+    def _lsp_did_change(self, text: str) -> None:
+        """Отправляет событие *didChange* с новой версией документа.
+
+        Args:
+            text: Полный, уже изменённый текст документа. Используем
+                стратегию «full-text document sync», потому что Ruff-LSP
+                поддерживает её из коробки и это упрощает реализацию.
+        """
+        uri = self._lsp_uri()
+        ver = self._lsp_doc_version.get(uri, 1) + 1
+        self._lsp_doc_version[uri] = ver
+
+        self._send_lsp(
+            "textDocument/didChange",
+            {
+                "textDocument": {"uri": uri, "version": ver},
+                "contentChanges": [{"text": text}],
+            },
+        )
+
+    # ───────────────────── Diagnostics renderer ──────────────────────────────
+    def _handle_diagnostics(self, params: dict) -> None:
+        """Обрабатывает массив диагностик Ruff-LSP и выводит первую в статус-бар.
+
+        Args:
+            params: Поле ``params`` из уведомления
+                ``textDocument/publishDiagnostics``.
+        """
+        diags: list[dict] = params.get("diagnostics", [])
+
+        # Нет ошибок — убираем панель и выводим «✓».
+        if not diags:
             self._set_status_message(
-                message_for_statusbar=message, 
-                is_lint_status=True, 
-                full_lint_output=full_output_for_panel,
-                activate_lint_panel_if_issues=True # Show panel with this info message
+                message_for_statusbar="✓ Без ошибок (Ruff)",
+                is_lint_status=True,
+                full_lint_output="✓ Без ошибок (Ruff)",
+                activate_lint_panel_if_issues=False,
             )
-            return self.status_message != original_status # Redraw if status changed
+            return
+
+        # Берём первую диагностику.
+        first = diags[0]
+        line_no = first["range"]["start"]["line"] + 1
+        message = first["message"]
+
+        # Полный вывод для панели: все ошибки, каждая - новая строка.
+        panel_text = "\n".join(
+            f"{d['range']['start']['line'] + 1}:{d['range']['start']['character'] + 1}  {d['message']}"
+            for d in diags
+        )
+
+        self._set_status_message(
+            message_for_statusbar=f"Ruff: {message}  (стр. {line_no})",
+            is_lint_status=True,
+            full_lint_output=panel_text,
+            activate_lint_panel_if_issues=True,
+        )
         
-        # 3. If code is not passed as an argument, get it from the current editor buffer.
-        code_to_lint: str
+    def run_lint_async(self, code: Optional[str] = None) -> bool:  # noqa: C901
+        """Асинхронно запускает Ruff-LSP и отправляет текущий буфер на проверку.
+
+        Возвращает ``True``, если изменилась `status_message` и требуется
+        перерисовка статус-бара.
+        """
+        original_status = self.status_message
+
+        # ── 1. Распознаём язык ───────────────────────────────────────────────
+        if self._lexer is None or self.current_language is None:
+            self.detect_language()
+
+        if self.current_language != "python":
+            msg = "Ruff: анализ доступен только для Python-файлов."
+            self._set_status_message(
+                message_for_statusbar=msg,
+                is_lint_status=True,
+                full_lint_output=msg,
+                activate_lint_panel_if_issues=True,
+            )
+            return self.status_message != original_status
+
+        # ── 2. Текст для анализа ─────────────────────────────────────────────
         if code is None:
-            # This read should be thread-safe if other parts modify self.text with _state_lock
             with self._state_lock:
-                code_to_lint = os.linesep.join(self.text) # Use OS-specific newlines for consistency
+                code_to_lint = os.linesep.join(self.text)
         else:
             code_to_lint = code
 
-        # 4. Initiate the Flake8 analysis by calling run_flake8_on_code.
-        filename_display = self.filename or "<unsaved buffer>"
-        logging.debug(f"run_lint_async: Queuing Flake8 analysis for '{filename_display}'")
-        
-        # Set an initial status message indicating that analysis is starting.
-        # This message will also appear in the lint panel if it's activated.
+        # ── 3. Стартуем/переиспользуем сервер ───────────────────────────────
+        self._start_lsp_server_if_needed()
+        if not self._lsp_initialized:
+            self._set_status_message(
+                "Ruff LSP ещё инициализируется…",
+                is_lint_status=True,
+                full_lint_output="Ruff LSP ещё инициализируется…",
+                activate_lint_panel_if_issues=True,
+            )
+            return self.status_message != original_status
+
+        # ── 4. didOpen / didChange ───────────────────────────────────────────
+        uri = self._lsp_uri()
+        if uri not in self._lsp_doc_version:
+            self._lsp_did_open(code_to_lint)
+            op = "didOpen"
+        else:
+            self._lsp_did_change(code_to_lint)
+            op = "didChange"
+
+        # ── 5. Обновляем статус-бар ──────────────────────────────────────────
         self._set_status_message(
-            message_for_statusbar="Flake8: Analysis started...", 
-            is_lint_status=True, 
-            full_lint_output="Flake8: Analysis in progress...", # Initial panel message
-            activate_lint_panel_if_issues=True # Show panel with "in progress" state
+            "Ruff: анализ запущен…",
+            is_lint_status=True,
+            full_lint_output="Ruff: анализ в ходе…",
+            activate_lint_panel_if_issues=True,
         )
-        
-        # Call the method that runs Flake8 asynchronously
-        self.run_flake8_on_code(code_to_lint, self.filename) 
-
-        # The method has set a status message ("Analysis started..."), so a redraw is needed.
+        logging.debug(
+            "run_lint_async: sent %s (%d bytes) to Ruff-LSP.", op, len(code_to_lint)
+        )
         return self.status_message != original_status
-
-
+         
     def show_lint_panel(self) -> bool:
         """
         Activates or deactivates the linter panel display based on current state
@@ -2460,8 +2674,7 @@ class SwayEditor:
         logging.debug(f"show_lint_panel: Panel active state ({self.lint_panel_active}) remained unchanged.")
         return False # The active state of the panel was not changed by this call.
 
-
-    ############### Clipboard Handling ####################    
+    #----- Clipboard Handling --------------------------------------  
     def _check_pyclip_availability(self) -> bool: # Added return type hint
         """
         Checks the availability of the pyperclip library and underlying system clipboard utilities.
@@ -2509,7 +2722,6 @@ class SwayEditor:
             , exc_info=True) # Include stack trace for unexpected errors
             return False
 
-
     def get_selected_text(self):
         """Возвращает выделенный текст."""
         if not self.is_selecting or self.selection_start is None or self.selection_end is None:
@@ -2550,7 +2762,6 @@ class SwayEditor:
                  logging.warning(f"get_selected_text: end_row {end_row} out of bounds {len(self.text)}")
 
         return "\n".join(selected_lines)
-
 
     def copy(self) -> bool:
         """
@@ -2595,7 +2806,6 @@ class SwayEditor:
         # (e.g., if "Nothing to copy" was already the status).
         return self.status_message != original_status
 
-
     # auxiliary method
     def _clamp_scroll_and_check_change(self, original_scroll_tuple: Tuple[int, int]) -> bool:
         """
@@ -2606,7 +2816,6 @@ class SwayEditor:
         self._clamp_scroll() # This method updates self.scroll_top and self.scroll_left
         return self.scroll_top != old_st or self.scroll_left != old_sl
     
-
     # This is a helper method - a function that only reads the selection state
     # (self.is_selecting, self.selection_start, self.selection_end) and does not change any editor state.
     # Its job is to return normalized coordinates or None.
@@ -2645,8 +2854,6 @@ class SwayEditor:
         
         return ((norm_start_y, norm_start_x), (norm_end_y, norm_end_x))
     
-
-
     def delete_text_internal(self, start_row: int, start_col: int, end_row: int, end_col: int) -> None:
         """Удаляет текст в диапазоне [start_row, start_col) .. [end_row, end_col)."""
         # Нормализация
@@ -2673,8 +2880,6 @@ class SwayEditor:
             self.text[start_row] = new_first
 
         self.modified = True # Обновляем статус модификации
-
-
 
     def unindent_current_line(self) -> bool:
         """
@@ -2751,7 +2956,6 @@ class SwayEditor:
                 if self.status_message == original_status:
                      self._set_status_message("Nothing effectively unindented on current line.")
                 return self.status_message != original_status
-
 
     def handle_smart_unindent(self) -> bool:
         """
@@ -2847,10 +3051,7 @@ class SwayEditor:
         
         return tokenized_segments
 
-
-    # ====================================================================================
-    # Syntax-highlighting helper
-    # ====================================================================================
+    # Syntax-highlighting helper --------------------------------------------------
     def apply_syntax_highlighting_with_pygments(
         self,
         lines: list[str],
@@ -2897,10 +3098,6 @@ class SwayEditor:
             # Memoised tokenisation; see _get_tokenized_line implementation.
             segments = self._get_tokenized_line(raw_line, lexer_id, text_lexer)
 
-            # ------------------------------------------------------------------
-            # Extra step: recolour Python doc-strings so that they look like
-            # comments instead of ordinary strings.
-            # ------------------------------------------------------------------
             if self._lexer.name.lower() in {"python", "python3", "py"}:
                 remapped: list[tuple[str, int]] = []
                 for substr, attr in segments:
@@ -2913,10 +3110,7 @@ class SwayEditor:
 
         return highlighted
 
-
-    # ====================================================================================
-    # Colour-initialisation helper
-    # ====================================================================================
+    # Colour-initialisation helper -------------------------------------------
     #@staticmethod
     def _detect_color_capabilities() -> tuple[bool, bool, int]:
         """Return a tuple (have_color, use_extended, max_colors)."""
@@ -2929,10 +3123,7 @@ class SwayEditor:
             return True, False, max_colors      # 16-цветная (с «яркими»)
         return True, True, max_colors           # 256 цветов и выше
 
-
-    # --------------------------------------------------------------------------- #
-    #  Adaptive colour initialisation
-    # --------------------------------------------------------------------------- #
+    #  Adaptive colour initialisation ----------------------------------------
     def init_colors(self) -> None:
         """Initialize curses color pairs for the GitHub-Dark palette.
 
@@ -2943,7 +3134,8 @@ class SwayEditor:
             on every `addstr()`/`addch()` call and skip `init_pair()`.
         3.  Else – fall back to a pre-selected set of xterm-256 indices
             that visually approximate the GitHub-Dark palette.
-        4.  Always populate ``self.colors`` with the same semantic keys so
+        4.  If only 8 colors available – use basic color mapping.
+        5.  Always populate ``self.colors`` with the same semantic keys so
             that drawing code remains unchanged.
 
         Raises
@@ -2952,6 +3144,9 @@ class SwayEditor:
             If the terminal does not support *any* colors.  In that case the
             method degrades to monochrome (all attributes = ``curses.A_NORMAL``).
         """
+        import subprocess
+        import shlex
+        
         # ---------- 0.  Plain monochrome fallback ----------
         if not curses.has_colors():
             self.colors = {name: curses.A_NORMAL for name in (
@@ -2967,8 +3162,7 @@ class SwayEditor:
         bg = -1  # keep terminal default background
 
         # ---------- 1.  Check for 24-bit support ----------
-        # A very common heuristic: “Tc” capability in terminfo.
-        import subprocess, shlex
+        # A very common heuristic: "Tc" capability in terminfo.
         try:
             tic_out = subprocess.check_output(shlex.split("infocmp"), text=True)
             truecolor_ok = "Tc" in tic_out
@@ -2984,11 +3178,9 @@ class SwayEditor:
                 r = (hex_color >> 16) & 0xFF
                 g = (hex_color >> 8) & 0xFF
                 b = hex_color & 0xFF
-                if bg_flag:
-                    esc = f"\x1b[48;2;{r};{g};{b}m"
-                else:
-                    esc = f"\x1b[38;2;{r};{g};{b}m"
-                return curses.A_NORMAL | curses.termattrs()  # placeholder, kept for API
+                # В реальной реализации TrueColor нужно применять escape-последовательности
+                # Здесь возвращаем базовый атрибут как заглушку
+                return curses.A_NORMAL
             # Сохраняем ссылки на lambda-генератор, чтобы рисующий код мог вызывать.
             self.colors = {
                 "comment":   rgb(0x8B949E),
@@ -3011,9 +3203,49 @@ class SwayEditor:
             }
             return  # done – TrueColor handled
 
-        # ---------- 2.  xterm-256 fallback ----------
+        # ---------- 2. Check available colors count ----------
+        max_colors = curses.COLORS
+        
+        # ---------- 3. Basic 8-color fallback (for console mode) ----------
+        if max_colors <= 8:
+            # Используем только базовые цвета 0-7
+            basic_palette = {
+                1: (curses.COLOR_WHITE, "comment"),      # белый для комментариев
+                2: (curses.COLOR_MAGENTA, "keyword"),    # магента для ключевых слов
+                3: (curses.COLOR_CYAN, "string"),        # циан для строк
+                4: (curses.COLOR_BLUE, "number"),        # синий для чисел
+                5: (curses.COLOR_YELLOW, "function"),    # желтый для функций
+                6: (curses.COLOR_GREEN, "constant"),     # зеленый для констант
+                7: (curses.COLOR_RED, "error"),          # красный для ошибок
+            }
+            
+            for pair_id, (fg_color, _) in basic_palette.items():
+                curses.init_pair(pair_id, fg_color, bg)
+
+            self.colors = {
+                "comment":   curses.color_pair(1),
+                "docstring": curses.color_pair(1), 
+                "keyword":   curses.color_pair(2) | curses.A_BOLD,
+                "string":    curses.color_pair(3),
+                "number":    curses.color_pair(4),
+                "function":  curses.color_pair(5) | curses.A_BOLD,
+                "constant":  curses.color_pair(6),
+                "type":      curses.color_pair(5),  # желтый как функции
+                "operator":  curses.A_BOLD,         # просто жирный
+                "builtins":  curses.color_pair(5),  # желтый
+                "line_number": curses.color_pair(1),
+                "error":     curses.color_pair(7) | curses.A_BOLD,
+                "status":    curses.A_BOLD,
+                "status_error": curses.color_pair(7) | curses.A_BOLD,
+                "search_highlight": curses.A_REVERSE,  # инвертированный фон
+                "git_info":  curses.color_pair(4),
+                "git_dirty": curses.color_pair(5) | curses.A_BOLD,
+            }
+            return
+
+        # ---------- 4.  xterm-256 fallback ----------
         # Pre-selected indices (≈ GitHub-Dark).  Pick другой индекс при желании.
-        palette = {
+        palette_256 = {
             1: (246, "comment"),        # #8B949E
             2: (141, "keyword"),        # #D2A8FF
             3: (117, "string"),         # #A5D6FF
@@ -3027,10 +3259,10 @@ class SwayEditor:
             11: (196, "status_error"),  # status error fg
             12: (71,  "git_info"),      # #79C0FF
             13: (208, "git_dirty"),     # #FFAB70
-            14: (246, "docstring"),      # ← same tint as “comment”
+            14: (246, "docstring"),      # ← same tint as "comment"
         }
 
-        for pair_id, (fg_idx, _) in palette.items():
+        for pair_id, (fg_idx, _) in palette_256.items():
             curses.init_pair(pair_id, fg_idx, bg)
 
         self.colors = {
@@ -3052,6 +3284,8 @@ class SwayEditor:
             "git_info":  curses.color_pair(12),
             "git_dirty": curses.color_pair(13) | curses.A_BOLD,
         }
+
+
 
 
     def detect_language(self):
@@ -3105,6 +3339,7 @@ class SwayEditor:
 
         # Set the new lexer (it will be TextLexer if all attempts above failed)
         self._lexer = new_lexer
+        self.current_language = self._lexer.name.lower()  # keep in sync for LSP        
         # Get the id of the new (or potentially unchanged) lexer object.
         new_lexer_id = id(self._lexer)
 
@@ -3133,7 +3368,6 @@ class SwayEditor:
         # in methods like apply_syntax_highlighting_with_pygments, provided it's not used
         # for other caching purposes within the editor.
 
-
     def delete_char_internal(self, row: int, col: int) -> str:
         """
         Удаляет **один** символ по (row, col) без записи в history.
@@ -3149,9 +3383,6 @@ class SwayEditor:
         self.modified = True
         logging.debug("delete_char_internal: removed %r at (%s,%s)", removed, row, col)
         return removed
-
-
-    # In class SwayEditor:
 
     def handle_resize(self) -> bool:
         """
@@ -3205,72 +3436,6 @@ class SwayEditor:
             self._set_status_message("Resize error (see log)")
             # Still signal a redraw is needed to display the error status.
             return True
-
-# OLD code
-    # def _draw_buffer(self) -> None:
-    #     """
-    #     Paint visible part of self.text to `stdscr`.
-    #     Handles both vertical (scroll_top) and horizontal (scroll_left) scrolling.
-    #     """
-    #     logging.debug(
-    #         "Drawing buffer: cur=(%s,%s) scroll=(%s,%s)",
-    #         self.cursor_x, self.cursor_y, self.scroll_left, self.scroll_top
-    #     )
-    #     try:
-    #         # ── draw lines ──────────────────────────────────────────────
-    #         for scr_y, line in enumerate(
-    #             self.text[self.scroll_top : self.scroll_top + self.height]
-    #         ):
-    #             # Cut line by horizontal scroll, then clip to window width ‑ 1
-    #             visible = line[self.logical_offset_by_width(line, self.scroll_left) :]
-    #             # soft‑clip by width
-    #             out, w_acc = "", 0
-    #             for ch in visible:
-    #                 w = wcwidth(ch)
-    #                 if w < 0:       # skip control char
-    #                     continue
-    #                 if w_acc + w > self.width - 1:
-    #                     break
-    #                 out += ch
-    #                 w_acc += w
-
-    #             self.stdscr.move(scr_y, 0)
-    #             self.stdscr.clrtoeol()
-    #             self.stdscr.addstr(scr_y, 0, out)
-
-    #         # ── place cursor ───────────────────────────────────────────
-    #         scr_y = self.cursor_y - self.scroll_top
-    #         # width up to logical cursor, then minus horizontal scroll
-    #         scr_x = self.get_display_width(
-    #             self.text[self.cursor_y][: self.cursor_x]
-    #         ) - self.scroll_left
-
-    #         # clamp to window
-    #         scr_y = max(0, min(scr_y, self.height - 1))
-    #         scr_x = max(0, min(scr_x, self.width - 1))
-    #         self.stdscr.move(scr_y, scr_x)
-
-    #     except Exception as exc:
-    #         logging.error("Error in _draw_buffer: %s", exc, exc_info=True)
-    #         self._set_status_message("Draw error (see log)")
-
-
-    # def logical_offset_by_width(self, line: str, cells: int) -> int:
-    #     """
-    #     Return index in *line* such that rendered width == *cells*.
-    #     Используется, когда нужно получить логический индекс
-    #     символа, с которого виден экран после горизонтального скролла.
-    #     """
-    #     acc = 0
-    #     for i, ch in enumerate(line):
-    #         w = wcwidth(ch)
-    #         if w < 0:
-    #             continue
-    #         if acc + w > cells:
-    #             return i
-    #         acc += w
-    #     return len(line)
-
 
     def get_display_width(self, text: str) -> int:
         """
@@ -3567,8 +3732,7 @@ class SwayEditor:
                 logging.warning(f"handle_end: cursor_y {self.cursor_y} out of bounds.")
                 return False # No change possible
 
-            self.cursor_x = len(self.text[self.cursor_y])
-            
+            self.cursor_x = len(self.text[self.cursor_y])        
             # After cursor_x is set, adjust horizontal scroll if needed.
             self._clamp_scroll()
 
@@ -3703,7 +3867,8 @@ class SwayEditor:
 
             page_height = self.visible_lines
             max_y_idx = len(self.text) - 1
-            if max_y_idx < 0 : max_y_idx = 0 # Handle empty text [""] case
+            if max_y_idx < 0 : 
+                max_y_idx = 0 # Handle empty text [""] case
 
             # Calculate new cursor_y candidate
             new_cursor_y_candidate = min(max_y_idx, self.cursor_y + page_height)
@@ -3795,7 +3960,8 @@ class SwayEditor:
                 # int(val + 0.5) is a common way to round half up for positive numbers.
                 # For percentages, simple rounding is usually fine.
                 target_line_num_one_based = max(1, min(total_lines, round(total_lines * percentage / 100.0)))
-                if target_line_num_one_based == 0 and total_lines > 0 : target_line_num_one_based = 1 # Ensure at least line 1
+                if target_line_num_one_based == 0 and total_lines > 0 : 
+                    target_line_num_one_based = 1 # Ensure at least line 1
                 logging.debug(f"Goto: Percentage {percentage}%, target line {target_line_num_one_based}")
             elif raw_input_str.startswith(('+', '-')):
                 if len(raw_input_str) == 1: # Just '+' or '-' was entered
@@ -3997,7 +4163,7 @@ class SwayEditor:
         Clamp `cursor_x` / `cursor_y` so they always reference a valid position
         inside `self.text`.
 
-        • Если буфер пуст → создаётся пустая строка `[""]`, и курсор ставится в (0, 0).  
+        • Если буфер пуст → создаётся пустая строка `[""]`, и курсор ставится в (0,0).  
         • `cursor_y` ограничивается диапазоном [0 … len(text)-1].  
         • `cursor_x` ограничивается диапазоном [0 … len(current_line)].  
         • После коррекции выводится отладочный лог.
@@ -4054,7 +4220,6 @@ class SwayEditor:
         """
         with self._state_lock:
             # Store initial state for comparison to determine if a redraw is needed
-            original_text_tuple = tuple(self.text) # For checking if text content actually changed
             original_cursor_pos = (self.cursor_y, self.cursor_x)
             original_scroll_pos = (self.scroll_top, self.scroll_left)
             original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
@@ -4181,7 +4346,6 @@ class SwayEditor:
         """
         with self._state_lock:
             # Store initial state for comparison to determine if a redraw is needed
-            original_text_tuple = tuple(self.text)
             original_cursor_pos = (self.cursor_y, self.cursor_x)
             original_scroll_pos = (self.scroll_top, self.scroll_left)
             original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
@@ -4656,7 +4820,6 @@ class SwayEditor:
         """
         with self._state_lock:
             # Store initial state for comparison
-            original_text_tuple = tuple(self.text)
             original_cursor_pos = (self.cursor_y, self.cursor_x)
             original_scroll_pos = (self.scroll_top, self.scroll_left)
             original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
@@ -4794,7 +4957,6 @@ class SwayEditor:
         """
         with self._state_lock:
             # Store initial state for comparison
-            original_text_tuple = tuple(self.text)
             original_cursor_pos = (self.cursor_y, self.cursor_x)
             original_scroll_pos = (self.scroll_top, self.scroll_left)
             original_selection_state = (self.is_selecting, self.selection_start, self.selection_end)
@@ -4892,122 +5054,7 @@ class SwayEditor:
             
             return False # Should not be reached if cut was successful
         
-    # 11. ---------- Search/Replace ------------
-    def search_and_replace(self) -> bool:
-        """
-        Searches for text using a regular expression and replaces occurrences.
-        Prompts for search pattern and replacement text.
-        This operation is not added to the undo/redo history; instead, the history is cleared.
-        Returns True if any interaction (prompts, status change) or modification occurred, 
-        indicating a redraw is needed.
-        """
-        logging.debug("search_and_replace called")
-        
-        original_status = self.status_message
-        status_changed_by_prompts = False # Track if prompts themselves alter final status view
-
-        # Clear previous search state immediately
-        self.highlighted_matches = []
-        self.search_matches = []
-        self.search_term = "" # Clear the term so F3 won't use the old one
-        self.current_match_idx = -1
-        # Initial redraw might be good here if clearing highlights should be immediate
-        # but we'll rely on the return value for the main loop.
-
-        # Prompt for search pattern
-        status_before_search_prompt = self.status_message
-        search_pattern_str = self.prompt("Search for (regex): ")
-        if self.status_message != status_before_search_prompt:
-            status_changed_by_prompts = True
-
-        if not search_pattern_str: # User cancelled (Esc or empty Enter)
-            if not status_changed_by_prompts and self.status_message == original_status:
-                self._set_status_message("Search/Replace cancelled")
-            # Return True if status changed by prompt or by cancellation message
-            return self.status_message != original_status 
-
-        # Prompt for replacement string
-        # An empty replacement string is valid (means delete the matched pattern).
-        status_before_replace_prompt = self.status_message
-        replace_with_str = self.prompt("Replace with: ") # `prompt` can return None if cancelled
-        if self.status_message != status_before_replace_prompt:
-            status_changed_by_prompts = True
-
-        if replace_with_str is None: # User cancelled the replacement prompt
-            if not status_changed_by_prompts and self.status_message == original_status:
-                self._set_status_message("Search/Replace cancelled (no replacement text)")
-            return self.status_message != original_status
-
-        # Compile the regex pattern
-        compiled_regex_pattern: Optional[re.Pattern] = None
-        try:
-            # re.IGNORECASE is a common default, can be made configurable
-            compiled_regex_pattern = re.compile(search_pattern_str, re.IGNORECASE) 
-            logging.debug(f"Compiled regex pattern: '{search_pattern_str}' with IGNORECASE")
-        except re.error as e:
-            error_msg = f"Regex error: {str(e)[:70]}"
-            self._set_status_message(error_msg)
-            logging.warning(f"Search/Replace failed due to regex error: {e}")
-            return True # Status changed due to error message
-
-        # --- Perform replacement ---
-        new_text_lines: List[str] = []
-        total_replacements_count = 0
-        line_processing_error_occurred = False
-        
-        # It's safer to operate on a copy if iterating and modifying
-        # or build a new list directly as done here.
-        # Lock is needed for reading self.text if it could be modified by another thread,
-        # but here we are in the main thread of action.
-        
-        with self._state_lock: # Access self.text safely
-            current_text_snapshot = list(self.text) # Work on a snapshot
-
-        for line_idx, current_line in enumerate(current_text_snapshot):
-            try:
-                # Perform substitution on the current line
-                # subn returns a tuple: (new_string, number_of_subs_made)
-                new_line_content, num_subs_on_line = compiled_regex_pattern.subn(replace_with_str, current_line)
-                new_text_lines.append(new_line_content)
-                if num_subs_on_line > 0:
-                    total_replacements_count += num_subs_on_line
-            except Exception as e_sub: # Catch errors during re.subn (e.g., complex regex on specific line)
-                logging.error(f"Error replacing in line {line_idx + 1} ('{current_line[:50]}...'): {e_sub}")
-                new_text_lines.append(current_line) # Append original line in case of error on this line
-                line_processing_error_occurred = True
-
-        # --- Update editor state if replacements were made or errors occurred ---
-        if total_replacements_count > 0 or line_processing_error_occurred:
-            with self._state_lock:
-                self.text = new_text_lines
-                self.modified = True  # Document has been modified
-                # Search and Replace is a major change, typically clears undo/redo history
-                self.action_history.clear()
-                self.undone_actions.clear()
-                logging.debug("Cleared undo/redo history after search/replace.")
-                # Cursor position might be invalidated, reset to start of document or last known good pos.
-                # For simplicity, let's move to the beginning of the file.
-                self.cursor_y = 0
-                self.cursor_x = 0
-                self._ensure_cursor_in_bounds() # Ensure it's valid
-                self._clamp_scroll()            # Adjust scroll
-
-            if line_processing_error_occurred:
-                self._set_status_message(f"Replaced {total_replacements_count} occurrences with errors on some lines.")
-                logging.warning("Search/Replace completed with errors on some lines.")
-            else:
-                self._set_status_message(f"Replaced {total_replacements_count} occurrence(s).")
-                logging.info(f"Search/Replace successful: {total_replacements_count} replacements.")
-            return True # Text changed, status changed, cursor moved
-        else: # No replacements made and no errors
-            self._set_status_message("No occurrences found to replace.")
-            logging.info("Search/Replace: No occurrences found.")
-            return True # Status message changed
-            
-        # Fallback, should not be reached if logic is complete
-        # return status_changed_by_prompts
-
-    # 12. Undo
+    # 11. Undo
     def undo(self) -> bool:
         """
         Undoes the last action from the action_history stack.
@@ -5220,7 +5267,7 @@ class SwayEditor:
             # Return True if a redraw is needed due to state changes OR if status message changed
             return final_redraw_needed or (self.status_message != original_status)
 
-    # 13. Redo    
+    # 12. Redo        
     def redo(self) -> bool:
         """
         Redoes the last undone action from the undone_actions stack.
@@ -5229,7 +5276,7 @@ class SwayEditor:
 
         Returns:
             bool: True if the editor's state (text, cursor, scroll, selection, modified flag,
-                  or status message) changed as a result of the redo operation, False otherwise.
+                or status message) changed as a result of the redo operation, False otherwise.
         """
         with self._state_lock:
             original_status = self.status_message # For checking if status message changes at the end
@@ -5287,12 +5334,12 @@ class SwayEditor:
                     # To redo a delete_newline (merge), we re-merge the lines.
                     # 'text' is the content of the line that was merged up.
                     # 'position' is (y,x) where cursor ended after original merge.
-                    y_target_line, x_cursor_after_merge = last_action["position"]
+                    y_target_line, x_cursor_after_merge = action_to_redo["position"]  # ИСПРАВЛЕНО: было last_action
                     # To redo, we expect line y_target_line to exist, and line y_target_line + 1
                     # (which was re-created by undo) to also exist and match 'text'.
                     if not (0 <= y_target_line < len(self.text) - 1 and 
-                            self.text[y_target_line + 1] == last_action["text"]):
-                        raise IndexError(f"Redo delete_newline: State mismatch for re-merging at line {y_target_line}. Action: {last_action}")
+                            self.text[y_target_line + 1] == action_to_redo["text"]):  # ИСПРАВЛЕНО: было last_action
+                        raise IndexError(f"Redo delete_newline: State mismatch for re-merging at line {y_target_line}. Action: {action_to_redo}")
 
                     self.text[y_target_line] += self.text.pop(y_target_line + 1)
                     self.cursor_y, self.cursor_x = y_target_line, x_cursor_after_merge
@@ -5324,8 +5371,8 @@ class SwayEditor:
                         idx = change_item["line_index"]
                         new_line_text = change_item.get("new_text")
                         if new_line_text is None:
-                             logging.warning(f"Redo ({action_type}): Missing 'new_text' for line {idx}. Skipping.")
-                             continue
+                            logging.warning(f"Redo ({action_type}): Missing 'new_text' for line {idx}. Skipping.")
+                            continue
                         if idx < len(self.text):
                             if self.text[idx] != new_line_text:
                                 self.text[idx] = new_line_text
@@ -5408,7 +5455,6 @@ class SwayEditor:
                 logging.debug(f"Redo for action type '{action_type}' resulted in no effective change from current state.")
             
             return final_redraw_needed or (self.status_message != original_status)
-        
 
     # III. Управление выделением (косвенно связано с видимым курсором, который обычно на конце выделения):
     # extend_selection_right(self)
@@ -5417,9 +5463,7 @@ class SwayEditor:
     # extend_selection_down(self)
     # select_to_home(self)
     # select_to_end(self)
-    # select_all(self)
-
-        
+    # select_all(self)   
     ############### Selection Handling ####################
     # 1. Selection Right
     def extend_selection_right(self) -> bool:
@@ -6855,8 +6899,7 @@ class SwayEditor:
             # A full redraw with the error message is the main goal.
             return True
 
-
-#================= SAVE_FILE ================================= 
+    # --- SAVE_FILE ---------------------------------------------
     def save_file(self) -> bool:
         """
         Saves the current document to its existing filename.
@@ -7309,7 +7352,7 @@ class SwayEditor:
                                 temp_filename = self.filename # Store before releasing lock for write
                                 temp_encoding = self.encoding
                                 temp_text_to_save = current_text_content
-                                temp_modified_flag_before_save = self.modified
+                                _temp_modified_flag_before_save = self.modified
 
                             # Perform file writing outside the main state lock if possible,
                             # though _write_file might acquire it again internally if it modifies shared state
@@ -7521,6 +7564,9 @@ class SwayEditor:
         # If only status changes without a specific state change (e.g. from "Ready" to "Nothing to cancel"),
         # that will be caught by the caller (handle_escape) if needed.
         # This method focuses on *cancelling an operation*.
+        if action_cancelled_a_specific_state:
+            logging.debug(f"Status changed from '{original_status}' to '{self.status_message}'")
+        
         return action_cancelled_a_specific_state
         
 
@@ -7576,89 +7622,123 @@ class SwayEditor:
         # setattr(self, "_last_esc_time", time.monotonic())
             
         return action_taken_requiring_redraw
-        
 
-    def exit_editor(self) -> None: # This method either exits or returns; no bool for redraw needed by caller
-        """
-        Attempts to exit the editor.
-        - Prompts to save any unsaved changes if `self.modified` is True.
-        - If saving is chosen but fails, the exit is aborted to prevent data loss.
-        - If exit is not cancelled, stops background threads and closes curses gracefully before exiting.
+    # New refactoring Ruff
+    def exit_editor(self) -> None:  # This method either exits or returns; no bool for redraw needed by caller
+        """Attempts to exit the editor.
+
+        Workflow:
+            1. Если буфер изменён – запросить сохранение.
+            2. Остановить фоновые сервисы (автосохранение и др.).
+            2-B. Корректно выключить LSP-сервер (shutdown → exit → terminate).
+            3. Восстановить терминал (curses.endwin).
+            4. Завершить процесс (sys.exit).
+
+        Notes:
+            * Метод идемпотентен: повторный вызов безопасен, если сервер уже
+            завершён или потоки остановлены.
         """
         logging.debug("exit_editor: Attempting to exit editor.")
-        
-        # 1. Check for unsaved changes and prompt the user if necessary.
+
+        # 1. Prompt user to save changes if needed.
         if self.modified:
-            original_status = self.status_message # Store status before prompt
+            original_status = self.status_message
             ans = self.prompt("Save changes before exiting? (y/n): ")
             status_changed_by_prompt = (self.status_message != original_status)
 
             if ans and ans.lower().startswith("y"):
                 logging.debug("exit_editor: User chose to save changes.")
-                # Attempt to save the file. save_file() itself handles save_as if needed
-                # and sets status messages for success/failure.
-                # save_file() returns True if it made changes that might need a redraw.
-                self.save_file() # Let save_file handle its own status updates
-                
-                # CRITICAL CHECK: After attempting to save, is the file still modified?
-                # If so, saving failed or was cancelled by the user (e.g., during 'Save As' prompt).
+                self.save_file()  # may update self.modified
                 if self.modified:
-                    self._set_status_message("Exit aborted: file not saved. Please save or discard changes.")
-                    logging.warning("exit_editor: Exit aborted because 'save_file' did not result in a saved state (self.modified is still True).")
-                    return # Abort exit to prevent data loss
-                else:
-                    logging.debug("exit_editor: Changes saved successfully.")
-                    # Proceed to exit
+                    self._set_status_message(
+                        "Exit aborted: file not saved. Please save or discard changes."
+                    )
+                    logging.warning(
+                        "exit_editor: Exit aborted because 'save_file' "
+                        "did not result in a saved state (self.modified is still True)."
+                    )
+                    return
+                logging.debug("exit_editor: Changes saved successfully.")
             elif ans and ans.lower().startswith("n"):
-                logging.debug("exit_editor: User chose NOT to save changes. Proceeding with exit.")
-                # Proceed to exit without saving
+                logging.debug("exit_editor: User chose NOT to save changes.")
             else:
-                # User cancelled the save prompt (e.g., pressed Esc, Enter on empty, or invalid input).
                 if not status_changed_by_prompt and self.status_message == original_status:
                     self._set_status_message("Exit cancelled by user prompt.")
                 logging.debug("exit_editor: Exit cancelled by user at save prompt.")
-                return # Abort exit
-
-        # If we reach here, either:
-        # - There were no modifications.
-        # - User chose 'y' to save, and saving was successful (self.modified is False).
-        # - User chose 'n' not to save.
+                return
 
         logging.info("exit_editor: Proceeding with editor shutdown.")
 
         # 2. Stop background threads (e.g., auto-save).
-        # Signal the auto-save thread to stop.
-        if hasattr(self, '_auto_save_enabled') and self._auto_save_enabled:
-            self._auto_save_enabled = False # Primary flag to stop loop
-            if hasattr(self, '_auto_save_stop_event'):
-                self._auto_save_stop_event.set() # Signal event
+        if getattr(self, "_auto_save_enabled", False):
+            self._auto_save_enabled = False
+            if hasattr(self, "_auto_save_stop_event"):
+                self._auto_save_stop_event.set()
             logging.debug("exit_editor: Signaled auto-save thread to stop.")
-            # Give a very brief moment for the thread to acknowledge, but don't block UI for long.
-            if hasattr(self, '_auto_save_thread') and self._auto_save_thread and self._auto_save_thread.is_alive():
-                self._auto_save_thread.join(timeout=0.1) # Brief wait
+            if (
+                hasattr(self, "_auto_save_thread")
+                and self._auto_save_thread
+                and self._auto_save_thread.is_alive()
+            ):
+                self._auto_save_thread.join(timeout=0.1)
                 if self._auto_save_thread.is_alive():
-                    logging.warning("exit_editor: Auto-save thread still alive after brief join attempt.")
-        # Other threads should be handled similarly if they exist.
-        # Daemon threads will terminate when the main program exits.
+                    logging.warning(
+                        "exit_editor: Auto-save thread still alive after brief join attempt."
+                    )
+
+        # ── LSP ── 2-B. Gracefully shut down Ruff-LSP (or другой активный сервер)
+        if getattr(self, "_lsp_proc", None) and self._lsp_proc.poll() is None:
+            logging.debug("exit_editor: Sending shutdown/exit to LSP server.")
+            try:
+                self._send_lsp("shutdown", {})
+                self._send_lsp("exit", {})
+            except Exception as exc:  # noqa: BLE001
+                logging.debug(
+                    "exit_editor: Could not send LSP shutdown/exit: %s", exc, exc_info=True
+                )
+
+            # Close stdin so the server receives EOF.
+            try:
+                self._lsp_proc.stdin.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+
+            self._lsp_proc.terminate()
+            try:
+                self._lsp_proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                logging.warning("exit_editor: LSP process did not exit in time; killing.")
+                self._lsp_proc.kill()
+
+        # Join reader thread to avoid dangling daemons.
+        if getattr(self, "_lsp_reader", None) and self._lsp_reader.is_alive():
+            self._lsp_reader.join(timeout=0.5)
 
         # 3. Gracefully terminate curses.
-        # Ensure this is called from the main thread to prevent curses errors.
         if threading.current_thread() is threading.main_thread():
-            logging.debug("exit_editor: Running in main thread, attempting to call curses.endwin().")
+            logging.debug(
+                "exit_editor: Running in main thread, attempting to call curses.endwin()."
+            )
             try:
-                self.stdscr.keypad(False) # Turn off keypad mode
-                curses.nocbreak()         # Restore cbreak/cooked mode (opposite of raw)
-                curses.echo()             # Restore echoing of typed characters
-                curses.endwin()           # Restore terminal to original state
-                logging.info("exit_editor: curses.endwin() called successfully. Terminal restored.")
+                self.stdscr.keypad(False)
+                curses.nocbreak()
+                curses.echo()
+                curses.endwin()
+                logging.info(
+                    "exit_editor: curses.endwin() called successfully. Terminal restored."
+                )
             except curses.error as e:
                 logging.error(f"exit_editor: Curses error during curses.endwin(): {e}")
-            except Exception as e: # Catch any other unexpected error
-                logging.error(f"exit_editor: Unexpected error during curses.endwin(): {e}", exc_info=True)
+            except Exception as e:  # Catch any other unexpected error
+                logging.error(
+                    f"exit_editor: Unexpected error during curses.endwin(): {e}",
+                    exc_info=True,
+                )
         else:
-            # This scenario (calling endwin from non-main thread) should ideally be avoided.
-            logging.warning("exit_editor: Attempting to call curses.endwin() from a non-main thread. This is risky. Skipping direct call.")
-            # One might try to signal the main thread to call endwin, but that's complex.
+            logging.warning(
+                "exit_editor: Attempting to call curses.endwin() from a non-main thread. "
+                "This is risky. Skipping direct call."
+            )
 
         # 4. Terminate the program.
         logging.info("exit_editor: Exiting program with sys.exit(0).")
@@ -7853,9 +7933,10 @@ class SwayEditor:
                 
                 # --- Process key press ---
                 if isinstance(key_event, int): # Special key (e.g., arrows, F-keys) or non-ASCII char as int.
-                    if key_event == 27: # Esc key code.
+                    if key_event == 27:  # Esc key code.
                         logging.debug("Prompt: Esc (int) detected. Cancelling.")
-                        input_result = None; break
+                        input_result = None
+                        break
                     elif key_event in (curses.KEY_ENTER, 10, 13): # Enter/Return keys.
                         logging.debug(f"Prompt: Enter (int {key_event}) detected. Confirming.")
                         input_result = "".join(input_buffer).strip(); break
@@ -7902,10 +7983,12 @@ class SwayEditor:
                     # For now, assuming single character or known sequences.
                     if key_event == '\x1b': # Esc key sometimes comes as a string (e.g., part of an escape sequence).
                         logging.debug("Prompt: Esc (str) detected. Cancelling.")
-                        input_result = None; break
+                        input_result = None
+                        break
                     elif key_event in ("\n", "\r"): # Enter/Return as string.
                         logging.debug(f"Prompt: Enter (str '{repr(key_event)}') detected. Confirming.")
-                        input_result = "".join(input_buffer).strip(); break
+                        input_result = "".join(input_buffer).strip()
+                        break
                     elif key_event == '\t': # Tab as string.
                         tab_spaces_str = " " * prompt_tab_width
                         for char_in_tab_str in tab_spaces_str:
@@ -7950,265 +8033,7 @@ class SwayEditor:
         return input_result
 
 
-
-
-    # def prompt(self, message: str, max_len: int = 1024, timeout_seconds: int = 60) -> Optional[str]:
-    #     """
-    #     Displays a single-line input prompt in the status bar with a timeout.
-
-    #     Features:
-    #     - Enter: Confirms and returns the stripped input string.
-    #     - Esc: Cancels and returns None.
-    #     - Tab: Inserts a tab equivalent (using editor's tab_size setting).
-    #     - Backspace, Delete, Left/Right Arrows, Home, End: Standard text editing.
-    #     - Resize: Redraws the prompt according to the new screen size.
-    #     - Timeout: Returns None if no input is confirmed within the timeout.
-
-    #     Args:
-    #         message (str): The message to display before the input field.
-    #         max_len (int): Maximum allowed length of the input buffer (character count).
-    #         timeout_seconds (int): Timeout for waiting for input, in seconds.
-
-    #     Returns:
-    #         Optional[str]: The user's input string (stripped) if confirmed, 
-    #                        or None if cancelled or timed out.
-    #     """
-    #     logging.debug(
-    #         f"Prompt called. Message: '{message}', Max length: {max_len}, Timeout: {timeout_seconds}s"
-    #     )
-        
-    #     # Ensure cursor is visible for the prompt
-    #     original_cursor_visibility = curses.curs_set(1) 
-        
-    #     # Set stdscr to blocking mode with a timeout for this prompt
-    #     self.stdscr.nodelay(False) 
-    #     self.stdscr.timeout(timeout_seconds * 1000) # timeout is in milliseconds
-
-    #     input_buffer: List[str] = [] # Stores characters of the input
-    #     cursor_char_pos: int = 0     # Cursor position as an index within the input_buffer
-        
-    #     # Tab width for Tab key insertion (could be made configurable or use editor setting)
-    #     prompt_tab_width: int = self.config.get("editor", {}).get("tab_size", 4)
-        
-    #     input_result: Optional[str] = None # Stores the final result (string or None)
-
-    #     try:
-    #         while True:
-    #             term_height, term_width = self.stdscr.getmaxyx()
-    #             if term_height <= 0: # Guard against invalid terminal dimensions
-    #                 logging.error("Prompt: Terminal height is zero or negative. Aborting prompt.")
-    #                 # Try to restore terminal state before returning
-    #                 self.stdscr.nodelay(True)
-    #                 self.stdscr.timeout(-1)
-    #                 curses.curs_set(original_cursor_visibility)
-    #                 curses.flushinp()
-    #                 return None
-
-    #             prompt_row = term_height - 1 # Prompt always on the last line
-
-    #             # --- Prepare prompt message display ---
-    #             # Truncate display message if too long for the available width.
-    #             # Leave some space for the input field itself (e.g., at least 10 cells + cursor)
-    #             max_allowed_msg_display_width = max(0, term_width - 10 - 1) 
-    #             display_message_str = message
-                
-    #             # Use self.get_string_width for accurate width calculation
-    #             if self.get_string_width(message) > max_allowed_msg_display_width:
-    #                 # Use self.truncate_string if available for proper Unicode truncation
-    #                 if hasattr(self, 'truncate_string'):
-    #                      display_message_str = self.truncate_string(message, max_allowed_msg_display_width - 3) + "..."
-    #                 else: # Basic slicing as a fallback if truncate_string is not defined
-    #                      display_message_str = message[:max_allowed_msg_display_width - 3] + "..."
-                
-    #             display_message_screen_len = self.get_string_width(display_message_str)
-
-    #             # --- Clear and redraw the prompt line ---
-    #             try:
-    #                 self.stdscr.move(prompt_row, 0)
-    #                 self.stdscr.clrtoeol()
-    #                 # Draw the prompt message (e.g., "Enter command: ")
-    #                 self.stdscr.addstr(prompt_row, 0, display_message_str, self.colors.get("status", curses.A_NORMAL))
-    #             except curses.error as e_draw_msg:
-    #                 logging.error(f"Prompt: Curses error during prompt message draw: {e_draw_msg}")
-    #                 return None # Cannot proceed if we can't draw the prompt message
-
-    #             current_input_text = "".join(input_buffer)
-    #             # Available screen width (in display cells) for the input text itself
-    #             available_width_for_input_text = max(0, term_width - (display_message_screen_len + 1)) # +1 for potential cursor space
-
-    #             # --- Horizontal scrolling logic for the input text ---
-    #             # Screen x-position where the text input field starts
-    #             input_field_start_x = display_message_screen_len
-                
-    #             # Display width of text before the cursor
-    #             width_before_cursor = self.get_string_width(current_input_text[:cursor_char_pos])
-    #             # Display width of the full current input text
-    #             full_input_text_width = self.get_string_width(current_input_text)
-                
-    #             text_scroll_offset = 0 # How many display cells of the input text are scrolled off left
-    #             if full_input_text_width > available_width_for_input_text:
-    #                 # If cursor is too far right to be visible, scroll text left enough to show cursor
-    #                 if width_before_cursor > text_scroll_offset + available_width_for_input_text -1 : # -1 for cursor itself
-    #                     text_scroll_offset = width_before_cursor - (available_width_for_input_text - 1)
-    #                 # If cursor is too far left (scrolled past it), adjust scroll to bring it into view
-    #                 elif width_before_cursor < text_scroll_offset:
-    #                      text_scroll_offset = width_before_cursor
-                
-    #             # Determine the actual characters to display from input_buffer based on text_scroll_offset
-    #             display_start_char_index = 0
-    #             accumulated_scrolled_width = 0
-    #             if text_scroll_offset > 0:
-    #                 for i_scroll, char_scroll in enumerate(input_buffer):
-    #                     char_w = self.get_char_width(char_scroll)
-    #                     if accumulated_scrolled_width + char_w > text_scroll_offset:
-    #                         display_start_char_index = i_scroll
-    #                         # How much of the current char is visible if it's partially scrolled
-    #                         # This can be complex, for now, we start drawing from this char
-    #                         break
-    #                     accumulated_scrolled_width += char_w
-    #                 else: # Scrolled past all content
-    #                     display_start_char_index = len(input_buffer)
-                
-    #             visible_text_segment_to_draw = ""
-    #             current_visible_segment_width = 0
-    #             for char_val in input_buffer[display_start_char_index:]:
-    #                 char_w = self.get_char_width(char_val)
-    #                 if current_visible_segment_width + char_w > available_width_for_input_text:
-    #                     break
-    #                 visible_text_segment_to_draw += char_val
-    #                 current_visible_segment_width += char_w
-                
-    #             # Cursor's screen X position relative to the start of the displayed segment
-    #             cursor_screen_offset_within_visible_segment = self.get_string_width("".join(input_buffer[display_start_char_index:cursor_char_pos]))
-                
-    #             # --- Draw the visible input text and position the actual curses cursor ---
-    #             try:
-    #                 if visible_text_segment_to_draw: 
-    #                     self.stdscr.addstr(prompt_row, input_field_start_x, visible_text_segment_to_draw)
-                    
-    #                 # Final screen cursor X position
-    #                 screen_cursor_x = input_field_start_x + cursor_screen_offset_within_visible_segment
-    #                 # Clamp cursor to be within the drawable area of the input field and terminal width
-    #                 screen_cursor_x = max(input_field_start_x, min(screen_cursor_x, input_field_start_x + max(0, available_width_for_input_text -1) ))
-    #                 if term_width > 0: 
-    #                      screen_cursor_x = min(screen_cursor_x, term_width -1) # Ensure not off screen right
-
-    #                 self.stdscr.move(prompt_row, screen_cursor_x)
-    #             except curses.error as e_draw_input:
-    #                 logging.error(f"Prompt: Curses error during input text/cursor draw: {e_draw_input}")
-    #                 return None 
-                    
-    #             self.stdscr.refresh() # Refresh screen to show prompt and input
-
-    #             # --- Get key press ---
-    #             key_event: Any = curses.ERR # Initialize for timeout case
-    #             try:
-    #                 key_event = self.stdscr.get_wch() 
-    #                 logging.debug(f"Prompt: get_wch() returned: {repr(key_event)} (type: {type(key_event)})")
-    #             except curses.error as e_getch:
-    #                 if 'no input' in str(e_getch).lower(): # Timeout
-    #                     logging.warning(f"Prompt: Input timed out after {timeout_seconds}s for: '{message}'")
-    #                     input_result = None 
-    #                     break # Exit the while loop on timeout
-    #                 else: # Other curses error during get_wch
-    #                     logging.error(f"Prompt: Curses error on get_wch(): {e_getch}", exc_info=True)
-    #                     input_result = None 
-    #                     break # Exit the while loop on error
-                
-    #             # --- Process key press ---
-    #             if isinstance(key_event, int): # Special key or non-ASCII char as int
-    #                 if key_event == 27: # Esc key code
-    #                     logging.debug("Prompt: Esc (int) detected. Cancelling.")
-    #                     input_result = None; break
-    #                 elif key_event in (curses.KEY_ENTER, 10, 13): # Enter/Return keys
-    #                     logging.debug(f"Prompt: Enter (int {key_event}) detected. Confirming.")
-    #                     input_result = "".join(input_buffer).strip(); break
-    #                 elif key_event in (curses.KEY_BACKSPACE, 127, 8): 
-    #                     if cursor_char_pos > 0: cursor_char_pos -= 1; input_buffer.pop(cursor_char_pos)
-    #                 elif key_event == curses.KEY_DC: 
-    #                     if cursor_char_pos < len(input_buffer): input_buffer.pop(cursor_char_pos)
-    #                 elif key_event == curses.KEY_LEFT:
-    #                     cursor_char_pos = max(0, cursor_char_pos - 1)
-    #                 elif key_event == curses.KEY_RIGHT:
-    #                     cursor_char_pos = min(len(input_buffer), cursor_char_pos + 1)
-    #                 elif key_event == curses.KEY_HOME:
-    #                     cursor_char_pos = 0
-    #                 elif key_event == curses.KEY_END:
-    #                     cursor_char_pos = len(input_buffer)
-    #                 elif key_event == curses.KEY_RESIZE:
-    #                     logging.debug("Prompt: KEY_RESIZE detected. Redrawing prompt at start of loop.")
-    #                     # Screen will be redrawn with new dimensions at the start of the next loop iteration.
-    #                     continue 
-    #                 elif key_event == curses.ascii.TAB: 
-    #                     tab_spaces_str = " " * prompt_tab_width
-    #                     for char_in_tab_str in tab_spaces_str:
-    #                         if len(input_buffer) < max_len: 
-    #                             input_buffer.insert(cursor_char_pos, char_in_tab_str)
-    #                             cursor_char_pos += 1
-    #                 elif 32 <= key_event < 1114112 : # Other integer that might be a printable Unicode char
-    #                     try:
-    #                         char_to_insert_val = chr(key_event)
-    #                         # Check if it's displayable and not a control char missed by earlier checks
-    #                         if len(input_buffer) < max_len and wcswidth(char_to_insert_val) >= 0 : 
-    #                             input_buffer.insert(cursor_char_pos, char_to_insert_val)
-    #                             cursor_char_pos += 1
-    #                     except ValueError: 
-    #                          logging.warning(f"Prompt: Could not convert integer key code {key_event} to char.")
-    #                 else: # Unhandled integer key
-    #                     logging.debug(f"Prompt: Ignored unhandled integer key: {key_event}")
-
-    #             elif isinstance(key_event, str): # String input (usually a single character or Esc sequence part)
-    #                 if key_event == '\x1b': # Esc key sometimes comes as a string
-    #                     logging.debug("Prompt: Esc (str) detected. Cancelling.")
-    #                     input_result = None; break
-    #                 elif key_event in ("\n", "\r"): # Enter/Return as string
-    #                     logging.debug(f"Prompt: Enter (str '{repr(key_event)}') detected. Confirming.")
-    #                     input_result = "".join(input_buffer).strip(); break
-    #                 elif key_event == '\t': # Tab as string
-    #                     tab_spaces_str = " " * prompt_tab_width
-    #                     for char_in_tab_str in tab_spaces_str:
-    #                         if len(input_buffer) < max_len: 
-    #                             input_buffer.insert(cursor_char_pos, char_in_tab_str)
-    #                             cursor_char_pos += 1
-    #                 elif len(key_event) == 1 and key_event.isprintable(): # Check if it's a standard printable char
-    #                     if wcswidth(key_event) > 0: # Final check for displayable width
-    #                         if len(input_buffer) < max_len: 
-    #                             input_buffer.insert(cursor_char_pos, key_event)
-    #                             cursor_char_pos += 1
-    #                     else:
-    #                          logging.debug(f"Prompt: Ignored non-displayable/zero-width string char after isprintable(): {repr(key_event)}")
-    #                 # Could also handle multi-character paste here if get_wch() ever returns that
-    #                 # (though it's not standard for get_wch() to return multiple user-typed chars at once).
-    #                 else: 
-    #                     logging.debug(f"Prompt: Ignored unhandled string input: {repr(key_event)}")
-    #             # else key_event == curses.ERR (no input), which is handled by the try-except for get_wch()
-
-    #     finally:
-    #         # Restore terminal settings that were changed for the prompt duration
-    #         self.stdscr.nodelay(True)  # Restore non-blocking input for the main editor loop
-    #         self.stdscr.timeout(-1)    # Disable timeout for stdscr
-    #         # curses.noecho() should still be in effect from editor's global settings.
-    #         curses.curs_set(original_cursor_visibility) # Restore original cursor visibility
-            
-    #         # Clear the prompt line from the status bar before returning control
-    #         term_height_final, _ = self.stdscr.getmaxyx() # Get height again in case of resize
-    #         try:
-    #             if term_height_final > 0: # Ensure height is valid
-    #                 self.stdscr.move(term_height_final - 1, 0)
-    #                 self.stdscr.clrtoeol()
-    #             # A full redraw by the main loop (via self.drawer.draw()) will typically follow,
-    #             # which will redraw the normal status bar. Calling self.stdscr.refresh() here
-    #             # might cause a flicker if the main loop also refreshes immediately.
-    #             # For now, let the main loop's draw cycle handle full status bar restoration.
-    #         except curses.error as e_final_clear_prompt:
-    #              logging.warning(f"Prompt: Curses error during final status line clear: {e_final_clear_prompt}")
-
-    #         curses.flushinp() # Clear any unprocessed typeahead characters from terminal input buffer
-        
-    #     return input_result
-        
-
-    # ========== Search/Replace and Find ======================
+    # 2 ========== Search/Replace and Find ======================
     def search_and_replace(self) -> bool:
         """
         Searches for text using a regular expression and replaces occurrences.
@@ -8998,7 +8823,6 @@ class SwayEditor:
             if self.status_message != current_status_before_prompt:
                 redraw_needed = True
 
-
             if not choice or choice not in commands:
                 # If prompt was cancelled or choice is invalid, set status and indicate redraw if status changed
                 if not choice and not redraw_needed : # If prompt was cancelled without changing status line by itself
@@ -9358,7 +9182,6 @@ class SwayEditor:
         logging.info("Git info changed → %s", pretty)
 
 
-
     def toggle_insert_mode(self) -> bool:
         """
         Toggles between Insert and Replace (Overwrite) modes for text input.
@@ -9646,195 +9469,258 @@ class SwayEditor:
                         logging.warning(f"Curses error highlighting bracket 2 at screen ({scr_y2},{scr_x2}): {e}")
 
 
-
+    # NEW scrolling
     # ==================== HELP ==================================
-    # Displays a help window with keybindings and editor features.
-    def show_help(self) -> bool:
-        """
-        Displays a pop-up help window with dynamically retrieved keybindings.
-        Returns True because it takes over the screen and sets a status message.
-        """
-        logging.debug("show_help called")
-        original_status = self.status_message 
-        
-        def get_kb_display_string(action_name: str, default_key_str_repr: str) -> str:
-            """
-            Retrieves the string representation of a keybinding for an action.
-            It prefers the string from self.config if available, otherwise uses the default.
-            Formats the string for better readability.
-            """
-            # Get the value from config; it might be a string or an int
-            key_value_from_config = self.config.get("keybindings", {}).get(action_name)
-            
-            # Determine the string to format: from config if string, else default, else int as string
-            string_to_format: str
-            if isinstance(key_value_from_config, str):
-                string_to_format = key_value_from_config
-            elif isinstance(key_value_from_config, int):
-                # If user explicitly set an int in config, we might not have a nice string for it.
-                # We'll show the default string representation for this action instead.
-                # If even default is not a string, then show the int.
-                if isinstance(default_key_str_repr, str):
-                    string_to_format = default_key_str_repr
-                    logging.debug(f"get_kb_display_string: Action '{action_name}' has int '{key_value_from_config}' in config. Displaying default string '{default_key_str_repr}'.")
-                else: # Fallback if default is also not a string (should not happen with good defaults)
-                    string_to_format = str(key_value_from_config)
-                    logging.warning(f"get_kb_display_string: Action '{action_name}' has int '{key_value_from_config}' in config and default is not string. Displaying int.")
-            elif key_value_from_config is None: # Not in user config, use default
-                string_to_format = default_key_str_repr
-            else: # Should not happen, unknown type
-                logging.warning(f"get_kb_display_string: Action '{action_name}' has unexpected type '{type(key_value_from_config)}'. Using default.")
-                string_to_format = default_key_str_repr
+    def _build_help_lines(self) -> list[str]:
+        """Return a list of formatted help‑screen lines.
 
-            # Now format the determined string_to_format
-            parts = string_to_format.strip().lower().split('+')
-            formatted_parts = []
+        The text is generated dynamically, so customised keybindings that
+        the user defines in ``self.config['keybindings']`` are shown instead
+        of the defaults.
+
+        Returns
+        -------
+        list[str]
+            Each element is a single display line (no ``\n``) ready to be
+            passed to ``curses.addstr``.
+        """
+
+        def _kb(action: str, default: str) -> str:
+            """Return a prettified key‑binding string for *action*."""
+            raw = self.config.get("keybindings", {}).get(action, default)
+            if isinstance(raw, int):
+                raw = default
+            parts = str(raw).strip().lower().split('+')
+            formatted = []
             for part in parts:
-                if part in ["ctrl", "alt", "shift"]:
-                    formatted_parts.append(part.capitalize())
-                elif len(part) == 1 and 'a' <= part <= 'z':
-                    formatted_parts.append(part.upper())
-                elif part.startswith("f") and len(part) > 1 and part[1:].isdigit():
-                     formatted_parts.append(part.upper())
-                else: 
-                    formatted_parts.append(part.capitalize() if len(part) > 1 and part.isalpha() else part)
-            return "+".join(formatted_parts)
+                if part in {"ctrl", "alt", "shift"}:
+                    formatted.append(part.capitalize())
+                elif len(part) == 1 and part.isalpha():
+                    formatted.append(part.upper())
+                elif part.startswith("f") and part[1:].isdigit():
+                    formatted.append(part.upper())
+                else:
+                    formatted.append(part.capitalize() if part.isalpha() else part)
+            return '+'.join(formatted)
 
-        # Default key STRINGS for actions (used if not overridden by user's config as a string)
-        default_key_strings_for_actions = {
-            "new_file": "F2", "open_file": "Ctrl+O", "save_file": "Ctrl+S", 
-            "save_as": "F5", "quit": "Ctrl+Q", "undo": "Ctrl+Z", "redo": "Shift+Z",
-            "copy": "Ctrl+C", "cut": "Ctrl+X", "paste": "Ctrl+V",
-            "select_all": "Ctrl+A", "delete": "Del", 
-            "goto_line": "Ctrl+G", "find": "Ctrl+F", "find_next": "F3", 
-            "search_and_replace": "F6", "lint": "F4", "git_menu": "F9", 
-            "help": "F1", "cancel_operation": "Esc", "tab": "Tab", 
+        defaults = {
+            "new_file": "F2", "open_file": "Ctrl+O", "save_file": "Ctrl+S",
+            "save_as": "F5", "quit": "Ctrl+Q", "undo": "Ctrl+Z",
+            "redo": "Shift+Z", "copy": "Ctrl+C", "cut": "Ctrl+X",
+            "paste": "Ctrl+V", "select_all": "Ctrl+A", "delete": "Del",
+            "goto_line": "Ctrl+G", "find": "Ctrl+F", "find_next": "F3",
+            "search_and_replace": "F6", "lint": "F4", "git_menu": "F9",
+            "help": "F1", "cancel_operation": "Esc", "tab": "Tab",
             "shift_tab": "Shift+Tab", "comment_selected_lines": "Ctrl+/",
-            "uncomment_selected_lines": "Shift+/" 
+            "uncomment_selected_lines": "Shift+/"
         }
-        
-        # Generate help lines using the helper
-        help_lines = [
-            "  ──  Sway-Pad Help  ──  ", "", "  File Operations:",
-            f"    {get_kb_display_string('new_file', default_key_strings_for_actions.get('new_file','F2')):<22}: New file",
-            f"    {get_kb_display_string('open_file', default_key_strings_for_actions.get('open_file','Ctrl+O')):<22}: Open file",
-            f"    {get_kb_display_string('save_file', default_key_strings_for_actions.get('save_file','Ctrl+S')):<22}: Save",
-            f"    {get_kb_display_string('save_as', default_key_strings_for_actions.get('save_as','F5')):<22}: Save as…",
-            f"    {get_kb_display_string('quit', default_key_strings_for_actions.get('quit','Ctrl+Q')):<22}: Quit editor",
+
+        return [
+            "  ──  Sway-Pad Help  ──  ", "",
+            "  File Operations:",
+            f"    {_kb('new_file', defaults['new_file']):<22}: New file",
+            f"    {_kb('open_file', defaults['open_file']):<22}: Open file",
+            f"    {_kb('save_file', defaults['save_file']):<22}: Save",
+            f"    {_kb('save_as', defaults['save_as']):<22}: Save as…",
+            f"    {_kb('quit', defaults['quit']):<22}: Quit editor",
             "", "  Editing:",
-            f"    {get_kb_display_string('undo', default_key_strings_for_actions.get('undo','Ctrl+Z')):<22}: Undo",
-            f"    {get_kb_display_string('redo', default_key_strings_for_actions.get('redo','Shift+Z')):<22}: Redo",
-            f"    {get_kb_display_string('copy', default_key_strings_for_actions.get('copy','Ctrl+C')):<22}: Copy",
-            f"    {get_kb_display_string('cut', default_key_strings_for_actions.get('cut','Ctrl+X')):<22}: Cut",
-            f"    {get_kb_display_string('paste', default_key_strings_for_actions.get('paste','Ctrl+V')):<22}: Paste",
-            f"    {get_kb_display_string('select_all', default_key_strings_for_actions.get('select_all','Ctrl+A')):<22}: Select all",
-            f"    {get_kb_display_string('delete', default_key_strings_for_actions.get('delete','Del')):<22}: Delete char/selection",
+            f"    {_kb('undo', defaults['undo']):<22}: Undo",
+            f"    {_kb('redo', defaults['redo']):<22}: Redo",
+            f"    {_kb('copy', defaults['copy']):<22}: Copy",
+            f"    {_kb('cut', defaults['cut']):<22}: Cut",
+            f"    {_kb('paste', defaults['paste']):<22}: Paste",
+            f"    {_kb('select_all', defaults['select_all']):<22}: Select all",
+            f"    {_kb('delete', defaults['delete']):<22}: Delete char/selection",
             "    Backspace            : Delete char left / selection",
-            f"    {get_kb_display_string('tab', default_key_strings_for_actions.get('tab','Tab')):<22}: Smart Tab / Indent block",
-            f"    {get_kb_display_string('shift_tab', default_key_strings_for_actions.get('shift_tab','Shift+Tab')):<22}: Smart Unindent / Unindent block",
-            f"    {get_kb_display_string('comment_selected_lines', default_key_strings_for_actions.get('comment_selected_lines','Ctrl+/')):<22}: Comment block/line",
-            f"    {get_kb_display_string('uncomment_selected_lines', default_key_strings_for_actions.get('uncomment_selected_lines','Shift+/')):<22}: Uncomment block/line",
+            f"    {_kb('tab', defaults['tab']):<22}: Smart Tab / Indent block",
+            f"    {_kb('shift_tab', defaults['shift_tab']):<22}: Smart Unindent / Unindent block",
+            f"    {_kb('comment_selected_lines', defaults['comment_selected_lines']):<22}: Comment block/line",
+            f"    {_kb('uncomment_selected_lines', defaults['uncomment_selected_lines']):<22}: Uncomment block/line",
             "", "  Navigation & Search:",
-            f"    {get_kb_display_string('goto_line', default_key_strings_for_actions.get('goto_line','Ctrl+G')):<22}: Go to line",
-            f"    {get_kb_display_string('find', default_key_strings_for_actions.get('find','Ctrl+F')):<22}: Find (prompt)",
-            f"    {get_kb_display_string('find_next', default_key_strings_for_actions.get('find_next','F3')):<22}: Find next occurrence",
-            f"    {get_kb_display_string('search_and_replace', default_key_strings_for_actions.get('search_and_replace','F6')):<22}: Search & Replace (regex)",
+            f"    {_kb('goto_line', defaults['goto_line']):<22}: Go to line",
+            f"    {_kb('find', defaults['find']):<22}: Find (prompt)",
+            f"    {_kb('find_next', defaults['find_next']):<22}: Find next occurrence",
+            f"    {_kb('search_and_replace', defaults['search_and_replace']):<22}: Search & Replace (regex)",
             "    Arrows, Home, End    : Cursor movement",
             "    PageUp, PageDown     : Scroll by page",
             "    Shift+Nav Keys       : Extend selection",
             "", "  Tools & Features:",
-            f"    {get_kb_display_string('lint', default_key_strings_for_actions.get('lint','F4')):<22}: Run Linter (Python)",
-            f"    {get_kb_display_string('git_menu', default_key_strings_for_actions.get('git_menu','F9')):<22}: Git menu",
-            f"    {get_kb_display_string('help', default_key_strings_for_actions.get('help','F1')):<22}: This help screen",
-            f"    {get_kb_display_string('cancel_operation', default_key_strings_for_actions.get('cancel_operation','Esc')):<22}: Cancel / Close Panel / Exit",
+            f"    {_kb('lint', defaults['lint']):<22}: Diagnostics (LSP)",
+            f"    {_kb('git_menu', defaults['git_menu']):<22}: Git menu",
+            f"    {_kb('help', defaults['help']):<22}: This help screen",
+            f"    {_kb('cancel_operation', defaults['cancel_operation']):<22}: Cancel / Close Panel / Exit",
             "    Insert Key           : Toggle Insert/Replace mode",
             "", "  ──────────────────────────",
-            "    © 2024-2025 Siergej Sobolewski — Sway-Pad",
-            "    Licensed under the GPLv3",
-            "", "    Press any key to close this help window.",
+            "", "    Press any key to close ",
+            "", "   Licensed under the GPL v3 ",
+            "", "   © 2025 Siergej Sobolewski",
         ]
-        # --- (Rest of the help window drawing logic remains the same as your last full version) ---
-        num_lines_text = len(help_lines)
-        help_window_height = num_lines_text + 2 
-        max_text_line_display_width = 0
-        for line_in_help_text in help_lines:
-            current_line_display_width = len(line_in_help_text) 
-            if hasattr(self, 'get_string_width'):
-                try: current_line_display_width = self.get_string_width(line_in_help_text)
-                except Exception: pass
-            max_text_line_display_width = max(max_text_line_display_width, current_line_display_width)
-        help_window_width = max_text_line_display_width + 4 
-        
-        term_height, term_width = self.stdscr.getmaxyx()
-        help_window_height = min(help_window_height, max(5, term_height - 2)) 
-        help_window_width = min(help_window_width, max(20, term_width - 2))
-        start_y_pos = max(0, (term_height - help_window_height) // 2)
-        start_x_pos = max(0, (term_width - help_window_width) // 2)
 
-        help_window_curses_obj: Optional[curses.window] = None 
+
+    def show_help(self) -> bool:
+        """Displays a centered, scrollable help window.
+        Uses textual indicators for scrolling on a dark grey background.
+        """
+        lines = self._build_help_lines()
+        
+        # ОТЛАДКА: проверим, что у нас есть строки
+        if not lines:
+            lines = ["Нет данных для отображения", "Проверьте метод _build_help_lines()"]
+        
+        term_h, term_w = self.stdscr.getmaxyx()
+
+        # Упрощенные размеры
+        view_h = min(len(lines) + 4, term_h - 4)  # +4 для рамки и отступов
+        view_w = min(max(len(line) for line in lines) + 10, term_w - 4)  # +10 для отступов и указателей
+        view_y = (term_h - view_h) // 2
+        view_x = (term_w - view_w) // 2
+
+        # Убеждаемся в минимальных размерах
+        if view_h < 8: view_h = min(8, term_h - 2)
+        if view_w < 20: view_w = min(20, term_w - 2)
+
+        prev_cursor = None
+        
+        # Цвета
+        help_text_attr = curses.A_NORMAL
+        help_bg_attr = curses.A_NORMAL
+        frame_border_attr = curses.A_BOLD
+        scroll_indicator_attr = curses.A_BOLD | curses.A_REVERSE
+
         try:
-            help_window_curses_obj = curses.newwin(help_window_height, help_window_width, start_y_pos, start_x_pos)
-            help_window_background_attr = self.colors.get("status", curses.A_NORMAL) 
-            help_window_curses_obj.bkgd(' ', help_window_background_attr) 
-            help_window_curses_obj.border() 
-            for i, text_line_content in enumerate(help_lines):
-                if i >= help_window_height - 2: break
-                drawable_text_area_width = help_window_width - 4 
-                display_line_str = text_line_content
-                if hasattr(self, 'truncate_string'): 
-                    display_line_str = self.truncate_string(text_line_content, drawable_text_area_width)
-                elif len(text_line_content) > drawable_text_area_width: 
-                    display_line_str = text_line_content[:drawable_text_area_width]
-                try:
-                    help_window_curses_obj.addstr(i + 1, 2, display_line_str)
-                except curses.error as e_addstr_help:
-                    logging.warning(f"Curses error drawing help text line {i} ('{display_line_str}'): {e_addstr_help}")
-            help_window_curses_obj.noutrefresh() 
-        except curses.error as e_newwin_help:
-            logging.error(f"Curses error creating or drawing help window: {e_newwin_help}", exc_info=True)
-            self._set_status_message(f"Error displaying help: {str(e_newwin_help)[:70]}...")
-            if help_window_curses_obj: del help_window_curses_obj
-            return True 
-        previous_main_cursor_visibility_state = 1
-        try:
-            previous_main_cursor_visibility_state = curses.curs_set(0) 
+            if curses.has_colors():
+                HELP_CONTENT_PAIR_ID = 98
+                curses.init_pair(HELP_CONTENT_PAIR_ID, 231, 236)
+                help_bg_attr = curses.color_pair(HELP_CONTENT_PAIR_ID)
+                help_text_attr = curses.color_pair(HELP_CONTENT_PAIR_ID)
+
+                FRAME_BORDER_PAIR_ID = 97
+                curses.init_pair(FRAME_BORDER_PAIR_ID, 250, 236)
+                frame_border_attr = curses.color_pair(FRAME_BORDER_PAIR_ID) | curses.A_BOLD
+
+                SCROLL_INDICATOR_PAIR_ID = 99
+                curses.init_pair(SCROLL_INDICATOR_PAIR_ID, 226, 236)
+                scroll_indicator_attr = curses.color_pair(SCROLL_INDICATOR_PAIR_ID) | curses.A_BOLD
+                
         except curses.error:
-            logging.warning("Curses: Could not hide main cursor for help screen (terminal may not support).")
-        self.stdscr.noutrefresh() 
-        if help_window_curses_obj: 
-            help_window_curses_obj.noutrefresh()
-        curses.doupdate() 
-        if help_window_curses_obj: 
-            help_window_curses_obj.nodelay(False) 
-            help_window_curses_obj.keypad(True)   
-            try:
-                key_pressed_to_close_help = help_window_curses_obj.getch() 
-                KEY_LOGGER.debug(f"Help window closed by key code: {key_pressed_to_close_help}")
-            except curses.error as e_getch_help:
-                logging.error(f"Curses error while getting key to close help window: {e_getch_help}")
-            finally:
-                pass
-        try:
-            if help_window_curses_obj:
-                help_window_curses_obj.clear()
-                help_window_curses_obj.noutrefresh() 
-                del help_window_curses_obj 
-            try:
-                curses.curs_set(previous_main_cursor_visibility_state)
-            except curses.error:
-                logging.warning("Curses: Could not restore main cursor visibility after help.")
-            curses.flushinp() 
-            if self.status_message == original_status or "Error displaying help" in self.status_message:
-                 self._set_status_message("Help closed")
-            return True
-        except Exception as e_help_cleanup: 
-            logging.critical(f"Critical error during help window cleanup: {e_help_cleanup}", exc_info=True)
-            try: curses.curs_set(1)
-            except: pass
-            self._set_status_message("Critical error closing help (see log)")
-            return True
-        
+            pass
 
+        try:
+            # Создаем окно
+            win = curses.newwin(view_h, view_w, view_y, view_x)
+            win.keypad(True)
+            win.bkgd(" ", help_bg_attr)
+
+            # Параметры прокрутки
+            content_height = view_h - 2  # Высота для текста (минус рамка)
+            max_lines_visible = content_height
+            total_lines = len(lines)
+            max_scroll = max(0, total_lines - max_lines_visible)
+            
+            top = 0
+            
+            # Указатели
+            SCROLL_UP_INDICATOR = "↑"
+            SCROLL_DN_INDICATOR = "↓"
+
+            prev_cursor_val = curses.curs_set(0)
+            if prev_cursor_val is not None and prev_cursor_val != curses.ERR:
+                prev_cursor = prev_cursor_val
+
+            while True:
+                # Очищаем окно
+                win.erase()
+                
+                # Рисуем рамку
+                win.attron(frame_border_attr)
+                win.border()
+                win.attroff(frame_border_attr)
+
+                # Отображаем текст ВНУТРИ рамки
+                for i in range(max_lines_visible):
+                    line_index = top + i
+                    if line_index < total_lines:
+                        display_line = lines[line_index]
+                        # Обрезаем строку если она слишком длинная
+                        max_text_width = view_w - 4  # -4 для рамки и отступов
+                        if len(display_line) > max_text_width:
+                            display_line = display_line[:max_text_width-3] + "..."
+                        
+                        try:
+                            win.addstr(1 + i, 2, display_line, help_text_attr)
+                        except curses.error:
+                            pass
+
+                # Добавляем указатели прокрутки
+                if top > 0:
+                    try:
+                        win.addstr(1, view_w - 3, SCROLL_UP_INDICATOR, scroll_indicator_attr)
+                    except curses.error:
+                        pass
+                        
+                if top < max_scroll:
+                    try:
+                        win.addstr(view_h - 2, view_w - 3, SCROLL_DN_INDICATOR, scroll_indicator_attr)
+                    except curses.error:
+                        pass
+
+                # Информация о позиции (если есть прокрутка)
+                if max_scroll > 0:
+                    scroll_info = f"{top + 1}/{max_scroll + 1}"
+                    try:
+                        win.addstr(view_h - 1, 2, scroll_info, scroll_indicator_attr)
+                    except curses.error:
+                        pass
+
+                # Обновляем экран
+                win.refresh()
+
+                # Обработка клавиш
+                key = win.getch()
+                
+                # Клавиши прокрутки - НЕ закрывают окно
+                if key in (curses.KEY_UP, ord("k"), ord("K")):
+                    if top > 0:
+                        top -= 1
+                elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+                    if top < max_scroll:
+                        top += 1
+                elif key == curses.KEY_PPAGE:  # Page Up
+                    top = max(0, top - max_lines_visible)
+                elif key == curses.KEY_NPAGE:  # Page Down
+                    top = min(max_scroll, top + max_lines_visible)
+                elif key in (curses.KEY_HOME, ord("g")):
+                    top = 0
+                elif key in (curses.KEY_END, ord("G")):
+                    top = max_scroll
+                else:
+                    # ВСЕ остальные клавиши закрывают окно
+                    break
+        
+        except curses.error as e:
+            logging.error(f"Curses error in help window: {e}", exc_info=True)
+            self._set_status_message(f"Help error: {e}")
+        except Exception as e:
+            logging.error(f"General error in help window: {e}", exc_info=True)
+            self._set_status_message(f"Help error: {e}")
+        finally:
+            if prev_cursor is not None:
+                try: 
+                    curses.curs_set(prev_cursor)
+                except curses.error: 
+                    pass
+
+            # Принудительно очищаем и обновляем весь экран
+            try:
+                self.stdscr.clear()
+                self.stdscr.refresh()
+            except curses.error:
+                pass
+
+            self._set_status_message("Help closed")
+            self._force_full_redraw = True
+            return True
+                
     # ==================== QUEUE PROCESSING =======================
     def _process_all_queues(self) -> bool:
         """
@@ -9890,7 +9776,6 @@ class SwayEditor:
         if items_from_msg_q > 0 and self.status_message != status_before_msg_q:
             any_state_changed_by_queues = True
 
-
         # --- 2. Shell command results queue (_shell_cmd_q) ---
         status_before_shell_q = self.status_message
         items_from_shell_q = 0
@@ -9905,7 +9790,6 @@ class SwayEditor:
                 break
         if items_from_shell_q > 0 and self.status_message != status_before_shell_q:
             any_state_changed_by_queues = True
-
 
         # --- 3. Git information updates queue (_git_q) ---
         # This queue receives (branch, user, commits) tuples from _fetch_git_info_async.
@@ -9930,7 +9814,6 @@ class SwayEditor:
         # This is a potential race if _handle_git_info queues to _msg_q.
         # A cleaner way: _handle_git_info directly sets self.status_message or returns a message.
         # For now, let's assume the effect of _handle_git_info on status is caught by main loop's status check.
-
 
         # --- 4. Git command results queue (_git_cmd_q) ---
         # This queue receives status messages from _run_git_command_async or "request_git_info_update".
@@ -10296,17 +10179,13 @@ class DrawScreen:
                 logical_col_abs += token_disp_width
                 continue
 
-            # ------------------------------------------------------------------
             # 1. Cut left part safely (do not split a wide char).
-            # ------------------------------------------------------------------
             visible_part = self._safe_cut_left(token_text, cells_cut_left)
             if not visible_part:
                 logical_col_abs += token_disp_width
                 continue
 
-            # ------------------------------------------------------------------
             # 2. Cut right part to fit remaining screen width.
-            # ------------------------------------------------------------------
             text_to_draw = ""
             drawn_w = 0
             for ch in visible_part:
@@ -10347,11 +10226,18 @@ class DrawScreen:
     def draw(self):
         """Основной метод отрисовки экрана."""
         try:
-            # 1. Обрабатываем фоновые очереди (auto-save, shell, git и т.п.)
+            # 1. Обрабатываем фоновые очереди (auto-save, shell, git и т.п.).
             self.editor._process_all_queues()
+
+            # Читаем входящие сообщения от Ruff-LSP (diagnostics и др.).
+            # Делаем это до расчёта geometry, чтобы возможное изменение
+            # self.status_message уже отразилось в статус-баре текущего кадра.
+            self.editor._process_lsp_queue()
+
+            # 2. Получаем размеры окна после обработки очередей/LSP.
             height, width = self.stdscr.getmaxyx()
 
-            # 2. Проверяем минимальный размер окна
+            # Проверяем минимальный размер окна
             if height < 5 or width < 20:
                 self._show_small_window_error(height, width)
                 self.editor.last_window_size = (height, width)
@@ -10385,7 +10271,7 @@ class DrawScreen:
             self._draw_status_bar()
 
             # 6. Рисуем всплывающую панель линтера (если она активна)
-            self._draw_lint_panel()   # <--- Вставить здесь обязательно!
+            self._draw_lint_panel() 
 
             # 7. Позиционируем курсор (если панель не активна)
             if not getattr(self.editor, 'lint_panel_active', False):
@@ -10472,9 +10358,6 @@ class DrawScreen:
         if getattr(self, "_next_lint_panel_hide_ts", 0) < time.time():
             self.editor.lint_panel_active = False
 
-
-
-
     def _show_small_window_error(self, height, width):
         """Отображает сообщение о слишком маленьком окне."""
         msg = f"Window too small ({width}x{height}). Minimum is 20x5."
@@ -10487,7 +10370,6 @@ class DrawScreen:
         except curses.error:
             # Если даже это не сработало, терминал в плохом состоянии
             pass
-
 
     def _draw_line_numbers(self):
         """Рисует номера строк."""
@@ -10528,7 +10410,6 @@ class DrawScreen:
                     self.stdscr.addstr(screen_row, 0, empty_num_str, line_num_color)
                  except curses.error as e:
                     logging.error(f"Curses error drawing empty line number background at ({screen_row}, 0): {e}")
-
 
     def _draw_lint_panel(self):
         """
@@ -10572,9 +10453,6 @@ class DrawScreen:
             )
         except curses.error as e:
             logging.error(f"Ошибка curses при отрисовке панели линтера: {e}")
-
-
-
 
     def _draw_search_highlights(self):
         """Накладывает подсветку найденных совпадений."""
@@ -10739,7 +10617,6 @@ class DrawScreen:
                         screen_y, draw_start_x, highlight_w, err,
                     )
 
-    
     def _draw_matching_brackets(self) -> None:
         """Render visual hint for the bracket pair under the caret.
 
@@ -10759,7 +10636,6 @@ class DrawScreen:
         """
         # Delegates to the editor; nothing to catch or return here.
         self.editor.highlight_matching_brackets()
-
 
     def truncate_string(self, s: str, max_width: int) -> str:
         """Return *s* clipped to **visual** width *max_width*.
@@ -10793,8 +10669,6 @@ class DrawScreen:
             consumed += w
 
         return "".join(result)
-
-
 
     def _draw_status_bar(self) -> None:
         """Draw the single-line status bar at the bottom of the screen.
@@ -10850,7 +10724,7 @@ class DrawScreen:
                     f"Col {self.editor.cursor_x + 1}"
                     f" | {'INS' if self.editor.insert_mode else 'REP'} ")
 
-            # ---------- right chunk — Git  ----------------------------------------  # >>>
+            # ---------- right chunk — Git  ----------------------------------------
             g_branch, _g_user, g_commits = self.editor.git_info
             git_enabled = self.editor.config.get("git", {}).get("enabled", True)
 
@@ -10865,7 +10739,6 @@ class DrawScreen:
                 if g_commits != "0":
                     git_txt += f" ({g_commits})"
                 git_attr = c_dirty if "*" in g_branch else c_git
-            # ----------------------------------------------------------------------  # <<<
 
             # ---------- middle chunk — message -------------------------------------
             msg      = self.editor.status_message or "Ready"
@@ -10905,7 +10778,6 @@ class DrawScreen:
                 self.editor._set_status_message("Status bar error (see log)")
             except Exception:
                 pass
-
 
     def _position_cursor(self) -> None:
         """Позиционирует курсор на экране, не позволяя ему «улетать» за Git-статус."""
@@ -10997,7 +10869,6 @@ class DrawScreen:
         self.editor.scroll_top = max(0, min(self.editor.scroll_top, len(self.editor.text) - text_area_height))
         logging.debug(f"Final adjusted scroll_top: {self.editor.scroll_top}")
 
-
     def _update_display(self):
         """Обновляет физический экран."""
         try:
@@ -11010,9 +10881,7 @@ class DrawScreen:
             pass # Продолжаем, надеясь, что главный цикл обработает
 
 
-
-
-def main_curses_function(stdscr): # Renamed from 'main' to avoid conflict with script entry point
+def main_curses_function(stdscr):
     """
     Initializes locale, and editor, then runs the main editor loop.
     This function is intended to be passed to curses.wrapper.
