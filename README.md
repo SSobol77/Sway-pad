@@ -202,8 +202,6 @@ You can override defaults per project or user, and dynamically reload config wit
 
 <br>
 
----
-
 <br>
 
 ## 🧩 DevOps Linters Integration for SwayPad
@@ -213,7 +211,7 @@ This repository provides a plugin module `lint_devops.py` to integrate fast and 
 
 <br>
 
-## 🔧 Requirements
+### 🔧 Requirements
 
 Make sure you have the following tools installed, depending on your platform:
 
@@ -221,7 +219,7 @@ Make sure you have the following tools installed, depending on your platform:
 * **pip** and/or **cargo** (Rust), **go** (Golang), **luarocks** (Lua)
 * Access to your system package manager (`nix-env`, `apt`, `brew`, etc.)
 
----
+<br>
 
 ## ⚙️ Installation
 
@@ -246,15 +244,15 @@ Or dry-run without installing:
 
 <br>
 
----
-
 <br>
 
 ## 📦 Linters and Setup Instructions
 
+<br>
+
 Each linter below includes installation instructions and dependency requirements:
 
-### ✅ Bash (shfmt)
+##### ✅ Bash (shfmt)
 
 * **Linter**: `shfmt`
 * **Install**:
@@ -265,7 +263,7 @@ Each linter below includes installation instructions and dependency requirements
   brew install shfmt              # macOS
   ```
 
-### ✅ YAML (yamlfmt)
+##### ✅ YAML (yamlfmt)
 
 * **Linter**: `yamlfmt` (requires Go)
 * **Install Go**:
@@ -280,7 +278,7 @@ Each linter below includes installation instructions and dependency requirements
   go install github.com/google/yamlfmt/cmd/yamlfmt@latest
   ```
 
-### ✅ Terraform (tfsec)
+##### ✅ Terraform (tfsec)
 
 * **Linter**: `tfsec`
 * **Install**:
@@ -289,7 +287,7 @@ Each linter below includes installation instructions and dependency requirements
   curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
   ```
 
-### ✅ Dockerfile (hadolint)
+##### ✅ Dockerfile (hadolint)
 
 * **Linter**: `hadolint`
 * **Install**:
@@ -299,7 +297,7 @@ Each linter below includes installation instructions and dependency requirements
   chmod +x hadolint && sudo mv hadolint /usr/local/bin/
   ```
 
-### ✅ Kubernetes YAML (datree)
+##### ✅ Kubernetes YAML (datree)
 
 * **Linter**: `datree`
 * **Install**:
@@ -308,7 +306,7 @@ Each linter below includes installation instructions and dependency requirements
   curl https://get.datree.io | /bin/bash
   ```
 
-### ✅ GitHub Actions (actionlint)
+##### ✅ GitHub Actions (actionlint)
 
 * **Linter**: `actionlint` (Go)
 * **Install**:
@@ -317,7 +315,7 @@ Each linter below includes installation instructions and dependency requirements
   go install github.com/rhysd/actionlint/cmd/actionlint@latest
   ```
 
-### ✅ Ansible (ansible-lint)
+##### ✅ Ansible (ansible-lint)
 
 * **Linter**: `ansible-lint`
 * **Install**:
@@ -326,7 +324,7 @@ Each linter below includes installation instructions and dependency requirements
   pip install ansible-lint
   ```
 
-### ✅ Jsonnet (jsonnetfmt)
+##### ✅ Jsonnet (jsonnetfmt)
 
 * **Linter**: `jsonnetfmt`
 * **Install**:
@@ -335,7 +333,7 @@ Each linter below includes installation instructions and dependency requirements
   sudo apt install jsonnet
   ```
 
-### ✅ Helm (helm lint)
+##### ✅ Helm (helm lint)
 
 * **Tool**: `helm`
 * **Install**:
@@ -344,7 +342,7 @@ Each linter below includes installation instructions and dependency requirements
   curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
   ```
 
-### ✅ Docker Compose
+##### ✅ Docker Compose
 
 * **Tool**: `docker-compose`
 * **Install**:
@@ -353,7 +351,7 @@ Each linter below includes installation instructions and dependency requirements
   sudo apt install docker-compose
   ```
 
-### ✅ Lua (luacheck)
+##### ✅ Lua (luacheck)
 
 * **Linter**: `luacheck`
 * **Install**:
@@ -363,7 +361,7 @@ Each linter below includes installation instructions and dependency requirements
   sudo luarocks install luacheck
   ```
 
-### ✅ Nix (nix-linter)
+##### ✅ Nix (nix-linter)
 
 * **Linter**: `nix-linter`
 * **Install**:
@@ -372,7 +370,7 @@ Each linter below includes installation instructions and dependency requirements
   nix-env -iA nixpkgs.nix-linter
   ```
 
-### ✅ TOML (taplo)
+##### ✅ TOML (taplo)
 
 * **Linter**: `taplo`
 * **Install**:
@@ -381,7 +379,7 @@ Each linter below includes installation instructions and dependency requirements
   cargo install taplo-cli --locked
   ```
 
-### ✅ Go (golangci-lint)
+##### ✅ Go (golangci-lint)
 
 * **Linter**: `golangci-lint`
 * **Install Go** (if not yet): see YAML section
@@ -391,7 +389,7 @@ Each linter below includes installation instructions and dependency requirements
   go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
   ```
 
-### ✅ C (clang-tidy)
+##### ✅ C (clang-tidy)
 
 * **Linter**: `clang-tidy`
 * **Install**:
@@ -400,7 +398,7 @@ Each linter below includes installation instructions and dependency requirements
   sudo apt install clang-tidy
   ```
 
-### ✅ Rust (cargo clippy)
+##### ✅ Rust (cargo clippy)
 
 * **Linter**: `clippy`
 * **Install**:
@@ -441,7 +439,7 @@ Each linter below includes installation instructions and dependency requirements
 
 <br>
 
-### 📬 Contact
+#### 📬 Contact
 
 **Sergey Sobolewski**  
 
