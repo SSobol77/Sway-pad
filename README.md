@@ -121,8 +121,6 @@ Whether you’re editing YAML inside a container or deploying infrastructure ove
 
 <br>
 
----
-
 <br>
 
 ## ⚡ Quick Start
