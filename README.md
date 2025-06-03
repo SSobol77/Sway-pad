@@ -16,20 +16,6 @@
   </a>
 </p>
 
----
-
-> **🚫 Ethical Restrictions**
->
-> This software must not be used for:
->
-> * Military applications or defense systems
-> * Mass surveillance or tracking systems
-> * Projects violating international human rights conventions
-
-<br>
-
----
-
 <br>
 
 <br>
