@@ -39,6 +39,8 @@
 
 <br>
 
+<br>
+
 ## ✨ Overview
 
 **Sway-pad** is a fast, minimal, and extensible terminal-based code editor written in Python — designed with the needs of DevOps engineers, SREs, and sysadmins in mind.
@@ -61,8 +63,6 @@ Whether you’re editing YAML inside a container or deploying infrastructure ove
 * 🪶 **Lightweight design**: no daemons, no background agents — just your terminal and Python
 
 <br>
-
----
 
 <br>
 
