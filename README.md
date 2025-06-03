@@ -7,6 +7,7 @@
     <img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3">
   </a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue?logo=python" alt="Python Version">
+  <img src="https://img.shields.io/badge/NixOS-5277C3?logo=nixos&logoColor=white" alt="NixOS support">
   <img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black" alt="Linux support">
   <img src="https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white" alt="FreeBSD support">
   <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white" alt="Windows support">
@@ -29,8 +30,6 @@
 
 <h1 align="center">🌊 Sway-pad</h1>
 <h3 align="center">Cross-platform Terminal Editor for Modern DevOps Engineers</h3>
-
----
 
 <br>
 
@@ -163,7 +162,7 @@ git_diff = { enabled = true, hotkey = "f5" }
 
 You can override defaults per project or user, and dynamically reload config without restarting the editor.
 
----
+<br>
 
 ### 💡 Use Cases
 
@@ -207,9 +206,6 @@ You can override defaults per project or user, and dynamically reload config wit
 
 This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Python, Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
 
-<br>
-
----
 
 <br>
 
