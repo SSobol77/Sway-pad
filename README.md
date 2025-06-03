@@ -257,17 +257,235 @@ flake8 . --count --max-complexity=10 --statistics
 
 <br>
 
+---
+
+# DevOps Linters Integration for SwayPad
+
+This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
+
+---
+
+## 🔧 Requirements
+
+Make sure you have the following tools installed, depending on your platform:
+
+* **Python 3.11+**
+* **pip** and/or **cargo** (Rust), **go** (Golang), **luarocks** (Lua)
+* Access to your system package manager (`nix-env`, `apt`, `brew`, etc.)
+
+---
+
+## ⚙️ Installation
+
+You can run the following script to install all supported linters:
+
+```bash
+chmod +x install_devops_linters.sh
+./install_devops_linters.sh
+```
+
+You can also selectively install only some linters:
+
+```bash
+./install_devops_linters.sh --only go,rust,yaml
+```
+
+Or dry-run without installing:
+
+```bash
+./install_devops_linters.sh --dry-run
+```
+
+---
+
+## 📦 Linters and Setup Instructions
+
+Each linter below includes installation instructions and dependency requirements:
+
+### ✅ Bash (shfmt)
+
+* **Linter**: `shfmt`
+* **Install**:
+
+  ```bash
+  nix-env -iA nixpkgs.shfmt       # NixOS
+  sudo apt install -y shfmt       # Debian/Ubuntu
+  brew install shfmt              # macOS
+  ```
+
+### ✅ YAML (yamlfmt)
+
+* **Linter**: `yamlfmt` (requires Go)
+* **Install Go**:
+
+  ```bash
+  sudo apt install golang         # Debian/Ubuntu
+  nix-env -iA nixpkgs.go          # NixOS
+  ```
+* **Install yamlfmt**:
+
+  ```bash
+  go install github.com/google/yamlfmt/cmd/yamlfmt@latest
+  ```
+
+### ✅ Terraform (tfsec)
+
+* **Linter**: `tfsec`
+* **Install**:
+
+  ```bash
+  curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+  ```
+
+### ✅ Dockerfile (hadolint)
+
+* **Linter**: `hadolint`
+* **Install**:
+
+  ```bash
+  wget -O hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+  chmod +x hadolint && sudo mv hadolint /usr/local/bin/
+  ```
+
+### ✅ Kubernetes YAML (datree)
+
+* **Linter**: `datree`
+* **Install**:
+
+  ```bash
+  curl https://get.datree.io | /bin/bash
+  ```
+
+### ✅ GitHub Actions (actionlint)
+
+* **Linter**: `actionlint` (Go)
+* **Install**:
+
+  ```bash
+  go install github.com/rhysd/actionlint/cmd/actionlint@latest
+  ```
+
+### ✅ Ansible (ansible-lint)
+
+* **Linter**: `ansible-lint`
+* **Install**:
+
+  ```bash
+  pip install ansible-lint
+  ```
+
+### ✅ Jsonnet (jsonnetfmt)
+
+* **Linter**: `jsonnetfmt`
+* **Install**:
+
+  ```bash
+  sudo apt install jsonnet
+  ```
+
+### ✅ Helm (helm lint)
+
+* **Tool**: `helm`
+* **Install**:
+
+  ```bash
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  ```
+
+### ✅ Docker Compose
+
+* **Tool**: `docker-compose`
+* **Install**:
+
+  ```bash
+  sudo apt install docker-compose
+  ```
+
+### ✅ Lua (luacheck)
+
+* **Linter**: `luacheck`
+* **Install**:
+
+  ```bash
+  sudo apt install luarocks
+  sudo luarocks install luacheck
+  ```
+
+### ✅ Nix (nix-linter)
+
+* **Linter**: `nix-linter`
+* **Install**:
+
+  ```bash
+  nix-env -iA nixpkgs.nix-linter
+  ```
+
+### ✅ TOML (taplo)
+
+* **Linter**: `taplo`
+* **Install**:
+
+  ```bash
+  cargo install taplo-cli --locked
+  ```
+
+### ✅ Go (golangci-lint)
+
+* **Linter**: `golangci-lint`
+* **Install Go** (if not yet): see YAML section
+* **Install**:
+
+  ```bash
+  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+  ```
+
+### ✅ C (clang-tidy)
+
+* **Linter**: `clang-tidy`
+* **Install**:
+
+  ```bash
+  sudo apt install clang-tidy
+  ```
+
+### ✅ Rust (cargo clippy)
+
+* **Linter**: `clippy`
+* **Install**:
+
+  ```bash
+  rustup component add clippy
+  ```
+
+---
+
+### 📌 License
+
+This integration module is MIT-licensed. All linters are third-party tools with their own licenses.
+
+---
+
+### 💬 Questions & Contributions
+
+Feel free to open issues or submit PRs for new linters, documentation improvements, or integration support.
+
+<br>
+
+---
+
+<br>
+
+
 ## 📜 License
 
 **GNU General Public License v3.0**  
 Commercial use requires explicit permission.  
 Full text available in [LICENSE](LICENSE).
 
----
 
 <br>
 
-## 📬 Contact
+### 📬 Contact
 
 **Sergey Sobolewski**  
 
