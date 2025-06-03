@@ -28,15 +28,21 @@ import termios
 import curses.ascii
 import signal 
 import json
-import uuid
+import importlib.util
+#import uuid
 
 from pygments import lex
 from pygments.lexer import RegexLexer
 from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
-from pygments.token import Token, Comment, Name, Punctuation
+from pygments.token import Token, Comment
 from wcwidth import wcwidth, wcswidth
 from typing import Callable, Tuple, Optional, List, Dict, Any, Union 
-from collections import OrderedDict 
+
+
+HAS_DEVOPS_LINTERS = importlib.util.find_spec("lint_devops") is not None
+
+if HAS_DEVOPS_LINTERS:
+    import lint_devops
 
 
 # --- Default Encoding Setup ---
@@ -213,10 +219,8 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
         reported to *stderr* and the logging subsystem continues with a
         best-effort configuration.
     """
-
     if config is None:
         config = {}
-
     # --- Main Application Logger (e.g., for editor.log) ---
     log_filename = "editor.log"
     # Use .get safely for nested dictionaries
@@ -325,34 +329,14 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     if console_handler:
         logging.info(f"Console logging to stderr at level: {logging.getLevelName(console_handler.level)}.")
     if error_file_handler:
-        logging.info(f"Error logging to 'error.log' at level: ERROR.")
-
+        logging.info("Error logging to 'error.log' at level: ERROR.")
 
 
 # ──────────────────────────── Global loggers ────────────────────────────
 # These logger objects are **created at import-time** but remain
 # *unconfigured* until ``setup_logging()`` attaches appropriate handlers.
-#
-# * ``logger`` – primary application logger for everything under the
-#   ``sway`` namespace (INFO, DEBUG, WARNING, …).
-# * ``KEY_LOGGER`` – dedicated channel for low-level key-event tracing.
-#   It is kept separate so that verbose key streams can be enabled or
-#   silenced independently from the main log flow.  By default the logger
-#   does **not** propagate to the root handler; see ``setup_logging`` for
-#   the exact wiring.
-#
-# Example:
-#
-#     logger.info("File saved: %s", path)
-#     KEY_LOGGER.debug("Key pressed: %#x", keycode)
-#
-# Both loggers inherit their final log-level / handlers from the call site
-# that executes ``setup_logging()`` (typically the ``__main__`` block or the
-# test harness).
 logger = logging.getLogger("sway")              # main application logger
 KEY_LOGGER = logging.getLogger("sway.keyevents")  # raw key-press trace
-
-
 
 # ─────────────────── File Icon Retrieval Function ───────────────────
 def get_file_icon(filename: Optional[str], config: Dict[str, Any]) -> str:
@@ -612,7 +596,7 @@ def load_config() -> dict:
             "copy": "ctrl+c",
             "cut": "ctrl+x",
             "undo": "ctrl+z",
-            "redo": "shift+z", 
+            "redo": "ctrl+y", 
             "lint": "f4",
             "new_file": "f2",       
             "open_file": "ctrl+o",
@@ -626,7 +610,11 @@ def load_config() -> dict:
             "find": "ctrl+f", 
             "find_next": "f3",
             "search_and_replace": "f6",
-            "help": "f1"     
+            "help": "f1",
+            "extend_selection_left":  ["shift+left", "alt-h"],
+            "extend_selection_right": ["shift+right", "alt-l"],
+            "extend_selection_up":    ["shift+up", "alt-k"],
+            "extend_selection_down":  ["shift+down", "alt-j"],     
         },
         "editor": {
             "use_system_clipboard": True,
@@ -969,8 +957,11 @@ class SwayEditor:
                 "supported_formats": {},
             }
 
+        self.user_colors = self.config.get("colors", {})   # <--- ВСТАВИТЬ СЮДА
+
         self.colors: dict[str, int] = {}
         self.init_colors()
+
 
         # ───────────────────── Clipboard support ─────────────────────────────
         self.use_system_clipboard = self.config["editor"].get(
@@ -1138,369 +1129,548 @@ class SwayEditor:
         logging.info("SwayEditor closed successfully.")
 
     # ───────────────────── Keybinding Initialization ─────────────────────
-    def _load_keybindings(self) -> Dict[str, int]:
+    def _load_keybindings(self) -> dict[str, list[Union[int, str]]]:
         """
         Reads the [keybindings] section from config.toml and the default keybindings,
         then parses them into a dictionary mapping action names to key codes.
 
         Returns:
-            Dict[str, int]: A dictionary where keys are action names (e.g., "save_file")
-                            and values are the integer key codes.
+            dict[str, list[Union[int, str]]]: Keys — action names (e.g., "save_file"),
+                                            values — список key-кодов (int или str).
         """
-        default_keybindings: Dict[str, Union[str, int]] = { # Allow int for defaults if needed
-            "delete": "del",
-            "paste": "ctrl+v", # 22
-            "copy": "ctrl+c",  # 3
-            "cut": "ctrl+x",   # 24
-            "undo": "ctrl+z",  # 26
-            "redo": "shift+z", # 90
-            "new_file": "f2",       # 266
-            "open_file": "ctrl+o", # 15
-            "save_file": "ctrl+s", # 19
-            "save_as": "f5",        # 269
-            "select_all": "ctrl+a", # 1
-            "quit": "ctrl+q",       # 17
-            "goto_line": "ctrl+g",  # 7
-            "git_menu": "f9",       # 273
-            "help": "f1",           # 265
-            "find": "ctrl+f",       # 6
-            "find_next": "f3",      # 267
-            "search_and_replace": "f6", # 270
-            "cancel_operation": "esc", # 27
-            "tab": "tab",              # 9
-            "shift_tab": "shift+tab",  # 353
-            "lint": "f4",              # 268
-            "comment_selected_lines": "ctrl+/", # 31 (ASCII US)
-            "uncomment_selected_lines": "shift+/", # Should become ord('?') = 63
+        import curses
+        default_keybindings: dict[str, Union[str, int, list[Union[str, int]]]] = {
+            "delete": ["del", curses.KEY_DC],
+            "paste": ["ctrl+v", 22],
+            "copy": ["ctrl+c", 3],
+            "cut": ["ctrl+x", 24],
+            "undo": ["ctrl+z", 26, 407],
+            "redo": ["ctrl+y", 558, 25],
+            "new_file": ["f2", 266],
+            "open_file": ["ctrl+o", 15],
+            "save_file": ["ctrl+s", 19],
+            "save_as": ["f5", 269],
+            "select_all": ["ctrl+a", 1],
+            "quit": ["ctrl+q", 17],
+            "goto_line": ["ctrl+g", 7],
+            "git_menu": ["f9", 273],
+            "help": ["f1", 265],
+            "find": ["ctrl+f", 6],
+            "find_next": ["f3", 267],
+            "search_and_replace": ["f6", 270],
+            "cancel_operation": ["esc", 27],
+            "tab": ["tab", 9],
+            "shift_tab": ["shift+tab", 353],
+            "lint": ["f4", 268],
+            "do_comment_block": ["ctrl+/", 31, 263],
+            "do_uncomment_block": ["ctrl+\\", 28],
+            "handle_home": ["home", curses.KEY_HOME, 262],
+            "handle_end": ["end", getattr(curses, 'KEY_END', curses.KEY_LL), 360],
+            "handle_page_up": ["pageup", curses.KEY_PPAGE, 339],
+            "handle_page_down": ["pagedown", curses.KEY_NPAGE, 338],
+            "toggle_insert_mode": ["insert", curses.KEY_IC, 331],
+            "select_to_home": [curses.KEY_SHOME],
+            "select_to_end": [curses.KEY_SEND],
+            # и вот тут поддержка Alt и Shift биндингов для выделения:
+            "extend_selection_up":    ["shift+up", getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)), "alt+up"],
+            "extend_selection_down":  ["shift+down", getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)), "alt+j"],
+            "extend_selection_left":  ["shift+left", curses.KEY_SLEFT, "alt+h"],
+            "extend_selection_right": ["shift+right", curses.KEY_SRIGHT, "alt+l"],
         }
-        
+
         user_keybindings_config = self.config.get("keybindings", {})
-        parsed_keybindings: Dict[str, int] = {}
+        parsed_keybindings: dict[str, list[Union[int, str]]] = {}
 
-        for action, default_value in default_keybindings.items():
-            key_value_from_config: Union[str, int] = user_keybindings_config.get(action, default_value)
+        for action, default_value_spec in default_keybindings.items():
+            key_value_spec_from_config = user_keybindings_config.get(action, default_value_spec)
 
-            if not key_value_from_config: 
-                logging.debug(f"Keybinding for action '{action}' is disabled or empty in configuration.")
+            if not key_value_spec_from_config:
+                logging.debug(f"Keybinding for action '{action}' is disabled or empty.")
                 continue
-            
-            try:
-                # _decode_keystring handles both strings and integers.
-                key_code = self._decode_keystring(key_value_from_config) 
-                parsed_keybindings[action] = key_code
-            except ValueError as e:
-                logging.error(
-                    f"Error parsing keybinding for action '{action}' with value '{key_value_from_config!r}': {e}. "
-                    f"This action might not be triggerable via keyboard."
-                )
-            except Exception as e_unhandled:
-                 logging.error(
-                    f"Unexpected error parsing keybinding for action '{action}' with value '{key_value_from_config!r}': {e_unhandled}",
-                    exc_info=True
-                )
 
-        logging.debug(f"Loaded and parsed keybindings (action -> key_code): {parsed_keybindings}")
+            key_codes_for_action: list[Union[int, str]] = []
+
+            specs_to_process: list[Union[str, int]]
+            if isinstance(key_value_spec_from_config, list):
+                specs_to_process = key_value_spec_from_config
+            elif isinstance(key_value_spec_from_config, str) and "|" in key_value_spec_from_config:
+                specs_to_process = [s.strip() for s in key_value_spec_from_config.split('|')]
+            else:
+                specs_to_process = [key_value_spec_from_config]
+
+            for key_spec_item in specs_to_process:
+                if not key_spec_item and key_spec_item != 0:
+                    continue
+                try:
+                    key_code = self._decode_keystring(key_spec_item)
+                    if key_code not in key_codes_for_action:
+                        key_codes_for_action.append(key_code)
+                except ValueError as e:
+                    logging.error(
+                        f"Error parsing keybinding item '{key_spec_item!r}' for action '{action}': {e}. "
+                        f"This specific binding for the action will be ignored."
+                    )
+                except Exception as e_unhandled:
+                    logging.error(
+                        f"Unexpected error parsing keybinding item '{key_spec_item!r}' for action '{action}': {e_unhandled}",
+                        exc_info=True
+                    )
+
+            if key_codes_for_action:
+                parsed_keybindings[action] = key_codes_for_action
+            else:
+                logging.warning(f"No valid key codes found for action '{action}' after parsing. It will not be bound.")
+
+        logging.debug(f"Loaded and parsed keybindings (action -> list of key_codes): {parsed_keybindings}")
         return parsed_keybindings
-    
 
-    # ----- Decode ----------------------------------------------------------- 
-    def _decode_keystring(self, key_input: Union[str, int]) -> int:
-        """
-        Translate a human-readable key specification into a *curses* key code.
 
-        The helper accepts either:
-
-        * **Integer** – already a platform-specific key code (returned
-        unchanged).
-        * **String** – symbolic key description using lowercase tokens and the
-        “+” separator, e.g. ``"ctrl+s"``, ``"f5"``, ``"shift+left"`` or the
-        single character ``"/"``.  The routine resolves common aliases,
-        function keys ``F1–F12``, cursor keys, and control/meta
-        combinations.  Unsupported or malformed strings raise
-        :class:`ValueError`.
-
-        The *Alt* modifier is encoded by OR’ing ``0x200`` to the base code
-        (gnome-terminal/xterm convention).  *Shift* is handled only where
-        terminfo defines dedicated shifted key constants; otherwise a warning
-        is logged because reliable cross-terminal support is not possible.
+    def _decode_keystring(self, key_input: Union[str, int]) -> Union[int, str]:
+        """Converts a key binding specification to an integer key code or a logical string (for Alt-combos).
 
         Args:
-            key_input: Either an ``int`` (platform key code) or a ``str``
-                like ``"ctrl+/"``.  The string is case-insensitive and leading
-                / trailing whitespace is ignored.
-
-        Returns:
-            The resolved *curses* integer key code ready to be compared
-            against the value returned by :pyfunc:`curses.get_wch()`.
+            key_input (Union[str, int]): Key code as integer or string specification (e.g. 'ctrl+x', 'alt-h').
 
         Raises:
-            ValueError: If the string is empty, refers to an unknown key name,
-            or contains an invalid modifier combination.
+            ValueError: If input cannot be parsed.
 
-        Example:
-            >>> _decode_keystring("ctrl+z")
-            26
+        Returns:
+            Union[int, str]: Integer key code or string for logical Alt combinations.
         """
+        import curses
+        import logging
 
-        if isinstance(key_input, int): 
-            logging.debug(f"_decode_keystring: Received integer key code {key_input}, returning as is.")
-            return key_input # This correctly handles integers from config
+        if isinstance(key_input, int):
+            return key_input
 
-        if not isinstance(key_input, str): # Should not happen if Union[str, int] is enforced by caller
+        if not isinstance(key_input, str):
             raise ValueError(f"Invalid key_input type: {type(key_input)}. Expected str or int.")
 
         original_key_string = key_input
-        processed_key_string = key_input.strip().lower()
-        
-        if not processed_key_string:
+        s = key_input.strip().lower()
+
+        if not s:
             raise ValueError("Key string cannot be empty.")
 
         named_keys_map: Dict[str, int] = {
-            'f1': curses.KEY_F1,  'f2': curses.KEY_F2,  'f3': curses.KEY_F3,
-            'f4': getattr(curses, 'KEY_F4', 268),  'f5': getattr(curses, 'KEY_F5', 269),
-            'f6': getattr(curses, 'KEY_F6', 270),  'f7': getattr(curses, 'KEY_F7', 271),
-            'f8': getattr(curses, 'KEY_F8', 272),  'f9': getattr(curses, 'KEY_F9', 273),
-            'f10': getattr(curses, 'KEY_F10', 274), 'f11': getattr(curses, 'KEY_F11', 275),
-            'f12': getattr(curses, 'KEY_F12', 276),
-            'left': curses.KEY_LEFT,     'right': curses.KEY_RIGHT,
-            'up': curses.KEY_UP,         'down': curses.KEY_DOWN,
-            'home': curses.KEY_HOME,     'end': getattr(curses, 'KEY_END', curses.KEY_LL),
-            'pageup': curses.KEY_PPAGE,  'pgup': curses.KEY_PPAGE,
+            'f1': curses.KEY_F1, 'f2': curses.KEY_F2, 'f3': curses.KEY_F3,
+            'f4': curses.KEY_F4, 'f5': curses.KEY_F5, 'f6': curses.KEY_F6,
+            'f7': curses.KEY_F7, 'f8': curses.KEY_F8, 'f9': curses.KEY_F9,
+            'f10': curses.KEY_F10, 'f11': curses.KEY_F11, 'f12': curses.KEY_F12,
+            'left': curses.KEY_LEFT, 'right': curses.KEY_RIGHT,
+            'up': curses.KEY_UP, 'down': curses.KEY_DOWN,
+            'home': curses.KEY_HOME, 'end': getattr(curses, 'KEY_END', curses.KEY_LL),
+            'pageup': curses.KEY_PPAGE, 'pgup': curses.KEY_PPAGE,
             'pagedown': curses.KEY_NPAGE, 'pgdn': curses.KEY_NPAGE,
-            'delete': curses.KEY_DC,     'del': curses.KEY_DC,
-            'backspace': curses.KEY_BACKSPACE, 
-            'insert': getattr(curses, 'KEY_IC', 331),
-            'tab': curses.ascii.TAB, 
-            'enter': curses.KEY_ENTER, 
-            'return': curses.KEY_ENTER,
+            'delete': curses.KEY_DC, 'del': curses.KEY_DC,
+            'backspace': curses.KEY_BACKSPACE,
+            'insert': curses.KEY_IC,
+            'tab': 9,
+            'enter': curses.KEY_ENTER, 'return': curses.KEY_ENTER,
             'space': ord(' '),
-            'esc': 27,                   'escape': 27,
-            'shift+left': curses.KEY_SLEFT,    'sleft': curses.KEY_SLEFT,
-            'shift+right': curses.KEY_SRIGHT,  'sright': curses.KEY_SRIGHT,
-            'shift+up': getattr(curses, 'KEY_SR', 337),
-            'shift+down': getattr(curses, 'KEY_SF', 336),
+            'esc': 27, 'escape': 27,
+            'shift+left': curses.KEY_SLEFT, 'sleft': curses.KEY_SLEFT,
+            'shift+right': curses.KEY_SRIGHT, 'sright': curses.KEY_SRIGHT,
+            'shift+up': getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)),
+            'sup': getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)),
+            'shift+down': getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)),
+            'sdown': getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)),
             'shift+home': curses.KEY_SHOME,
             'shift+end': curses.KEY_SEND,
             'shift+pageup': getattr(curses, 'KEY_SPPAGE', getattr(curses, 'KEY_SPREVIOUS', 337)),
             'shift+pagedown': getattr(curses, 'KEY_SNPAGE', getattr(curses, 'KEY_SNEXT', 336)),
             'shift+tab': getattr(curses, 'KEY_BTAB', 353),
-            '/': ord('/'), 
-            '?': ord('?'), 
+            '/': ord('/'), '?': ord('?'), '\\': ord('\\'),
         }
 
-        if processed_key_string in named_keys_map:
-            return named_keys_map[processed_key_string]
+        # Логируем попытку парсинга
+        logging.debug(f"_decode_keystring: Parsing key_input: {original_key_string!r} (normalized: {s!r})")
 
-        parts = processed_key_string.split('+')
-        base_key_part = parts[-1] 
-        modifier_parts = set(parts[:-1]) 
+        # --- Поддержка alt-хоткеев: если строка уже alt-*, возвращаем её как есть (для TTY) ---
+        if s.startswith("alt-"):
+            logging.debug(f"_decode_keystring: Interpreted as logical Alt-binding: {s!r}")
+            return s
 
-        base_key_code: int
-        
-        if "ctrl" in modifier_parts and base_key_part == "/":
-            base_key_code = 31 
-            modifier_parts.remove("ctrl") 
-        elif "shift" in modifier_parts and base_key_part == "/":
-            base_key_code = ord('?') 
-            modifier_parts.remove("shift")
-        elif base_key_part in named_keys_map: 
-            base_key_code = named_keys_map[base_key_part]
-        elif len(base_key_part) == 1:   
-            if "shift" in modifier_parts and 'a' <= base_key_part <= 'z':
-                base_key_code = ord(base_key_part.upper())
-                modifier_parts.remove("shift") 
-            else:
-                base_key_code = ord(base_key_part) 
+        # First, check for an exact match in the named_keys_map
+        if s in named_keys_map:
+            code = named_keys_map[s]
+            logging.debug(f"_decode_keystring: Named key {s!r} resolved to code {code}")
+            return code
+
+        # If no full match, try to parse into modifiers + base key
+        parts = s.split('+')
+        base_key_str = parts[-1].strip()
+        modifiers = set(p.strip() for p in parts[:-1])
+
+        base_code: int
+
+        if base_key_str in named_keys_map:
+            base_code = named_keys_map[base_key_str]
+            logging.debug(f"_decode_keystring: Base key {base_key_str!r} resolved to code {base_code}")
+        elif len(base_key_str) == 1:
+            base_code = ord(base_key_str)
+            logging.debug(f"_decode_keystring: Base key {base_key_str!r} resolved to ASCII {base_code}")
         else:
-            raise ValueError(f"Unknown base key '{base_key_part}' in key string '{original_key_string}'")
+            logging.error(f"_decode_keystring: Unknown base key '{base_key_str}' in '{original_key_string}' after checking named_keys_map.")
+            raise ValueError(f"Unknown base key '{base_key_str}' in '{original_key_string}' after checking named_keys_map.")
 
-        if "ctrl" in modifier_parts:
-            # This check is now after explicit ctrl+/
-            # Ensure base_key_code corresponds to a character before calling chr()
-            char_equiv = ''
-            try:
-                char_equiv = chr(base_key_code)
-            except ValueError: # base_key_code might be a curses.KEY_* constant
-                logging.warning(f"Ctrl modifier with non-char base_key_code {base_key_code} in '{original_key_string}'. This might not work as expected.")
-            
-            if 'a' <= char_equiv.lower() <= 'z': 
-                char_lower = char_equiv.lower()
-                base_key_code = ord(char_lower) - ord('a') + 1
-            # else: Ctrl on non-alphabetic handled by specific cases or direct integer codes from get_wch()
-
-        if "alt" in modifier_parts:
-            base_key_code |= 0x200 
-            logging.debug(f"Applied custom Alt modifier (|=0x200) to key '{base_key_part}', resulting code: {base_key_code}")
-        
-        if "shift" in modifier_parts: 
-            logging.warning(f"Potentially unhandled 'shift' modifier for base key '{base_key_part}' (resulting code {base_key_code}) in '{original_key_string}'. Key might not work as expected unless get_wch() returns this specific code.")
-
-        return base_key_code
-    
-    # ───────────────────── Action Map Setup ─────────────────────
-    def _setup_action_map(self) -> Dict[int, Callable[..., Any]]:
-        """
-        Build the **action-map**: an integer key-code → bound-callable dict.
-
-        The map is created in three passes:
-
-        1. **User / default key-bindings** – every entry returned by
-           :pyattr:`self.keybindings` is looked up in an *action-to-method*
-           registry and inserted into the result dictionary.  Duplicate key
-           codes are allowed; the **last** binding wins with a warning in
-           the log.
-        2. **Built-in `curses` fall-backs** – hard-wired navigation and
-           editing keys (arrows, Home/End, Backspace, etc.) are added with
-           :pymeth:`dict.setdefault`, so they do **not** override explicit
-           user bindings.
-        3. **Linting shortcut** – ensures *F4* always triggers linting (or
-           opens the lint panel) when the key is still unmapped after the
-           previous passes.
-
-        All decisions are logged at ``DEBUG`` level; conflicts between
-        different bindings for the same key code produce a ``WARNING``.
-
-        Returns:
-            Dict[int, Callable[..., Any]]: Final action map where each
-            integer key code is associated with a bound method of
-            :class:`SwayEditor`.
-
-        Side Effects:
-            * Emits diagnostics via :pymod:`logging`.
-            * Does **not** modify any other editor state.
-
-        Example:
-            >>> editor.keybindings["copy"] = _decode_keystring("ctrl+c")
-            >>> action_map = editor._setup_action_map()
-            >>> action_map[3]                          # Ctrl-C
-            <bound method SwayEditor.copy of <SwayEditor …>>
-        """
-        # Map of action names (strings) to their corresponding methods in the editor.
-        action_to_method_map: Dict[str, Callable] = {
-            "open_file":  self.open_file,
-            "save_file":  self.save_file,
-            "save_as":    self.save_file_as,
-            "new_file":   self.new_file,
-            "git_menu":   self.integrate_git,
-            "copy":       self.copy,
-            "cut":        self.cut,
-            "paste":      self.paste,
-            "undo":       self.undo,
-            "redo":       self.redo,
-            "handle_home":self.handle_home, # Note: KEY_HOME is also handled below
-            "handle_end": self.handle_end,   # Note: KEY_END is also handled below
-            "extend_selection_right": self.extend_selection_right,
-            "extend_selection_left":  self.extend_selection_left,
-            "select_to_home":         self.select_to_home,
-            "select_to_end":          self.select_to_end,
-            "extend_selection_up":    self.extend_selection_up,
-            "extend_selection_down":  self.extend_selection_down,
-            "find":                   self.find_prompt,
-            "find_next":              self.find_next,
-            "search_and_replace":     self.search_and_replace,
-            "goto_line":              self.goto_line,
-            "help":                   self.show_help,
-            "cancel_operation":       self.handle_escape, # Changed from self.cancel_operation
-            "select_all":             self.select_all,
-            "delete":                 self.handle_delete, # Note: KEY_DC is also handled below
-            "quit":                   self.exit_editor,
-            "tab":                    self.handle_smart_tab,
-            "shift_tab":              self.handle_smart_unindent,
-            "lint":                  self.run_lint_async,  # call Ruff-LSP
-            "show_lint_panel": self.show_lint_panel, # Could be same as "lint"
-            "comment_selected_lines": self.do_comment_block,
-            "uncomment_selected_lines": self.do_uncomment_block,
-        }
-
-        # Final map: key_code (int) -> method (Callable)
-        final_key_action_map: Dict[int, Callable] = {}
-
-        # Populate from self.keybindings (which came from _load_keybindings)
-        for action_name, key_code_value in self.keybindings.items():
-            method_callable = action_to_method_map.get(action_name)
-            if method_callable:
-                if key_code_value is not None: # Should always be an int after _decode_keystring
-                    if key_code_value in final_key_action_map and final_key_action_map[key_code_value] != method_callable:
-                        logging.warning(
-                            f"Keybinding conflict! Key code {key_code_value} for action '{action_name}' "
-                            f"(method '{method_callable.__name__}') is already assigned to method "
-                            f"'{final_key_action_map[key_code_value].__name__}'. "
-                            f"The binding for '{action_name}' will overwrite the previous one."
-                        )
-                    final_key_action_map[key_code_value] = method_callable
-                    logging.debug(
-                        f"Mapped from config/defaults: Action '{action_name}' (key code {key_code_value}) "
-                        f"-> Method '{method_callable.__name__}'"
-                    )
+        # Apply modifiers
+        if "ctrl" in modifiers:
+            modifiers.remove("ctrl")
+            if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1:
+                base_code = ord(base_key_str) - ord('a') + 1
+                logging.debug(f"_decode_keystring: CTRL modifier applied to '{base_key_str}', result code: {base_code}")
+            elif base_key_str == '/':
+                base_code = 31
+                logging.debug("_decode_keystring: CTRL modifier applied to '/', result code: 31")
+            elif base_key_str == '\\':
+                base_code = 28
+                logging.debug("_decode_keystring: CTRL modifier applied to '\\', result code: 28")
+            elif base_key_str == '[':
+                base_code = 27
+                logging.debug("_decode_keystring: CTRL modifier applied to '[', result code: 27")
+            elif base_key_str == ']':
+                base_code = 29
+                logging.debug("_decode_keystring: CTRL modifier applied to ']', result code: 29")
             else:
                 logging.warning(
-                    f"Action '{action_name}' found in keybindings configuration but no corresponding method "
-                    f"defined in action_to_method_map. This keybinding will be ignored."
+                    f"_decode_keystring: Ctrl modifier with base '{base_key_str}' in '{original_key_string}'. "
+                    f"Resulting code {base_code} is based on the base key's direct code. "
+                    f"This might not match terminal output for Ctrl combinations with non-letters/non-specific-symbols."
                 )
-        
-        # Built-in default handlers for common curses KEY_* constants.
-        # These act as fallbacks if not explicitly overridden by self.keybindings.
-        # `setdefault` ensures that user-defined bindings take precedence if the key code is the same.
-        builtin_curses_key_handlers: Dict[int, Callable] = {
-            curses.KEY_UP:        self.handle_up,
-            curses.KEY_DOWN:      self.handle_down,
-            curses.KEY_LEFT:      self.handle_left,
-            curses.KEY_RIGHT:     self.handle_right,
-            curses.KEY_HOME:      self.handle_home,    # Note: "handle_home" action can also map here
-            curses.KEY_END:       self.handle_end,     # Note: "handle_end" action can also map here
-            curses.KEY_PPAGE:     self.handle_page_up,
-            curses.KEY_NPAGE:     self.handle_page_down,
-            curses.KEY_BACKSPACE: self.handle_backspace, 
-            curses.KEY_DC:        self.handle_delete,  # Delete character
-            curses.KEY_ENTER:     self.handle_enter,   # Covers most Enter/Return scenarios
-            10:                   self.handle_enter,   # ASCII LF (common for Enter)
-            13:                   self.handle_enter,   # ASCII CR (less common, but good to cover)
-            curses.KEY_SLEFT:     self.extend_selection_left,
-            curses.KEY_SRIGHT:    self.extend_selection_right,
-            # Shift+Up/Down might have varying KEY constants (KEY_SR/SF, KEY_SPREVIOUS/SNEXT)
-            getattr(curses, 'KEY_SR', 337):       self.extend_selection_up, 
-            getattr(curses, 'KEY_SF', 336):       self.extend_selection_down,
-            getattr(curses, 'KEY_SPREVIOUS', 337):self.extend_selection_up, # Alias for KEY_SR on some systems
-            getattr(curses, 'KEY_SNEXT', 336):    self.extend_selection_down, # Alias for KEY_SF
-            curses.KEY_SHOME:     self.select_to_home,
-            curses.KEY_SEND:      self.select_to_end,
-            # Esc (27) should map to handle_escape if that's the desired Esc behavior.
-            # This is handled by "cancel_operation" in self.keybindings.
-            # 27: self.handle_escape, 
-            getattr(curses, 'KEY_IC', 331):     self.toggle_insert_mode, # Insert key
-            curses.KEY_RESIZE:    self.handle_resize,    # Window resize event
-            getattr(curses, 'KEY_BTAB', 353):   self.handle_smart_unindent, # Shift+Tab
-            # curses.ascii.TAB (9) is handled by "tab" in self.keybindings.
+
+        if "shift" in modifiers:
+            modifiers.remove("shift")
+            if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1 and base_code == ord(base_key_str):
+                base_code = ord(base_key_str.upper())
+                logging.debug(f"_decode_keystring: SHIFT modifier applied to '{base_key_str}', result code: {base_code}")
+            elif base_key_str not in [
+                'up', 'down', 'left', 'right', 'home', 'end',
+                'pageup', 'pagedown', 'tab',
+                'f1', 'f2', 'f3', 'f4', 'f5', 'f6',
+                'f7', 'f8', 'f9', 'f10', 'f11', 'f12'
+            ]:
+                logging.warning(
+                    f"_decode_keystring: Remaining 'shift' modifier for base '{base_key_str}' in '{original_key_string}'. "
+                    f"Resulting code: {base_code}. This might not reflect terminal output accurately."
+                )
+
+        if "alt" in modifiers:
+            modifiers.remove("alt")
+            # Возвращаем строку для alt-комбинаций (универсально для TTY и терминала)
+            result = f"alt-{base_key_str}"
+            logging.debug(f"_decode_keystring: ALT modifier applied, logical alt-key: {result!r}")
+            return result
+
+        if modifiers:  # Остались нераспознанные модификаторы
+            logging.error(f"_decode_keystring: Unknown or unhandled modifiers {list(modifiers)} in '{original_key_string}'")
+            raise ValueError(f"Unknown or unhandled modifiers {list(modifiers)} in '{original_key_string}'")
+
+        logging.debug(f"_decode_keystring: Final resolved code for '{original_key_string}': {base_code}")
+        return base_code
+
+            
+    # функция для разбора последовательностей клавиш (Alt-стрелки и Alt+h/j/k/l)
+    def parse_alt_key(self, seq: str) -> str:
+        """Parses escape sequences for Alt+Arrows or Alt+HJKL.
+
+        Args:
+            seq (str): Raw key sequence.
+
+        Returns:
+            str: Logical key name.
+        """
+        if seq.startswith('\x1b[1;3'):
+            direction = seq[-1]
+            return {'A': 'alt+up', 'B': 'alt+down', 'C': 'alt+right', 'D': 'alt+left'}.get(direction, '')
+        if seq.startswith('\x1b') and len(seq) == 2:
+            letter = seq[1].lower()
+            if letter in 'hjkl':
+                return f'alt+{letter}'
+        return ''
+
+    def get_key_input(self, stdscr) -> str | int:
+        """Reads user input, detects Alt+arrows or Alt+h/j/k/l, else returns original key.
+
+        Args:
+            stdscr: curses window
+
+        Returns:
+            str | int: Logical key name or original key.
+        """
+        import curses
+        key = stdscr.get_wch()
+        if key == '\x1b':
+            stdscr.nodelay(True)
+            seq = key
+            try:
+                for _ in range(6):
+                    next_char = stdscr.get_wch()
+                    if isinstance(next_char, int):
+                        break
+                    seq += next_char
+                    parsed = self.parse_alt_key(seq)
+                    if parsed:
+                        stdscr.nodelay(False)
+                        return parsed
+            except curses.error:
+                pass
+            finally:
+                stdscr.nodelay(False)
+        return key
+  
+    # ----- Decode key ----------------------------------------------------------- 
+    def _decode_keystring(self, key_input: Union[str, int]) -> int:
+        """
+        Translate a human-readable key specification or an integer key code
+        into a curses integer key code.
+
+        Args:
+            key_input: Either an int (platform key code) or a str
+                like "ctrl+/", "f1", "alt+x" (alt support is basic).
+
+        Returns:
+            The resolved curses integer key code.
+
+        Raises:
+            ValueError: If the string is empty, refers to an unknown key name,
+            or contains an invalid modifier combination.
+        """
+        if isinstance(key_input, int):
+            return key_input # If already an integer, just return it
+
+        if not isinstance(key_input, str): # Should be a string if not an integer
+            raise ValueError(f"Invalid key_input type: {type(key_input)}. Expected str or int.")
+
+        original_key_string = key_input
+        s = key_input.strip().lower() # Use 's' for brevity and case-insensitivity
+
+        if not s:
+            raise ValueError("Key string cannot be empty.")
+
+        # 1. Map of full key names, including complex Shift combinations
+        named_keys_map: Dict[str, int] = {
+            'f1': curses.KEY_F1, 'f2': curses.KEY_F2, 'f3': curses.KEY_F3,
+            'f4': curses.KEY_F4, 'f5': curses.KEY_F5, 'f6': curses.KEY_F6,
+            'f7': curses.KEY_F7, 'f8': curses.KEY_F8, 'f9': curses.KEY_F9,
+            'f10': curses.KEY_F10, 'f11': curses.KEY_F11, 'f12': curses.KEY_F12,
+            'left': curses.KEY_LEFT, 'right': curses.KEY_RIGHT,
+            'up': curses.KEY_UP, 'down': curses.KEY_DOWN,
+            'home': curses.KEY_HOME, 'end': getattr(curses, 'KEY_END', curses.KEY_LL),
+            'pageup': curses.KEY_PPAGE, 'pgup': curses.KEY_PPAGE,
+            'pagedown': curses.KEY_NPAGE, 'pgdn': curses.KEY_NPAGE,
+            'delete': curses.KEY_DC, 'del': curses.KEY_DC,
+            'backspace': curses.KEY_BACKSPACE,
+            'insert': curses.KEY_IC,
+            'tab': curses.ascii.TAB,
+            'enter': curses.KEY_ENTER, 'return': curses.KEY_ENTER,
+            'space': ord(' '),
+            'esc': 27, 'escape': 27,
+            'shift+left': curses.KEY_SLEFT, 'sleft': curses.KEY_SLEFT,
+            'shift+right': curses.KEY_SRIGHT, 'sright': curses.KEY_SRIGHT,
+            'shift+up': getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)),
+            'sup': getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)),
+            'shift+down': getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)),
+            'sdown': getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)),
+            'shift+home': curses.KEY_SHOME,
+            'shift+end': curses.KEY_SEND,
+            'shift+pageup': getattr(curses, 'KEY_SPPAGE', getattr(curses, 'KEY_SPREVIOUS', 337)),
+            'shift+pagedown': getattr(curses, 'KEY_SNPAGE', getattr(curses, 'KEY_SNEXT', 336)),
+            'shift+tab': getattr(curses, 'KEY_BTAB', 353),
+            '/': ord('/'), '?': ord('?'), '\\': ord('\\'),
         }
+
+        # First, check for an exact match in the named_keys_map
+        if s in named_keys_map:
+            return named_keys_map[s]
+
+        # If no full match, try to parse into modifiers + base key
+        parts = s.split('+')
+        base_key_str = parts[-1].strip()
+        modifiers = set(p.strip() for p in parts[:-1])
+
+        base_code: int
+
+        # Determine base_code
+        if base_key_str in named_keys_map: # e.g., "del" if original was "ctrl+del"
+            base_code = named_keys_map[base_key_str]
+        elif len(base_key_str) == 1: # Single character base
+            base_code = ord(base_key_str)
+        else:
+            raise ValueError(f"Unknown base key '{base_key_str}' in '{original_key_string}' after checking named_keys_map.")
+
+        # Apply modifiers
+        if "ctrl" in modifiers:
+            modifiers.remove("ctrl")
+            # Standard Ctrl+letter (a-z) -> ASCII 1-26
+            if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1:
+                base_code = ord(base_key_str) - ord('a') + 1
+            # Specific Ctrl+symbol mappings that generate control characters
+            elif base_key_str == '/': 
+                base_code = 31 # ASCII US (Unit Separator)
+            elif base_key_str == '\\':
+                base_code = 28 # ASCII FS (File Separator)
+            elif base_key_str == '[': 
+                base_code = 27 # Ctrl+[ is Esc
+            elif base_key_str == ']': 
+                base_code = 29 # Ctrl+] is GS (Group Separator)
+            # For other Ctrl combinations (e.g., Ctrl+<named_key>, Ctrl+<other_symbol>),
+            # the base_code (already determined from ord() or named_keys_map) remains.
+            # This might not always match what the terminal sends for complex Ctrl sequences.
+            # Such bindings are more reliably specified using direct integer codes if known.
+            else:
+                logging.warning(f"Ctrl modifier with base '{base_key_str}' in '{original_key_string}'. "
+                                f"Resulting code {base_code} is based on the base key's direct code. "
+                                f"This might not match terminal output for Ctrl combinations with non-letters/non-specific-symbols.")
         
-        # Apply built-in handlers, using setdefault to not overwrite user/default config bindings
-        # if they happen to map to the same key code.
+        if "shift" in modifiers:
+            modifiers.remove("shift")
+            # Shift + letter -> uppercase letter (only if base_code is still the lowercase char's ord)
+            if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1 and base_code == ord(base_key_str):
+                base_code = ord(base_key_str.upper())
+            # If 'shift' was part of a key already handled by named_keys_map (e.g., 'shift+tab'), it's already processed.
+            # This warning is for 'shift' remaining with other base keys where its effect isn't standard.
+            elif base_key_str not in ['up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown', 'tab',
+                                    'f1','f2','f3','f4','f5','f6','f7','f8','f9','f10','f11','f12']: # Known keys with specific shift variants
+                logging.warning(f"Remaining 'shift' modifier for base '{base_key_str}' in '{original_key_string}'. "
+                                f"Resulting code: {base_code}. This might not reflect terminal output accurately.")
+
+        if "alt" in modifiers:
+            modifiers.remove("alt")
+            base_code |= 0x200 # Custom Alt convention (may not work reliably in TTYs)
+            logging.debug(f"Applied custom Alt modifier (|=0x200) to key '{base_key_str}', code: {base_code}")
+
+        if modifiers: # Any remaining unhandled modifiers
+            raise ValueError(f"Unknown or unhandled modifiers {list(modifiers)} in '{original_key_string}'")
+
+        return base_code
+
+
+    # ───────────────────── Action Map Setup ─────────────────────
+    def _setup_action_map(self) -> Dict[Union[int, str], Callable[..., Any]]:
+        """
+        Build the action-map: an integer key-code → bound-callable dict.
+        Uses self.keybindings which maps action_name to a list of integer key_codes.
+        """
+        action_to_method_map: Dict[str, Callable] = {
+            "open_file": self.open_file, "save_file": self.save_file,
+            "save_as": self.save_file_as, "new_file": self.new_file,
+            "git_menu": self.integrate_git, "copy": self.copy, "cut": self.cut,
+            "paste": self.paste, "undo": self.undo, "redo": self.redo,
+            "handle_home": self.handle_home, "handle_end": self.handle_end,
+            "handle_page_up": self.handle_page_up, "handle_page_down": self.handle_page_down,
+            "extend_selection_up": self.extend_selection_up,
+            "extend_selection_down": self.extend_selection_down,
+            "extend_selection_left": self.extend_selection_left,
+            "extend_selection_right": self.extend_selection_right,                       
+            "select_to_home": self.select_to_home, "select_to_end": self.select_to_end,                      
+            "find": self.find_prompt, "find_next": self.find_next,
+            "search_and_replace": self.search_and_replace,
+            "goto_line": self.goto_line, "help": self.show_help,
+            "cancel_operation": self.handle_escape, "select_all": self.select_all,
+            "delete": self.handle_delete, "quit": self.exit_editor,
+            "tab": self.handle_smart_tab, "shift_tab": self.handle_smart_unindent,
+            "lint": self.run_lint_async, "show_lint_panel": self.show_lint_panel,
+            "do_comment_block": self.do_comment_block,
+            "do_uncomment_block": self.do_uncomment_block,
+            "toggle_insert_mode": self.toggle_insert_mode,
+            # Methods for builtin_curses_key_handlers (if not already above)
+            "handle_up": self.handle_up, "handle_down": self.handle_down,
+            "handle_left": self.handle_left, "handle_right": self.handle_right,
+            "handle_backspace": self.handle_backspace, "handle_enter": self.handle_enter,
+        }
+
+        final_key_action_map: Dict[Union[int, str], Callable] = {}
+
+
+        # 1. Add built-in handlers first. They can be overridden by self.keybindings.
+        builtin_curses_key_handlers: Dict[int, Callable] = {
+            curses.KEY_UP:        action_to_method_map["handle_up"],
+            curses.KEY_DOWN:      action_to_method_map["handle_down"],
+            curses.KEY_LEFT:      action_to_method_map["handle_left"],
+            curses.KEY_RIGHT:     action_to_method_map["handle_right"],
+            curses.KEY_HOME:      action_to_method_map["handle_home"],
+            curses.KEY_END:       action_to_method_map["handle_end"],
+            curses.KEY_PPAGE:     action_to_method_map["handle_page_up"],
+            curses.KEY_NPAGE:     action_to_method_map["handle_page_down"],
+            curses.KEY_BACKSPACE: action_to_method_map["handle_backspace"],
+            curses.KEY_DC:        action_to_method_map["delete"],
+            curses.KEY_ENTER:     action_to_method_map["handle_enter"],
+            10:                   action_to_method_map["handle_enter"], # ASCII LF
+            13:                   action_to_method_map["handle_enter"], # ASCII CR
+            curses.KEY_SLEFT:     action_to_method_map["extend_selection_left"],
+            curses.KEY_SRIGHT:    action_to_method_map["extend_selection_right"],
+            getattr(curses, 'KEY_SR', 337):       action_to_method_map["extend_selection_up"],
+            getattr(curses, 'KEY_SF', 336):       action_to_method_map["extend_selection_down"],
+            curses.KEY_SHOME:     action_to_method_map["select_to_home"],
+            curses.KEY_SEND:      action_to_method_map["select_to_end"],
+            curses.KEY_IC:        action_to_method_map["toggle_insert_mode"],
+            curses.KEY_RESIZE:    self.handle_resize, # Direct method call
+            getattr(curses, 'KEY_BTAB', 353):   action_to_method_map["shift_tab"],
+            
+        }
         for key_code, method_callable in builtin_curses_key_handlers.items():
-            if key_code not in final_key_action_map: # Only add if not already mapped by user config
-                final_key_action_map[key_code] = method_callable
-                logging.debug(f"Mapped built-in: Key code {key_code} -> Method '{method_callable.__name__}'")
-            elif final_key_action_map[key_code] != method_callable:
-                logging.debug(
-                    f"Built-in handler for key code {key_code} (method '{method_callable.__name__}') "
-                    f"was overridden by user/default config for method "
-                    f"'{final_key_action_map[key_code].__name__}'."
-                )
+            final_key_action_map[key_code] = method_callable
+            # No detailed log here for initial built-ins to reduce noise;
+            # Overwrites will be logged more prominently.
 
-        # Ensure F4 for linting is present if not overridden.
-        # This handles the case where 'lint' or 'show_lint_panel' might be the action name.
-        f4_key_code = getattr(curses, 'KEY_F4', 268)
-        if f4_key_code not in final_key_action_map:
-            lint_method = action_to_method_map.get("lint") or action_to_method_map.get("show_lint_panel")
-            if lint_method:
-                final_key_action_map[f4_key_code] = lint_method
-                logging.debug(f"Mapped fallback F4 (key code {f4_key_code}) to lint method '{lint_method.__name__}'.")
+        # 2. Populate from self.keybindings, potentially overwriting built-ins.
+        # self.keybindings is Dict[str, List[int]]                 
+        for action_name, key_code_list in self.keybindings.items():
+            method_callable = action_to_method_map.get(action_name)
+            if not method_callable:
+                logging.warning(f"Action '{action_name}' in keybindings but no corresponding method. Ignored.")
+                continue
 
-        # Log the final complete action map
+            if not isinstance(key_code_list, list):  # Should have been ensured by _load_keybindings
+                logging.error(f"Keybinding for '{action_name}' is not a list: {key_code_list}. Skipped.")
+                continue
+
+            for key_code_value in key_code_list:
+                if not isinstance(key_code_value, (int, str)):  # ДОБАВИЛИ: теперь поддерживаем str!
+                    logging.error(f"Key code '{key_code_value}' for '{action_name}' is not int or str. Skipped.")
+                    continue
+
+                # Log if this key_code_value is overwriting an existing different method
+                if key_code_value in final_key_action_map and \
+                final_key_action_map[key_code_value].__name__ != method_callable.__name__:
+                    logging.warning(
+                        f"Keybinding from config/defaults: Action '{action_name}' (code {key_code_value}, method '{method_callable.__name__}') "
+                        f"is OVERWRITING existing mapping for method '{final_key_action_map[key_code_value].__name__}'."
+                    )
+                # Log if it's a new mapping from keybindings or if it's mapping to the same method (confirming an alias)
+                elif key_code_value not in final_key_action_map or final_key_action_map[key_code_value].__name__ == method_callable.__name__:
+                    logging.debug(
+                        f"Mapped from config/defaults (or confirmed alias): Action '{action_name}' (key code {key_code_value}) "
+                        f"-> Method '{method_callable.__name__}'"
+                    )
+                final_key_action_map[key_code_value] = method_callable
+
+        
+        # 3. Ensure F4 for linting is present if not specifically overridden for F4
+        #    by a different action in user's keybindings.
+        f4_key_code_default = curses.KEY_F4 # Standard F4 code
+        lint_method_target = action_to_method_map.get("lint") # The method F4 should ideally call
+
+        if lint_method_target:
+            current_f4_mapping = final_key_action_map.get(f4_key_code_default)
+            # If F4 is not mapped OR it's mapped to something other than 'run_lint_async' or 'show_lint_panel'
+            if not current_f4_mapping or \
+                (current_f4_mapping.__name__ not in ('run_lint_async', 'show_lint_panel') and \
+                current_f4_mapping != lint_method_target) : # Check actual method object too
+
+                if current_f4_mapping: # It was mapped to something else
+                    logging.info(f"Fallback F4 mapping for lint method '{lint_method_target.__name__}' "
+                                f"is overwriting the existing F4 mapping for '{current_f4_mapping.__name__}'.")
+                else: # F4 was not mapped at all
+                    logging.debug(f"Mapped fallback F4 (key code {f4_key_code_default}) to lint method '{lint_method_target.__name__}'.")
+                final_key_action_map[f4_key_code_default] = lint_method_target
+
         final_map_log_str = {k: v.__name__ for k, v in final_key_action_map.items()}
         logging.debug(f"Final constructed action map (Key Code -> Method Name): {final_map_log_str}")
-        
         return final_key_action_map
         
+                
     # ─────────────────────  Get comment prefix for current language ─────────────────────
     def get_line_comment_prefix(self) -> Optional[str]:
         """
@@ -1545,13 +1715,6 @@ class SwayEditor:
             * The alias tables are maintained manually—new languages must
               be added here to support automatic commenting.
 
-        Examples:
-            >>> editor.get_line_comment_prefix()   # Python buffer
-            '# '
-            >>> editor.get_line_comment_prefix()   # SQL buffer
-            '-- '
-            >>> editor.get_line_comment_prefix()   # JSON buffer
-            None
         """
 
         if self._lexer is None:
@@ -1710,7 +1873,7 @@ class SwayEditor:
         # Languages ​​with  ";"
         semicolon_comment_langs = {'clojure', 'clj', 'lisp', 'common-lisp', 'elisp', 'emacs-lisp', 
                                    'scheme', 'scm', 'racket', 'rkt', 
-                                   'autolisp', 'asm', 'nasm', 'masm', 'nix', # NixOS configuration
+                                   'autolisp', 'asm', 'nasm', 'masm', 'nix', 
                                    'ini', 'properties', 'desktop' # .desktop files, .properties often use ; or #
                                   } 
         if not all_names_to_check.isdisjoint(semicolon_comment_langs):
@@ -1777,7 +1940,6 @@ class SwayEditor:
             return ("/*", "*/")
         if name in {"sql", "plpgsql"}:
             return ("/*", "*/")
-
         # No recognised block-comment delimiters
         return None
 
@@ -1802,7 +1964,8 @@ class SwayEditor:
         """
         if self.is_selecting and self.selection_start and self.selection_end:
             norm_range = self._get_normalized_selection_range()
-            if not norm_range: return None
+            if not norm_range:
+                return None
             start_coords, end_coords = norm_range
             
             start_y = start_coords[0]
@@ -2058,11 +2221,17 @@ class SwayEditor:
 
         with self._state_lock: # Ensure thread safety for state modifications
             try:
-                # --- Step 1: Determine the integer key code for action_map lookup ---
+                # - 1.  Determine the integer key code for action_map lookup ---
                 # This code will be used to check against self.action_map.
                 key_code_for_action_map: Optional[int] = None
                 is_potentially_printable_char_string = False # Flag if 'key' is a string but not a known control char for map
 
+                # --- universal lookup for action_map (int or str, TTY or GUI) ---
+                if key in self.action_map:
+                    result = self.action_map[key]()
+                    return result if result is not None else True
+                
+                # ────────────────────────────────────────────────────────────────
                 if isinstance(key, int):
                     key_code_for_action_map = key # Directly use if it's already an integer
                 elif isinstance(key, str) and len(key) == 1:
@@ -2080,7 +2249,7 @@ class SwayEditor:
 
                 logging.debug(f"handle_input: Derived key_code_for_action_map = {key_code_for_action_map} from input {repr(key)}")
 
-                # --- Step 2: Try to execute an action from the action_map ---
+                # ---  2. Try to execute an action from the action_map ---
                 if key_code_for_action_map is not None and key_code_for_action_map in self.action_map:
                     logging.debug(
                         f"handle_input: Key code {key_code_for_action_map} found in action_map. "
@@ -2096,7 +2265,7 @@ class SwayEditor:
                         action_caused_visual_change = True
                     return action_caused_visual_change
 
-                # --- Step 3: Handle as a printable character if not mapped and plausible ---
+                # -- 3. Handle as a printable character if not mapped and plausible ---
                 # This covers:
                 # a) Single char strings that were not control chars mapped in Step 2.
                 # b) Integer key codes (from get_wch) that were not in action_map but are in a printable Unicode range.
@@ -2130,7 +2299,7 @@ class SwayEditor:
                         KEY_LOGGER.debug("Unhandled integer key code (not printable range, not in action_map): %r", key)
                         self._set_status_message(f"Unhandled key code: {key}")
                 
-                # --- Step 4: Fallback for any other unhandled input types or unmapped sequences ---
+                # --- 4. Fallback for any other unhandled input types or unmapped sequences ---
                 # This is reached if 'key' was not ERR, not handled by action_map, and not processed as a printable char.
                 # Example: A multi-character string from get_wch() that isn't a known escape sequence handled by action_map.
                 elif key != curses.ERR: # Ensure it wasn't just "no input"
@@ -2150,30 +2319,26 @@ class SwayEditor:
                 self._set_status_message(f"Input handler error (see log): {str(e_handler)[:50]}")
                 return True # Assume redraw is needed to display the error status
                         
-
-    def draw_screen(self, *a, **kw):
-        """Old method name – delegate to new DrawScreen."""
-        return self.drawer.draw(*a, **kw)
-
     # --- LSP --------------------------------------------------------------
     def _start_lsp_server_if_needed(self) -> None:
-        """Запускает (или переиспользует) процесс **Ruff LSP** для Python-файлов.
+        """
+        Starts (or reuses) the **Ruff LSP** process for Python files.
 
-        Алгоритм:
-            1.  Если язык ещё не определён — вызывается :py:meth:`detect_language`.
-            2.  Для всех языков, кроме *python*, метод мгновенно выходит.
-            3.  Если процесс Ruff уже жив и не завершился ― повторно не запускаем.
-            4.  Иначе создаём `subprocess.Popen`, поднимаем поток-читатель stdout,
-                отправляем сообщение ``initialize`` по протоколу LSP, затем уведомление
-                ``initialized`` и помечаем сервер как инициализированный.
+        Algorithm:
+        1. If the language has not yet been determined, :py:meth:`detect_language` is called.
+        2. For all languages ​​except *python*, the method immediately exits.
+        3. If the Ruff process is already alive and has not terminated, do not start it again.
+        4. Otherwise, create `subprocess.Popen`, start the stdout reader stream,
+        send the ``initialize`` message via the LSP protocol, then the notification
+        ``initialized`` and mark the server as initialized.
 
         Notes:
-            * Метод идемпотентен — многократный вызов безопасен.
-            * При отсутствии исполняемого файла **ruff** выводится статус-сообщение
-            и сервер не запускается.
+        * The method is idempotent - multiple calls are safe.
+        * If the **ruff** executable file does not exist, a status message is printed
+        and the server is not started.
 
         Returns:
-            None
+        None
         """
         # 1. Убедимся, что знаем язык текущего буфера.
         if getattr(self, "current_language", None) is None:
@@ -2214,7 +2379,7 @@ class SwayEditor:
         cmd = ["ruff", "server", "--preview"]
         try:
             # Для LSP лучше использовать кодировку utf-8 для stdin/stdout/stderr
-            # PYTHONIOENCODING=utf-8 должно это обеспечить, но для Popen можно указать явно
+            # PYTHONIOENCODING=utf-8 должно это обеспечить, но для Popen нужно указать явно
             self._lsp_proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -2246,11 +2411,11 @@ class SwayEditor:
         self._lsp_reader.start()
         logging.debug("LSP: Reader thread started.")
 
-        # 6. Инициализируем соединение по протоколу LSP.
-        # capabilities можно расширить, если редактор поддерживает больше фич LSP.
-        # rootUri и workspaceFolders важны для сервера, чтобы понимать контекст проекта.
-        # Если редактор работает с одним файлом без понятия "проекта", rootUri может быть None
-        # или директорией текущего файла. workspaceFolders более современный подход.
+        # 6. Initialize the connection via LSP.
+        # capabilities can be expanded if the editor supports more LSP features.
+        # rootUri and workspaceFolders are important for the server to understand the context of the project.
+        # If the editor works with a single file without the concept of a "project", rootUri can be None
+        # or the directory of the current file. workspaceFolders is a more modern approach.
         root_uri_path = None
         if self.filename and os.path.isfile(self.filename):
              root_uri_path = os.path.dirname(os.path.abspath(self.filename))
@@ -2307,6 +2472,16 @@ class SwayEditor:
         self._lsp_initialized = True # Теперь сервер "считается" инициализированным для отправки didOpen/didChange
         logging.info("LSP: Sent 'initialize' request and 'initialized' notification. Marked as initialized.")
 
+
+    def reload_devops_module() -> bool:
+        global lint_devops
+        try:
+            lint_devops = importlib.reload(lint_devops)
+            return True
+        except Exception as e:
+            logging.error(f"Cannot reload lint_devops: {e}")
+            return False
+
     # 1--- Вспомогательные LSP-методы -------------------------------
     def _send_lsp(
         self,
@@ -2315,14 +2490,38 @@ class SwayEditor:
         *,
         is_request: bool = False,
     ) -> None:
-        """Шлёт пакет LSP с корректным заголовком *Content-Length*."""
+        """
+        Sends a Language Server Protocol (LSP) message to the LSP server with a properly formatted Content-Length header.
+
+        This helper method serializes the provided method name and parameters to a JSON-RPC 2.0-compliant message,
+        prepends the correct Content-Length header, and writes the message to the LSP server's stdin. If `is_request`
+        is True, a unique incrementing id is added to the payload.
+
+        Args:
+            method (str): The LSP method name (e.g., "initialize", "textDocument/didOpen").
+            params (Optional[dict]): The parameters for the LSP method, or None for methods with no parameters.
+            is_request (bool, optional): Whether this message should include an "id" field (for request/response pattern).
+                If False (default), sends a notification.
+
+        Returns:
+            None
+
+        Side Effects:
+            - Writes the message directly to the LSP server's stdin.
+            - Logs all outgoing messages, headers, and JSON payloads at DEBUG level.
+            - On failure to send (e.g., broken pipe), logs the error, updates the status bar,
+            and attempts to terminate the LSP process and reset initialization state.
+        """
+        # Check that the LSP process and its stdin are available and running.
         if not self._lsp_proc or self._lsp_proc.stdin is None or self._lsp_proc.poll() is not None:
             logging.warning(f"LSP send: Process not available or already terminated for method {method}.")
             return
 
+        # Initialize the sequence counter if not present.
         if not hasattr(self, "_lsp_seq"):
             self._lsp_seq = 0
         
+        # Build the JSON-RPC message payload.
         payload_dict = {
             "jsonrpc": "2.0",
             "method": method,
@@ -2330,6 +2529,7 @@ class SwayEditor:
         if params is not None:
             payload_dict["params"] = params
 
+        # Add a unique id for requests, not for notifications.
         if is_request:
             self._lsp_seq += 1
             payload_dict["id"] = self._lsp_seq
@@ -2337,9 +2537,11 @@ class SwayEditor:
         payload_json_string = json.dumps(payload_dict)
         payload_bytes = payload_json_string.encode('utf-8')
 
+        # Prepare the LSP header with Content-Length.
         header_string = f"Content-Length: {len(payload_bytes)}\r\n\r\n"
         header_bytes = header_string.encode('utf-8')
         
+        # Log outgoing message details for debugging.
         logging.debug(
             f"LSP SEND -> Method: {method}, ID: {payload_dict.get('id', 'N/A')}, "
             f"Params: {str(params)[:200]}{'...' if params and len(str(params)) > 200 else ''}"
@@ -2349,6 +2551,7 @@ class SwayEditor:
 
         try:
             if self._lsp_proc.stdin:
+                # Write header and payload to the LSP server.
                 self._lsp_proc.stdin.write(header_bytes + payload_bytes)
                 self._lsp_proc.stdin.flush()
             else:
@@ -2356,80 +2559,99 @@ class SwayEditor:
         except (BrokenPipeError, OSError) as exc:
             logging.error("LSP pipe write failed for method %s: %s", method, exc)
             self._set_status_message(f"❌ Ruff LSP Comms: {exc}")
-            # Возможно, стоит остановить LSP или пометить его как неинициализированный
+            # Optionally terminate the LSP process and reset initialization state.
             if self._lsp_proc and self._lsp_proc.poll() is None:
                 self._lsp_proc.terminate()
             self._lsp_proc = None
             self._lsp_initialized = False
 
-    # -- потокo-читатель --------------------
+    # -- stream-reader--------------------
     def _lsp_reader_loop(self) -> None:
-        """Считывает ответы LSP-сервера из stdout."""
-        # Этот поток должен завершиться, если _lsp_proc становится None или завершается
+        """
+        Continuously reads and processes responses from the LSP server's stdout.
+
+        This method runs in a background thread and implements the protocol for reading
+        Language Server Protocol (LSP) messages over a pipe. It parses the LSP header,
+        extracts the Content-Length, reads the message body, decodes it from UTF-8, and
+        pushes the resulting JSON object into the internal LSP message queue for further processing.
+
+        The loop exits if the LSP process terminates or its stdout stream becomes unavailable.
+        Errors are logged, and in the event of severe stream or protocol errors, the LSP process
+        is safely terminated or its references are cleared.
+
+        Returns:
+            None
+
+        Side Effects:
+            - Consumes stdout of the LSP process line by line.
+            - Parses and enqueues LSP JSON messages for processing in the main thread.
+            - Logs errors and warnings about stream state, protocol violations, and I/O issues.
+            - Attempts to terminate the LSP process on certain critical failures.
+        """
         while True:
-            proc = self._lsp_proc # Копируем ссылку для безопасности в многопоточной среде
+            proc = self._lsp_proc  # Copy the reference for thread safety
             if not proc or proc.poll() is not None:
                 logging.info("LSP Reader: process is None or has terminated. Exiting loop.")
-                break # Выходим из цикла, если процесса нет или он завершился
+                break  # Exit loop if the process does not exist or has terminated
 
             stream = proc.stdout
             if not stream:
                 logging.error("LSP Reader: stdout stream is None. Exiting loop.")
                 break
-            
-            # Чтение заголовка (Content-Length)
+
+            # Read LSP header (Content-Length)
             header_buffer = b""
             try:
                 while not header_buffer.endswith(b"\r\n\r\n"):
-                    # Читаем по одному байту, чтобы не заблокироваться надолго, если \r\n\r\n не придет
-                    # или если процесс завершился
+                    # Read one byte at a time to avoid blocking indefinitely if \r\n\r\n never arrives
+                    # or if the process terminates
                     byte = stream.read(1)
-                    if not byte: # EOF или процесс завершился
-                        if proc.poll() is not None: # Проверяем, завершился ли процесс
+                    if not byte:  # EOF or process terminated
+                        if proc.poll() is not None:  # Check if the process has terminated
                             logging.info("LSP Reader: EOF reached and process terminated while reading header. Exiting loop.")
-                        else: # EOF, но процесс еще жив (маловероятно, если pipe закрыт)
+                        else:  # EOF but process still alive (rare if pipe closed)
                             logging.warning("LSP Reader: EOF reached on stdout while reading header, but process still alive? Exiting loop.")
-                        return # Завершаем поток
+                        return  # Exit thread
                     header_buffer += byte
-                    # Защита от бесконечного чтения, если заголовок некорректен
-                    if len(header_buffer) > 4096: # Произвольный лимит на размер заголовка
+                    # Prevent endless reading if header is malformed
+                    if len(header_buffer) > 4096:  # Arbitrary header size limit
                         logging.error("LSP Reader: Header too long, possible corruption. Exiting.")
                         return
             except Exception as e_read_header:
                 logging.error(f"LSP Reader: Exception while reading header: {e_read_header}. Exiting loop.")
-                if proc.poll() is None: # Если процесс еще жив, пытаемся его остановить
+                if proc.poll() is None:  # If process is still alive, attempt to terminate it
                     try: 
                         proc.terminate()
-                    except Exception: 
+                    except Exception:
                         pass
-                self._lsp_proc = None # Сбрасываем ссылку
+                self._lsp_proc = None  # Drop reference
                 return
 
-            header_str = header_buffer.decode('ascii', 'ignore') # Заголовки обычно ASCII
+            header_str = header_buffer.decode('ascii', 'ignore')  # Headers are usually ASCII
             content_length = -1
-            # Content-Type не обязателен, но Content-Length - да.
+            # Content-Type is optional, but Content-Length is required.
             match = re.search(r"Content-Length:\s*(\d+)", header_str, re.IGNORECASE)
             if match:
                 content_length = int(match.group(1))
             
             if content_length == -1:
                 logging.error(f"LSP Reader: Failed to parse Content-Length from header: {header_str!r}. Exiting loop.")
-                # Попытаться прочитать что-то, чтобы очистить буфер, или просто выйти
+                # Try to read some bytes to clear buffer, or just continue
                 try: 
                     stream.read(1024)
-                except: 
+                except Exception:
                     pass
                 continue
 
-            # Чтение тела сообщения
+            # Read LSP message body
             body_bytes = b""
             bytes_to_read = content_length
             try:
                 while bytes_to_read > 0:
                     chunk = stream.read(bytes_to_read)
-                    if not chunk: # EOF
+                    if not chunk:  # EOF
                         logging.error("LSP Reader: EOF reached while reading message body. Expected %d more bytes.", bytes_to_read)
-                        return # Завершаем поток
+                        return  # Exit thread
                     body_bytes += chunk
                     bytes_to_read -= len(chunk)
             except Exception as e_read_body:
@@ -2437,7 +2659,7 @@ class SwayEditor:
                 return
 
             try:
-                body_str = body_bytes.decode('utf-8') # Тело сообщения всегда UTF-8
+                body_str = body_bytes.decode('utf-8')  # Message bodies are always UTF-8
                 message = json.loads(body_str)
                 logging.debug(
                     f"LSP RECV <- ID: {message.get('id', 'N/A')}, Method: {message.get('method', 'N/A')}, "
@@ -2451,37 +2673,60 @@ class SwayEditor:
             except Exception as e_proc_msg:
                 logging.exception(f"LSP Reader: Error processing received message: {e_proc_msg}")
 
+
     def _process_lsp_queue(self) -> None:
-        """Обрабатывает сообщения из очереди LSP-сервера."""
+        """
+        Processes all pending messages from the internal LSP server queue.
+
+        This method is intended to be called periodically (e.g., in the main loop) to handle
+        incoming messages from the Language Server Protocol (LSP) server. It retrieves all
+        messages from the queue without blocking, parses them if needed, and dispatches recognized
+        LSP methods to their appropriate handlers. Currently, it processes diagnostics messages
+        (e.g., publishDiagnostics) for real-time linting and error reporting.
+
+        Returns:
+            None
+
+        Side Effects:
+            - Removes and processes all messages from the LSP queue (`self._lsp_q`).
+            - Invokes the diagnostics handler if a diagnostics message is received.
+            - May trigger UI updates or state changes depending on the type of message.
+            - Logs unrecognized or malformed messages at the debug level (expand as needed).
+
+        Notes:
+            Extend this method to handle additional LSP methods and notifications as needed.
+        """
         while not self._lsp_q.empty():
             pkt = self._lsp_q.get_nowait()
             msg = pkt if isinstance(pkt, dict) else json.loads(pkt)
 
+            # Handle diagnostics published by the server (e.g., code linting results)
             if msg.get("method") == "textDocument/publishDiagnostics":
                 self._handle_diagnostics(msg["params"])
 
+
     # ───────────────────── LSP utility methods ──────────────────────────────
     def _lsp_uri(self) -> str:
-        """Return the *file://* URI that идентифицирует текущий буфер.
+        """Return the *file://* URI that identifies the current buffer.
 
         Returns:
-            str: Абсолютный URI. Для несохранённого буфера имя «<buffer>»
-            заменяет путь к файлу.
+        str: An absolute URI. For an unsaved buffer, the name "<buffer>"
+        replaces the file path.
         """
         return f"file://{os.path.abspath(self.filename or '<buffer>')}"
 
     # ───────────────────── LSP document notifications ───────────────────────
     def _lsp_did_open(self, text: str) -> None:
-        """Отправляет событие *didOpen* с полным содержимым документа.
+        """Sends a *didOpen* event with the full contents of the document.
 
         Args:
-            text: Полный текст файла, который должен быть проанализирован
-                сервером Ruff-LSP. Передаём сразу весь документ, поскольку
-                это первое сообщение и у сервера ещё нет версии буфера.
+        text: The full text of the file to be parsed by the Ruff-LSP server. We send the entire document at once, since
+
+        this is the first message and the server does not have a version of the buffer yet.
         """
         uri = self._lsp_uri()
 
-        # версию начинаем с 1
+        # version starts from 1
         self._lsp_doc_version[uri] = 1
 
         self._send_lsp(
@@ -2497,12 +2742,12 @@ class SwayEditor:
         )
 
     def _lsp_did_change(self, text: str) -> None:
-        """Отправляет событие *didChange* с новой версией документа.
+        """
+        Sends a *didChange* event with a new version of the document.
 
         Args:
-            text: Полный, уже изменённый текст документа. Используем
-                стратегию «full-text document sync», потому что Ruff-LSP
-                поддерживает её из коробки и это упрощает реализацию.
+        text: The full, already modified text of the document. We use the "full-text document sync" strategy because Ruff-LSP
+        supports it out of the box and this simplifies the implementation.
         """
         uri = self._lsp_uri()
         ver = self._lsp_doc_version.get(uri, 1) + 1
@@ -2518,15 +2763,15 @@ class SwayEditor:
 
     # ───────────────────── Diagnostics renderer ──────────────────────────────
     def _handle_diagnostics(self, params: dict) -> None:
-        """Обрабатывает массив диагностик Ruff-LSP и выводит первую в статус-бар.
+        """
+        Processes an array of Ruff-LSP diagnostics and outputs the first one to the status bar.
 
         Args:
-            params: Поле ``params`` из уведомления
-                ``textDocument/publishDiagnostics``.
+        params: The ``params`` field from the notification
+        ``textDocument/publishDiagnostics``.
         """
         diags: list[dict] = params.get("diagnostics", [])
 
-        # Нет ошибок — убираем панель и выводим «✓».
         if not diags:
             self._set_status_message(
                 message_for_statusbar="✓ Без ошибок (Ruff)",
@@ -2536,12 +2781,12 @@ class SwayEditor:
             )
             return
 
-        # Берём первую диагностику.
+        # first diagnostics
         first = diags[0]
         line_no = first["range"]["start"]["line"] + 1
         message = first["message"]
 
-        # Полный вывод для панели: все ошибки, каждая - новая строка.
+        # Full output for the panel: all errors, each on a new line
         panel_text = "\n".join(
             f"{d['range']['start']['line'] + 1}:{d['range']['start']['character'] + 1}  {d['message']}"
             for d in diags
@@ -2553,21 +2798,55 @@ class SwayEditor:
             full_lint_output=panel_text,
             activate_lint_panel_if_issues=True,
         )
-        
-    def run_lint_async(self, code: Optional[str] = None) -> bool:  # noqa: C901
-        """Асинхронно запускает Ruff-LSP и отправляет текущий буфер на проверку.
 
-        Возвращает ``True``, если изменилась `status_message` и требуется
-        перерисовка статус-бара.
+
+    def run_lint_async(self, code: Optional[str] = None) -> bool:
+        """
+        Asynchronously starts the Ruff LSP server and sends the current buffer for linting.
+
+        This method ensures the LSP server is running and initialized, detects the buffer's language,
+        and sends the full document text for analysis if the file is Python. If initialization is still pending,
+        or if the file is not Python, a status message is set accordingly. The method updates the status bar
+        and triggers diagnostics processing asynchronously.
+
+        Args:
+            code (Optional[str]): The source code to lint. If None, the current buffer is used.
+
+        Returns:
+            bool: True if the status message has changed and a status bar redraw is required, False otherwise.
+
+        Side Effects:
+            - Starts or reuses the Ruff LSP process.
+            - Sends didOpen/didChange events to the LSP server.
+            - Updates the editor's status message and triggers diagnostics when available.
+            - Logs all operations at DEBUG level.
         """
         original_status = self.status_message
 
-        # ── 1. Распознаём язык ───────────────────────────────────────────────
+        # 1. Detect language if not already detected
         if self._lexer is None or self.current_language is None:
             self.detect_language()
 
+        # 1a Try external DevOps linters if language is supported
+        if HAS_DEVOPS_LINTERS and self.current_language in lint_devops.DEVOPS_LINTERS:
+            if code is None:
+                with self._state_lock:
+                    code_to_lint = os.linesep.join(self.text)
+            else:
+                code_to_lint = code
+
+            result = lint_devops.run_devops_linter(self.current_language, code_to_lint)
+            self._set_status_message(
+                f"{self.current_language}: анализ завершён",
+                is_lint_status=True,
+                full_lint_output=result,
+                activate_lint_panel_if_issues=True,
+            )
+            return self.status_message != original_status
+        
+        # 1b.
         if self.current_language != "python":
-            msg = "Ruff: анализ доступен только для Python-файлов."
+            msg = "Ruff: linting is available only for Python files."
             self._set_status_message(
                 message_for_statusbar=msg,
                 is_lint_status=True,
@@ -2576,25 +2855,25 @@ class SwayEditor:
             )
             return self.status_message != original_status
 
-        # ── 2. Текст для анализа ─────────────────────────────────────────────
+        # 2. Prepare text for linting
         if code is None:
             with self._state_lock:
                 code_to_lint = os.linesep.join(self.text)
         else:
             code_to_lint = code
 
-        # ── 3. Стартуем/переиспользуем сервер ───────────────────────────────
+        # 3. Start or reuse the LSP server
         self._start_lsp_server_if_needed()
         if not self._lsp_initialized:
             self._set_status_message(
-                "Ruff LSP ещё инициализируется…",
+                "Ruff LSP is still initializing…",
                 is_lint_status=True,
-                full_lint_output="Ruff LSP ещё инициализируется…",
+                full_lint_output="Ruff LSP is still initializing…",
                 activate_lint_panel_if_issues=True,
             )
             return self.status_message != original_status
 
-        # ── 4. didOpen / didChange ───────────────────────────────────────────
+        # 4. Send didOpen or didChange notification
         uri = self._lsp_uri()
         if uri not in self._lsp_doc_version:
             self._lsp_did_open(code_to_lint)
@@ -2603,18 +2882,19 @@ class SwayEditor:
             self._lsp_did_change(code_to_lint)
             op = "didChange"
 
-        # ── 5. Обновляем статус-бар ──────────────────────────────────────────
+        # 5. Update status bar to indicate linting started
         self._set_status_message(
-            "Ruff: анализ запущен…",
+            "Ruff: analysis started…",
             is_lint_status=True,
-            full_lint_output="Ruff: анализ в ходе…",
+            full_lint_output="Ruff: analysis in progress…",
             activate_lint_panel_if_issues=True,
         )
         logging.debug(
             "run_lint_async: sent %s (%d bytes) to Ruff-LSP.", op, len(code_to_lint)
         )
         return self.status_message != original_status
-         
+
+
     def show_lint_panel(self) -> bool:
         """
         Activates or deactivates the linter panel display based on current state
@@ -2881,81 +3161,6 @@ class SwayEditor:
 
         self.modified = True # Обновляем статус модификации
 
-    def unindent_current_line(self) -> bool:
-        """
-        Decreases indentation of the current line if there is no active selection.
-        Returns True if the line was unindented or status message changed, False otherwise.
-        """
-        if self.is_selecting: 
-            # This action is intended for when there's no selection.
-            # Block unindent is handled by handle_smart_unindent -> handle_block_unindent.
-            return False 
-
-        original_status = self.status_message
-        original_line_content = ""
-        original_cursor_pos = (self.cursor_y, self.cursor_x) # For history and change detection
-        made_text_change = False
-
-        with self._state_lock:
-            current_y = self.cursor_y
-            if current_y >= len(self.text): 
-                logging.warning(f"unindent_current_line: cursor_y {current_y} out of bounds.")
-                return False 
-
-            original_line_content = self.text[current_y] # Save for undo
-            line_to_modify = self.text[current_y]
-
-            if not line_to_modify or not (line_to_modify.startswith(' ') or line_to_modify.startswith('\t')):
-                self._set_status_message("Nothing to unindent at line start.")
-                return self.status_message != original_status
-
-            tab_size = self.config.get("editor", {}).get("tab_size", 4)
-            use_spaces = self.config.get("editor", {}).get("use_spaces", True)
-            unindent_char_count_to_try = tab_size if use_spaces else 1
-            
-            chars_removed_from_line = 0
-
-            if use_spaces:
-                actual_spaces_to_remove = 0
-                for i in range(min(len(line_to_modify), unindent_char_count_to_try)):
-                    if line_to_modify[i] == ' ':
-                        actual_spaces_to_remove += 1
-                    else:
-                        break
-                if actual_spaces_to_remove > 0:
-                    self.text[current_y] = line_to_modify[actual_spaces_to_remove:]
-                    chars_removed_from_line = actual_spaces_to_remove
-            else: # use_tabs
-                if line_to_modify.startswith('\t'):
-                    self.text[current_y] = line_to_modify[1:]
-                    chars_removed_from_line = 1 
-            
-            if chars_removed_from_line > 0:
-                made_text_change = True
-                self.modified = True
-                # Adjust cursor: move left by the number of characters removed, but not before column 0
-                self.cursor_x = max(0, self.cursor_x - chars_removed_from_line)
-                
-                self.action_history.append({
-                    "type": "block_unindent", # Re-use for consistency with undo/redo logic
-                    "changes": [{
-                        "line_index": current_y,
-                        "original_text": original_line_content,
-                        "new_text": self.text[current_y]
-                    }],
-                    "selection_before": None, # No selection was active
-                    "cursor_before_no_selection": original_cursor_pos,
-                    "selection_after": None,
-                    "cursor_after_no_selection": (self.cursor_y, self.cursor_x)
-                })
-                self.undone_actions.clear()
-                self._set_status_message("Line unindented.")
-                logging.debug(f"Unindented line {current_y}. Removed {chars_removed_from_line} char(s). Cursor at {self.cursor_x}")
-                return True
-            else:
-                if self.status_message == original_status:
-                     self._set_status_message("Nothing effectively unindented on current line.")
-                return self.status_message != original_status
 
     def handle_smart_unindent(self) -> bool:
         """
@@ -3111,7 +3316,6 @@ class SwayEditor:
         return highlighted
 
     # Colour-initialisation helper -------------------------------------------
-    #@staticmethod
     def _detect_color_capabilities() -> tuple[bool, bool, int]:
         """Return a tuple (have_color, use_extended, max_colors)."""
         max_colors = curses.tigetnum("colors")
@@ -3123,32 +3327,37 @@ class SwayEditor:
             return True, False, max_colors      # 16-цветная (с «яркими»)
         return True, True, max_colors           # 256 цветов и выше
 
-    #  Adaptive colour initialisation ----------------------------------------
+ 
     def init_colors(self) -> None:
-        """Initialize curses color pairs for the GitHub-Dark palette.
+        """Initializes curses color pairs for a palette compatible with most terminals.
 
-        Strategy
-        --------
-        1.  Detect *TrueColor* support (`Tc` capability in *terminfo*).
-        2.  If available – build helper that emits 24-bit SGR sequences
-            on every `addstr()`/`addch()` call and skip `init_pair()`.
-        3.  Else – fall back to a pre-selected set of xterm-256 indices
-            that visually approximate the GitHub-Dark palette.
-        4.  If only 8 colors available – use basic color mapping.
-        5.  Always populate ``self.colors`` with the same semantic keys so
-            that drawing code remains unchanged.
+        Strategy:
+        1. Handle monochrome terminals (no color support).
+        2. Initialize curses color system.
+        3. Attempt to load custom colors from `self.user_colors`.
+        4. Determine available color depth (8, 16, or 256+).
+        5. Apply a color scheme based on available depth:
+           - Basic 8-color scheme for limited terminals.
+           - Extended 256-color scheme (approximating GitHub-Dark) for capable terminals.
+        6. Populate `self.colors` with semantic keys mapped to curses attributes.
 
-        Raises
-        ------
-        curses.error
-            If the terminal does not support *any* colors.  In that case the
-            method degrades to monochrome (all attributes = ``curses.A_NORMAL``).
+        This method aims for broad compatibility, especially for server environments
+        where TrueColor support might be absent or unreliable through curses.
         """
-        import subprocess
-        import shlex
-        
-        # ---------- 0.  Plain monochrome fallback ----------
+        # Helper to safely parse hex color strings if provided by user config.
+        def parse_hex_color(hex_str: str) -> Optional[int]:
+            """Parse hex color string like '#FFAA00' or 'FFAA00' to int."""
+            if not isinstance(hex_str, str): # Guard against non-string input
+                return None
+            hex_str = hex_str.lstrip('#')
+            if re.fullmatch(r'[0-9a-fA-F]{6}', hex_str):
+                return int(hex_str, 16)
+            logging.warning(f"Invalid hex color string format: '{hex_str}'")
+            return None
+
+        # ---------- 0. Plain monochrome fallback ----------
         if not curses.has_colors():
+            logging.warning("Terminal does not support colors. Falling back to monochrome.")
             self.colors = {name: curses.A_NORMAL for name in (
                 "comment", "docstring", "keyword", "string", "number", "function",
                 "constant", "type", "operator", "builtins", "line_number",
@@ -3157,135 +3366,205 @@ class SwayEditor:
             )}
             return
 
-        curses.start_color()
-        curses.use_default_colors()
-        bg = -1  # keep terminal default background
-
-        # ---------- 1.  Check for 24-bit support ----------
-        # A very common heuristic: "Tc" capability in terminfo.
         try:
-            tic_out = subprocess.check_output(shlex.split("infocmp"), text=True)
-            truecolor_ok = "Tc" in tic_out
-        except Exception:  # noqa: BLE001
-            truecolor_ok = False
-
-        if truecolor_ok:
-            # Helper that returns an attribute with embedded 24-bit escape.
-            # Call it each time you need a color:
-            #   attr = rgb(0xD2A8FF, bg=True) | curses.A_BOLD
-            # Не требуется init_pair().
-            def rgb(hex_color: int, bg_flag: bool = False) -> int:  # noqa: D401
-                r = (hex_color >> 16) & 0xFF
-                g = (hex_color >> 8) & 0xFF
-                b = hex_color & 0xFF
-                # В реальной реализации TrueColor нужно применять escape-последовательности
-                # Здесь возвращаем базовый атрибут как заглушку
-                return curses.A_NORMAL
-            # Сохраняем ссылки на lambda-генератор, чтобы рисующий код мог вызывать.
-            self.colors = {
-                "comment":   rgb(0x8B949E),
-                "docstring": rgb(0x8B949E), 
-                "keyword":   rgb(0xD2A8FF),
-                "string":    rgb(0xA5D6FF),
-                "number":    rgb(0x79C0FF),
-                "function":  rgb(0xFFA657),
-                "constant":  rgb(0xD29922),
-                "type":      rgb(0xF2CC60),
-                "operator":  rgb(0xF0F6FC),
-                "builtins":  rgb(0xF2CC60),
-                "line_number": rgb(0xF2CC60),
-                "error":     rgb(0xFF7B72) | curses.A_BOLD,
-                "status":    rgb(0xC9D1D9) | curses.A_BOLD,
-                "status_error": rgb(0xFF7B72) | curses.A_BOLD,
-                "search_highlight": rgb(0x3C2D00, bg_flag=True),
-                "git_info":  rgb(0x79C0FF),
-                "git_dirty": rgb(0xFFAB70) | curses.A_BOLD,
-            }
-            return  # done – TrueColor handled
-
-        # ---------- 2. Check available colors count ----------
-        max_colors = curses.COLORS
-        
-        # ---------- 3. Basic 8-color fallback (for console mode) ----------
-        if max_colors <= 8:
-            # Используем только базовые цвета 0-7
-            basic_palette = {
-                1: (curses.COLOR_WHITE, "comment"),      # белый для комментариев
-                2: (curses.COLOR_MAGENTA, "keyword"),    # магента для ключевых слов
-                3: (curses.COLOR_CYAN, "string"),        # циан для строк
-                4: (curses.COLOR_BLUE, "number"),        # синий для чисел
-                5: (curses.COLOR_YELLOW, "function"),    # желтый для функций
-                6: (curses.COLOR_GREEN, "constant"),     # зеленый для констант
-                7: (curses.COLOR_RED, "error"),          # красный для ошибок
-            }
+            curses.start_color()
+            # Use default terminal background and foreground if possible
+            # This makes the editor blend better with user's terminal theme.
+            curses.use_default_colors()
+            bg = -1  # Use default background
             
-            for pair_id, (fg_color, _) in basic_palette.items():
-                curses.init_pair(pair_id, fg_color, bg)
-
-            self.colors = {
-                "comment":   curses.color_pair(1),
-                "docstring": curses.color_pair(1), 
-                "keyword":   curses.color_pair(2) | curses.A_BOLD,
-                "string":    curses.color_pair(3),
-                "number":    curses.color_pair(4),
-                "function":  curses.color_pair(5) | curses.A_BOLD,
-                "constant":  curses.color_pair(6),
-                "type":      curses.color_pair(5),  # желтый как функции
-                "operator":  curses.A_BOLD,         # просто жирный
-                "builtins":  curses.color_pair(5),  # желтый
-                "line_number": curses.color_pair(1),
-                "error":     curses.color_pair(7) | curses.A_BOLD,
-                "status":    curses.A_BOLD,
-                "status_error": curses.color_pair(7) | curses.A_BOLD,
-                "search_highlight": curses.A_REVERSE,  # инвертированный фон
-                "git_info":  curses.color_pair(4),
-                "git_dirty": curses.color_pair(5) | curses.A_BOLD,
-            }
+        except Exception as e:
+            logging.error(f"Error initializing curses colors: {e}. Using basic fallback.")
+            # If start_color or use_default_colors fails, treat as monochrome.
+            self.colors = {name: curses.A_NORMAL for name in (
+                "comment", "docstring", "keyword", "string", "number", "function",
+                "constant", "type", "operator", "builtins", "line_number",
+                "error", "status", "status_error", "search_highlight",
+                "git_info", "git_dirty"
+            )}
             return
 
-        # ---------- 4.  xterm-256 fallback ----------
-        # Pre-selected indices (≈ GitHub-Dark).  Pick другой индекс при желании.
-        palette_256 = {
-            1: (246, "comment"),        # #8B949E
-            2: (141, "keyword"),        # #D2A8FF
-            3: (117, "string"),         # #A5D6FF
-            4: (75,  "number"),         # #79C0FF
-            5: (215, "function"),       # #FFA657
-            6: (178, "constant"),       # #D29922
-            7: (221, "type"),           # #F2CC60
-            8: (196, "error"),          # #FF7B72
-            9: (235, "search_bg"),      # selection/search background
-            10: (250, "status_fg"),     # status foreground
-            11: (196, "status_error"),  # status error fg
-            12: (71,  "git_info"),      # #79C0FF
-            13: (208, "git_dirty"),     # #FFAB70
-            14: (246, "docstring"),      # ← same tint as "comment"
+        # Attempt to get `search_highlight` from user config.
+        # `self.user_colors` should be an empty dict if config.toml is missing or `colors` section is absent.
+        search_highlight_user_val = self.user_colors.get("search_highlight")
+
+        max_term_colors = curses.COLORS # Number of colors supported by the terminal
+
+        # ---------- Strategy based on max_term_colors ----------
+
+        # Basic 8/16-color fallback (for consoles or terminals with limited colors)
+        # This also serves as a fallback if 256-color init fails.
+        if max_term_colors < 256: # Typically 8 or 16 colors
+            logging.info(f"Terminal supports {max_term_colors} colors. Using basic 8/16 color palette.")
+            # Define color pairs for 8-color mode. These are standard ANSI colors.
+            # Pair 0 is default fg/bg. We start from 1.
+            # (curses_color_const, semantic_name, attributes)
+            # Attributes like A_BOLD can be combined.
+            basic_palette_definitions = [
+                (curses.COLOR_CYAN,   "comment", curses.A_NORMAL),    # Often gray/blueish on dark themes
+                (curses.COLOR_CYAN,   "docstring", curses.A_NORMAL),
+                (curses.COLOR_MAGENTA,"keyword", curses.A_BOLD),
+                (curses.COLOR_BLUE,   "string", curses.A_NORMAL),
+                (curses.COLOR_GREEN,  "number", curses.A_NORMAL),
+                (curses.COLOR_YELLOW, "function", curses.A_BOLD),
+                (curses.COLOR_GREEN,  "constant", curses.A_BOLD),    # Constants and builtins brighter
+                (curses.COLOR_YELLOW, "type", curses.A_NORMAL),
+                (curses.COLOR_WHITE,  "operator", curses.A_BOLD),    # Default fg, but bold
+                (curses.COLOR_GREEN,  "builtins", curses.A_BOLD),
+                (curses.COLOR_CYAN,   "line_number", curses.A_DIM),  # Dimmed line numbers
+                (curses.COLOR_RED,    "error", curses.A_BOLD),
+                (curses.COLOR_WHITE,  "status", curses.A_BOLD),      # Bold default fg for status
+                (curses.COLOR_RED,    "status_error", curses.A_BOLD),
+                # search_highlight handled specially below
+                (curses.COLOR_BLUE,   "git_info", curses.A_BOLD),    # Git info noticeable
+                (curses.COLOR_YELLOW, "git_dirty", curses.A_BOLD),   # Git dirty status stands out
+            ]
+
+            pair_id_counter = 1
+            for fg_color, name, attr in basic_palette_definitions:
+                if pair_id_counter < curses.COLOR_PAIRS:
+                    try:
+                        curses.init_pair(pair_id_counter, fg_color, bg)
+                        self.colors[name] = curses.color_pair(pair_id_counter) | attr
+                    except curses.error as e:
+                        logging.warning(f"Failed to init pair {pair_id_counter} for {name} (8/16 color mode): {e}")
+                        self.colors[name] = curses.A_NORMAL | attr # Fallback to normal with attribute
+                    pair_id_counter += 1
+                else:
+                    logging.warning(f"Ran out of color pairs in 8/16 color mode for {name}. Max pairs: {curses.COLOR_PAIRS}")
+                    self.colors[name] = curses.A_NORMAL | attr
+                    break # Stop trying to init more pairs
+
+            # Handle search_highlight for 8/16 color mode
+            search_highlight_attr = curses.A_REVERSE # Default: reverse video
+            if search_highlight_user_val:
+                # For 8/16 color mode, user might specify a named color from config (e.g., "yellow_on_blue")
+                # or a simple color name if they know their terminal's capabilities.
+                # This part needs a more robust parser if you allow complex user definitions for 8/16 colors.
+                # For simplicity, let's assume if they provide "yellow", we use COLOR_YELLOW if available.
+                if isinstance(search_highlight_user_val, str) and \
+                   search_highlight_user_val.strip().lower() == "yellow":
+                    if pair_id_counter < curses.COLOR_PAIRS:
+                        try:
+                            # Using yellow text on default background for search.
+                            # Could also use yellow background: init_pair(pair_id_counter, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+                            curses.init_pair(pair_id_counter, curses.COLOR_YELLOW, bg)
+                            search_highlight_attr = curses.color_pair(pair_id_counter) | curses.A_BOLD
+                            pair_id_counter +=1
+                        except curses.error:
+                            pass # Fallback to A_REVERSE if init_pair fails
+            self.colors["search_highlight"] = search_highlight_attr
+            # Ensure all keys are present, even if they fall back to A_NORMAL
+            for name in ("comment", "docstring", "keyword", "string", "number", "function",
+                         "constant", "type", "operator", "builtins", "line_number",
+                         "error", "status", "status_error", "git_info", "git_dirty"):
+                if name not in self.colors:
+                    self.colors[name] = curses.A_NORMAL
+
+            return # Done with 8/16 color mode
+
+        # ---------- xterm-256 color fallback (Default for capable terminals) ----------
+        # This will be used if max_term_colors >= 256
+        logging.info(f"Terminal supports {max_term_colors} colors. Using 256-color palette.")
+        
+        # (xterm_color_index, semantic_name, attributes)
+        # These indices are standard for xterm-256 color palette.
+        palette_256_definitions = [
+            (246, "comment", curses.A_NORMAL),        # Light grey for comments
+            (246, "docstring", curses.A_NORMAL),
+            (141, "keyword", curses.A_NORMAL),        # Purple-ish for keywords
+            (117, "string", curses.A_NORMAL),         # Light blue for strings
+            (75,  "number", curses.A_NORMAL),         # Cyan-ish blue for numbers
+            (215, "function", curses.A_NORMAL),       # Orange-ish for functions
+            (178, "constant", curses.A_NORMAL),       # Yellow-ish for constants
+            (221, "type", curses.A_NORMAL),           # Yellow for types
+            (252, "operator", curses.A_NORMAL),       # Lighter grey for operators
+            (221, "builtins", curses.A_NORMAL),       # Yellow for builtins (same as type)
+            (240, "line_number", curses.A_DIM),       # Darker grey, dimmed for line numbers
+            (196, "error", curses.A_BOLD),            # Bright red, bold for errors
+            (250, "status", curses.A_BOLD),           # Very light grey, bold for status
+            (196, "status_error", curses.A_BOLD),     # Bright red, bold for status errors
+            # search_highlight handled specially
+            (71,  "git_info", curses.A_NORMAL),       # Greenish for Git info
+            (208, "git_dirty", curses.A_BOLD),        # Orange, bold for Git dirty status
+        ]
+
+        pair_id_counter = 1
+        for fg_idx, name, attr in palette_256_definitions:
+            if pair_id_counter < curses.COLOR_PAIRS:
+                try:
+                    # Ensure fg_idx is within the terminal's supported color range
+                    if fg_idx < max_term_colors:
+                        curses.init_pair(pair_id_counter, fg_idx, bg)
+                        self.colors[name] = curses.color_pair(pair_id_counter) | attr
+                    else: # Color index too high for this terminal
+                        logging.warning(f"Color index {fg_idx} for {name} exceeds terminal max {max_term_colors}. Using default.")
+                        self.colors[name] = curses.A_NORMAL | attr
+                except curses.error as e:
+                    logging.warning(f"Failed to init pair {pair_id_counter} for {name} (256-color mode): {e}")
+                    self.colors[name] = curses.A_NORMAL | attr
+                pair_id_counter += 1
+            else:
+                logging.warning(f"Ran out of color pairs in 256-color mode for {name}. Max pairs: {curses.COLOR_PAIRS}")
+                self.colors[name] = curses.A_NORMAL | attr
+                break
+
+        # Handle search_highlight for 256-color mode
+        search_fg_idx_256 = 0    # Default: Black text (or terminal default fg if bg is colored)
+        search_bg_idx_256 = 220  # Default: A gold/yellowish background (xterm index)
+
+        if search_highlight_user_val:
+            # User might provide a hex color, try to convert to nearest 256-color index.
+            # This conversion is complex. For now, if it's hex, we use a default.
+            # Or they might provide "xterm:fg_idx,bg_idx" or similar.
+            # Simplified: if it's a known name like "yellow_bg", map it.
+            if isinstance(search_highlight_user_val, str):
+                user_val_lower = search_highlight_user_val.lower()
+                if user_val_lower == "yellow_on_dark_gray": # Example
+                    search_fg_idx_256 = 226 # Bright yellow text
+                    search_bg_idx_256 = 235 # Dark gray background
+                elif parse_hex_color(user_val_lower) is not None:
+                    # If user provided a hex, we don't have a direct hex -> xterm-256 conversion here.
+                    # Use a predefined noticeable combination or A_REVERSE.
+                    # For now, we'll stick to the default yellow background (220)
+                    # or allow user to specify an xterm index directly.
+                    # Example: user config "search_highlight": "xterm:232,220" (fg_idx, bg_idx)
+                    if user_val_lower.startswith("xterm:"):
+                        try:
+                            parts = user_val_lower.split(":")[1].split(",")
+                            search_fg_idx_256 = int(parts[0])
+                            search_bg_idx_256 = int(parts[1])
+                            if not (0 <= search_fg_idx_256 < max_term_colors and 0 <= search_bg_idx_256 < max_term_colors):
+                                raise ValueError("xterm color index out of range")
+                        except Exception as e_parse_xterm:
+                            logging.warning(f"Invalid xterm color format '{user_val_lower}': {e_parse_xterm}. Using default search highlight.")
+                            search_fg_idx_256 = 0
+                            search_bg_idx_256 = 220 # Revert to default
+        
+        search_highlight_attr = curses.A_NORMAL # Default if init fails
+        if pair_id_counter < curses.COLOR_PAIRS:
+            try:
+                if search_fg_idx_256 < max_term_colors and search_bg_idx_256 < max_term_colors:
+                    curses.init_pair(pair_id_counter, search_fg_idx_256, search_bg_idx_256)
+                    search_highlight_attr = curses.color_pair(pair_id_counter)
+                else:
+                    search_highlight_attr = curses.A_REVERSE # Fallback if specified xterm indices are too high
+            except curses.error:
+                search_highlight_attr = curses.A_REVERSE # Fallback if init_pair fails
+        else: # No more pairs
+            search_highlight_attr = curses.A_REVERSE
+        self.colors["search_highlight"] = search_highlight_attr
+
+        # Ensure all semantic keys are present in self.colors, falling back to A_NORMAL if any were missed.
+        all_semantic_keys = {
+            "comment", "docstring", "keyword", "string", "number", "function",
+            "constant", "type", "operator", "builtins", "line_number",
+            "error", "status", "status_error", "git_info", "git_dirty"
+            # "search_highlight" is already handled
         }
-
-        for pair_id, (fg_idx, _) in palette_256.items():
-            curses.init_pair(pair_id, fg_idx, bg)
-
-        self.colors = {
-            "comment":   curses.color_pair(1),
-            "docstring": curses.color_pair(1), 
-            "keyword":   curses.color_pair(2),
-            "string":    curses.color_pair(3),
-            "number":    curses.color_pair(4),
-            "function":  curses.color_pair(5),
-            "constant":  curses.color_pair(6),
-            "type":      curses.color_pair(7),
-            "operator":  curses.color_pair(7),
-            "builtins":  curses.color_pair(7),
-            "line_number": curses.color_pair(7),
-            "error":     curses.color_pair(8)  | curses.A_BOLD,
-            "status":    curses.color_pair(10) | curses.A_BOLD,
-            "status_error": curses.color_pair(11) | curses.A_BOLD,
-            "search_highlight": curses.color_pair(9),
-            "git_info":  curses.color_pair(12),
-            "git_dirty": curses.color_pair(13) | curses.A_BOLD,
-        }
-
-
+        for name in all_semantic_keys:
+            if name not in self.colors:
+                self.colors[name] = curses.A_NORMAL
 
 
     def detect_language(self):
@@ -3760,64 +4039,53 @@ class SwayEditor:
                     changed_state = True 
             
         return changed_state
-
-    # 7. key page-up
+    
+    # 7. key Page-Up
     def handle_page_up(self) -> bool:
-        """
-        Moves the cursor and view up by approximately one screen height of text.
-        The cursor attempts to maintain its horizontal column, clamped by line length.
-        Returns True if the cursor or scroll position changed, False otherwise.
+        """Moves the cursor and view up by approximately one screen height.
+
+        This method scrolls the view upwards by the number of currently visible
+        text lines (`self.visible_lines`). The cursor's vertical position is
+        adjusted accordingly, and its horizontal position (column) is preserved
+        if possible, clamped by the length of the new line. If the cursor moves
+        or the scroll position changes, this method returns True.
+
+        It also clears transient status messages (e.g., "Text inserted") if
+        a movement occurs, resetting the status to "Ready" unless it's an
+        error message.
+
+        Args:
+            None
+
+        Returns:
+            bool: True if the cursor position, scroll position, or status message
+                  changed, indicating a redraw might be needed. False otherwise.
         """
         # Store initial state for comparison
         original_cursor_pos = (self.cursor_y, self.cursor_x)
-        original_scroll_pos = (self.scroll_top, self.scroll_left) # scroll_left might change via _clamp_scroll
+        original_scroll_pos = (self.scroll_top, self.scroll_left)
         original_status = self.status_message
         changed_state = False
 
         with self._state_lock:
-            # Get current window dimensions to determine text area height
-            # self.visible_lines should already store this (height - 2)
-            # Ensure self.visible_lines is up-to-date if window size can change dynamically.
-            if self.visible_lines <= 0: # Should not happen in a usable editor state
+            if self.visible_lines <= 0:
                  logging.warning("handle_page_up: visible_lines is not positive, cannot page.")
                  return False
 
             page_height = self.visible_lines # Number of text lines visible on screen
 
-            # Calculate the new scroll_top position
-            # We want to move scroll_top up by page_height, but not less than 0.
-            new_scroll_top = max(0, self.scroll_top - page_height)
-            
-            # Calculate how many lines the view actually scrolled
-            # This can be less than page_height if we hit the top of the file.
-            lines_scrolled_view = self.scroll_top - new_scroll_top
-
-            # Move the cursor position by the same number of lines the view scrolled.
-            # The cursor_y should not go below 0.
-            new_cursor_y = max(0, self.cursor_y - lines_scrolled_view)
-            
-            # If scroll_top changed, or if cursor_y changed due to view scroll, update them.
-            # This logic attempts to move the cursor relative to its position on the screen.
-            # A simpler PageUp often just moves scroll_top and places cursor on the new top visible line.
-            # Let's stick to the "move cursor by one page, then adjust scroll" mental model.
-
-            # Alternative: Move cursor by a page, then adjust scroll.
+            # Move cursor by one page height upwards.
             new_cursor_y_candidate = max(0, self.cursor_y - page_height)
+            self.cursor_y = new_cursor_y_candidate
 
-            # Set new cursor_y and scroll_top
-            # If new_cursor_y_candidate is different, it means a significant jump
-            if new_cursor_y_candidate != self.cursor_y or new_scroll_top != self.scroll_top:
-                self.cursor_y = new_cursor_y_candidate
-                # self.scroll_top = new_scroll_top # _clamp_scroll will handle this primarily
-            
-            # Ensure cursor_x is valid for the new line
-            # self.cursor_x (desired column) is maintained from before the jump.
-            if self.cursor_y < len(self.text): # Check if cursor_y is valid index
+            # Ensure cursor_x is valid for the new line, maintaining the desired column.
+            if self.cursor_y < len(self.text):
                  self.cursor_x = min(self.cursor_x, len(self.text[self.cursor_y]))
-            else: # Should not happen if cursor_y is clamped to max(0, ...)
+            else: # Should not happen if self.text always has at least [""]
                  self.cursor_x = 0
-            
-            # _clamp_scroll will ensure cursor_y is visible and adjust scroll_top and scroll_left
+
+            # _clamp_scroll will adjust scroll_top and scroll_left to ensure
+            # the new cursor_y and cursor_x are visible.
             self._clamp_scroll()
 
         # Determine if any relevant state actually changed.
@@ -3831,23 +4099,32 @@ class SwayEditor:
         else:
             logging.debug("handle_page_up: No change in cursor or scroll state.")
 
-        # Clear transient status messages if a move occurred
+        # Clear transient status messages if a move occurred.
+        # (Remaining logic for status message clearing stays the same)
         if changed_state and self.status_message != original_status:
             if self.status_message not in ["Ready", ""] and not self.status_message.lower().startswith("error"):
                 msg_lower = self.status_message.lower()
-                if ("inserted" in msg_lower or "deleted" in msg_lower or 
-                    "copied" in msg_lower or "pasted" in msg_lower or
-                    "cut" in msg_lower or "undone" in msg_lower or
-                    "redone" in msg_lower or "cancelled" in msg_lower or
-                    "commented" in msg_lower or "uncommented" in msg_lower):
+                # Check if the current status message is one of the transient action messages
+                transient_action_keywords = [
+                    "inserted", "deleted", "copied", "pasted",
+                    "cut", "undone", "redone", "cancelled",
+                    "commented", "uncommented"
+                ]
+                if any(keyword in msg_lower for keyword in transient_action_keywords):
                     self._set_status_message("Ready")
-                    # If status changed back to Ready, it's still a change from original_status if original_status wasn't Ready
-                    if self.status_message != original_status and not changed_state: # Avoid double-setting changed_state
-                        changed_state = True 
-            
-        return changed_state
-    
-    # 8. key page-down
+                    # If status changed back to Ready, it's still a change from original_status
+                    # if original_status wasn't Ready.
+                    if self.status_message != original_status and not changed_state:
+                        # This part of 'if' ensures changed_state is True if only status changed.
+                        # However, changed_state is already True if we are in this block.
+                        # The important part is that self._set_status_message("Ready") might have occurred.
+                        pass # Redraw will be triggered by changed_state = True or status changing
+
+        # The method returns True if 'changed_state' is True (cursor/scroll moved)
+        # OR if the status message itself is different from what it was at the start.
+        return changed_state or (self.status_message != original_status)
+        
+    # 8. key Page-Down
     def handle_page_down(self) -> bool:
         """
         Moves the cursor and view down by approximately one screen height of text.
@@ -4531,31 +4808,64 @@ class SwayEditor:
     # 5. key Enter ---------------
     def handle_enter(self) -> bool:
         """
-        Handles the Enter key.
-        If text is selected, it's deleted by insert_text first. 
-        Then a newline character is inserted.
-        Manages action history via the insert_text method.
-        Returns True as these actions (deletion of selection or insertion of newline) 
-        always change the text content or selection state.
+        Inserts a new line with smart auto-indentation for Python, Java, C, C++, Rust, JavaScript, and TypeScript.
+
+        This method replicates the indentation of the previous line, and, depending on the programming language,
+        automatically increases the indentation level if the previous line opens a new code block.
+        
+        - For Python: If the previous line ends with ":", one more indentation level is added.
+        - For Java, C, C++, Rust, JavaScript, TypeScript: If the previous line ends with "{", one more indentation is added.
+        - For other languages: Only the indentation of the previous line is copied.
+
+        Returns:
+            bool: True if the document was modified and requires redraw, False otherwise.
+
+        Examples:
+            # Python
+            if something:
+                [cursor here]
+
+            # Java
+            if (condition) {
+                [cursor here]
+
+            # Other lines:
+                [just copy the previous indent]
         """
-        changed_state = False
-        with self._state_lock:
-            # self.insert_text will handle:
-            # 1. Deleting selection if active (and recording "delete_selection" action).
-            # 2. Inserting the newline character (and recording "insert" action).
-            # 3. Returning True if any modification occurred.
-            if self.insert_text("\n"):
-                changed_state = True
-            
-        if changed_state:
-            logging.debug("Handled Enter key: Text or selection modified.")
-        else:
-            # This case should ideally not be reached if insert_text correctly inserts a newline
-            # or if a selection was present (which would be cleared).
-            logging.debug("Handled Enter key: No effective change (unexpected for Enter).")
-            
-        return changed_state # Should always be True due to newline insertion
-    
+        current_line = self.text[self.cursor_y]
+        left = current_line[:self.cursor_x]
+        right = current_line[self.cursor_x:]
+
+        # Determine current indentation (all leading spaces/tabs in the left part of the line)
+        indent_match = re.match(r"[ \t]*", left)
+        indent = indent_match.group() if indent_match else ""
+        new_indent = indent
+
+        # Editor configuration for indentation
+        tab_size = self.config.get("editor", {}).get("tab_size", 4)
+        use_spaces = self.config.get("editor", {}).get("use_spaces", True)
+        extra_indent = " " * tab_size if use_spaces else "\t"
+
+        # Python: increase indentation after lines ending with ':'
+        if self.current_language == "python":
+            if left.rstrip().endswith(":"):
+                new_indent += extra_indent
+
+        # C-like languages: increase indentation after lines ending with '{'
+        elif self.current_language in {"java", "c", "cpp", "c++", "rust", "javascript", "typescript"}:
+            if left.rstrip().endswith("{"):
+                new_indent += extra_indent
+
+        # Insert the new line with the calculated indentation
+        self.text[self.cursor_y] = left
+        self.text.insert(self.cursor_y + 1, new_indent + right)
+        self.cursor_y += 1
+        self.cursor_x = len(new_indent)
+        self.modified = True
+        self._set_status_message("Inserted line with smart auto-indent")
+        return True
+
+
     # 6. Insert text at position -----------------------------------------------------------
     def insert_text_at_position(self, text: str, row: int, col: int) -> bool: # Added return type bool
         """
@@ -5334,11 +5644,11 @@ class SwayEditor:
                     # To redo a delete_newline (merge), we re-merge the lines.
                     # 'text' is the content of the line that was merged up.
                     # 'position' is (y,x) where cursor ended after original merge.
-                    y_target_line, x_cursor_after_merge = action_to_redo["position"]  # ИСПРАВЛЕНО: было last_action
+                    y_target_line, x_cursor_after_merge = action_to_redo["position"] 
                     # To redo, we expect line y_target_line to exist, and line y_target_line + 1
                     # (which was re-created by undo) to also exist and match 'text'.
                     if not (0 <= y_target_line < len(self.text) - 1 and 
-                            self.text[y_target_line + 1] == action_to_redo["text"]):  # ИСПРАВЛЕНО: было last_action
+                            self.text[y_target_line + 1] == action_to_redo["text"]):
                         raise IndexError(f"Redo delete_newline: State mismatch for re-merging at line {y_target_line}. Action: {action_to_redo}")
 
                     self.text[y_target_line] += self.text.pop(y_target_line + 1)
@@ -5924,36 +6234,36 @@ class SwayEditor:
 
         original_status = self.status_message
         original_selection_tuple = (self.is_selecting, self.selection_start, self.selection_end)
-        original_cursor_tuple = (self.cursor_y, self.cursor_x)
-        
+        # original_cursor_tuple = (self.cursor_y, self.cursor_x) # <--- УДАЛЕНО
+
         made_actual_text_change = False
 
         with self._state_lock:
             norm_range = self._get_normalized_selection_range()
-            if not norm_range: 
+            if not norm_range:
                 logging.warning("handle_block_indent: Could not get normalized selection range despite active selection.")
                 self._set_status_message("Selection error during indent.")
-                return True 
+                return True
 
             start_coords, end_coords = norm_range
-            start_y_idx, start_x_in_line_sel = start_coords 
-            end_y_idx, end_x_in_line_sel = end_coords     
-            
+            start_y_idx, start_x_in_line_sel = start_coords
+            end_y_idx, end_x_in_line_sel = end_coords
+
             tab_size = self.config.get("editor", {}).get("tab_size", 4)
             use_spaces = self.config.get("editor", {}).get("use_spaces", True)
             indent_string = " " * tab_size if use_spaces else "\t"
-            indent_char_length = len(indent_string) 
+            indent_char_length = len(indent_string)
 
             undo_changes_list: List[Dict[str, Any]] = []
             indented_line_count = 0
 
             for current_y in range(start_y_idx, end_y_idx + 1):
-                if current_y >= len(self.text): 
+                if current_y >= len(self.text):
                     continue
-                
+
                 original_line_content = self.text[current_y]
                 self.text[current_y] = indent_string + original_line_content
-                
+
                 undo_changes_list.append({
                     "line_index": current_y,
                     "original_text": original_line_content,
@@ -5961,28 +6271,28 @@ class SwayEditor:
                 })
                 indented_line_count += 1
                 made_actual_text_change = True
-            
+
             if made_actual_text_change:
                 self.modified = True
-                
+
                 new_selection_start_x = start_x_in_line_sel + indent_char_length
                 new_selection_end_x = end_x_in_line_sel + indent_char_length
-                
+
                 self.selection_start = (start_y_idx, new_selection_start_x)
                 self.selection_end = (end_y_idx, new_selection_end_x)
-                
-                self.cursor_y, self.cursor_x = self.selection_end 
+
+                self.cursor_y, self.cursor_x = self.selection_end
 
                 self.action_history.append({
-                    "type": "block_indent", 
+                    "type": "block_indent",
                     "changes": undo_changes_list,
-                    "indent_str_used": indent_string, 
-                    "start_y": start_y_idx, 
-                    "end_y": end_y_idx, 
-                    "selection_before": original_selection_tuple[1:], 
-                    "cursor_before_no_selection": None, 
+                    "indent_str_used": indent_string,
+                    "start_y": start_y_idx,
+                    "end_y": end_y_idx,
+                    "selection_before": original_selection_tuple[1:], # Сохраняем (start_coords, end_coords)
+                    "cursor_before_no_selection": None, # Так как выделение всегда есть
                     "selection_after": (self.is_selecting, self.selection_start, self.selection_end),
-                    "cursor_after_no_selection": None
+                    "cursor_after_no_selection": None # Так как выделение остается
                 })
                 self.undone_actions.clear()
                 self._set_status_message(f"Indented {indented_line_count} line(s)")
@@ -5993,11 +6303,11 @@ class SwayEditor:
                 return True
             else:
                 if self.status_message == original_status:
-                     self._set_status_message("No lines selected for indent operation.")
+                     self._set_status_message("No lines selected for indent operation.") # Или "Nothing to indent in selection"
                 return self.status_message != original_status
         # Default return if somehow lock isn't acquired or other paths missed
         return False
-    
+       
     # 2.
     def handle_block_unindent(self) -> bool:
         """
@@ -6112,24 +6422,43 @@ class SwayEditor:
     # 3.
     def unindent_current_line(self) -> bool:
         """
-        Decreases indentation of the current line if there is no active selection.
-        Returns True if the line was unindented or status message changed, False otherwise.
+        Decreases the indentation of the current line if there is no active selection.
+
+        This method attempts to unindent the current line by removing either a configured
+        number of leading spaces or a single tab character, depending on editor settings.
+        If successful, the change is recorded in the undo history, the modified flag is set,
+        and the status message is updated. If no unindentation is possible, an appropriate
+        status message is set. This operation does nothing if there is an active selection.
+
+        Returns:
+            bool: True if the line was unindented or the status message changed (requiring a redraw),
+                False otherwise.
+
+        Side Effects:
+            - Modifies the text buffer if unindentation occurs.
+            - Updates cursor position and editor modified state.
+            - Records the change in the undo history.
+            - Updates the status message.
+
+        Notes:
+            This method is intended for single-line unindent only. For block unindent, see
+            handle_smart_unindent or handle_block_unindent.
         """
-        if self.is_selecting: 
+        if self.is_selecting:
             # This action is intended for when there's no selection.
             # Block unindent is handled by handle_smart_unindent -> handle_block_unindent.
-            return False 
+            return False
 
         original_status = self.status_message
         original_line_content = ""
         original_cursor_pos = (self.cursor_y, self.cursor_x) # For history and change detection
-        made_text_change = False
+        # made_text_change = False # <--- УДАЛЕНО
 
         with self._state_lock:
             current_y = self.cursor_y
-            if current_y >= len(self.text): 
+            if current_y >= len(self.text):
                 logging.warning(f"unindent_current_line: cursor_y {current_y} out of bounds.")
-                return False 
+                return False
 
             original_line_content = self.text[current_y] # Save for undo
             line_to_modify = self.text[current_y]
@@ -6141,7 +6470,7 @@ class SwayEditor:
             tab_size = self.config.get("editor", {}).get("tab_size", 4)
             use_spaces = self.config.get("editor", {}).get("use_spaces", True)
             unindent_char_count_to_try = tab_size if use_spaces else 1
-            
+
             chars_removed_from_line = 0
 
             if use_spaces:
@@ -6157,14 +6486,13 @@ class SwayEditor:
             else: # use_tabs
                 if line_to_modify.startswith('\t'):
                     self.text[current_y] = line_to_modify[1:]
-                    chars_removed_from_line = 1 
-            
+                    chars_removed_from_line = 1
+
             if chars_removed_from_line > 0:
-                made_text_change = True
                 self.modified = True
                 # Adjust cursor: move left by the number of characters removed, but not before column 0
                 self.cursor_x = max(0, self.cursor_x - chars_removed_from_line)
-                
+
                 self.action_history.append({
                     "type": "block_unindent", # Re-use for consistency with undo/redo logic
                     "changes": [{
@@ -6185,7 +6513,7 @@ class SwayEditor:
                 if self.status_message == original_status:
                      self._set_status_message("Nothing effectively unindented on current line.")
                 return self.status_message != original_status
-
+            
     # 4.  ───────────────────── Commenting lines ─────────────────────
     def comment_lines(self, start_y: int, end_y: int, comment_prefix: str) -> bool:
         """
@@ -6216,7 +6544,8 @@ class SwayEditor:
 
             # First pass: determine minimum indentation of non-empty lines in the block
             for y_scan in range(start_y, end_y + 1):
-                if y_scan >= len(self.text): continue
+                if y_scan >= len(self.text):
+                    continue
                 line_content_scan = self.text[y_scan]
                 if line_content_scan.strip(): # If line is not blank
                     non_empty_lines_in_block_indices.append(y_scan)
@@ -6234,7 +6563,8 @@ class SwayEditor:
             }
 
             for y_iter in range(start_y, end_y + 1):
-                if y_iter >= len(self.text): continue
+                if y_iter >= len(self.text):
+                    continue
                 
                 line_content_to_modify = self.text[y_iter]
                 
@@ -6480,6 +6810,10 @@ class SwayEditor:
             self.open_file()
         elif key_code == 3:  # Ctrl+Q
             self.exit_editor()
+        elif key_code == 25: # Ctrl+ Y
+            self.redo()
+        elif key_code == 26: # Ctrl+ Z
+            self.undo()
         else:
             logging.debug(f"Unhandled control key: {key_code}")
 
@@ -6550,7 +6884,7 @@ class SwayEditor:
 
         # Обработка базовой клавиши
         base_code: int
-        if base_key_str in named: # Если "z" в "shift+z" это, например, "del"
+        if base_key_str in named: 
             base_code = named[base_key_str]
         elif len(base_key_str) == 1:
             base_code = ord(base_key_str) # "z" -> ord('z')
@@ -6566,26 +6900,7 @@ class SwayEditor:
         is_shift = "shift" in modifiers
 
         if is_alt:
-            # Alt часто не генерирует один int код, а меняет байтовую последовательность.
-            # Если get_wch() возвращает строку для Alt-комбинаций, этот парсер не сможет
-            # их перевести в int, если только нет спец. кодов от curses (редко).
-            # Можно зарезервировать диапазон для Alt, как вы делали (base_key | 0x200)
-            # но это будет работать, только если ваш input loop генерирует такие int'ы.
-            # Для Alt+X (где X это буква), эмуляторы терминала часто шлют Esc + X.
-            # parse_key здесь должен вернуть то, что ОЖИДАЕТ action_map.
-            # Если action_map ожидает кастомные коды для Alt, то здесь их надо генерировать.
-            # Например, если base_code это ord('x'), то alt+x -> ord('x') | 0x200.
-            # Однако, если base_code это KEY_LEFT, то alt+left может быть другим.
-            # Ваша логика `return base_key | 0x200` была для `alt+...`.
-            # Но она стояла ПЕРЕД разделением на части.
-            # Если key_str был "alt+a", то base_key парсился из "a".
-            # Это можно оставить, но после обработки ctrl/shift.
-            # Либо, ваш get_wch() должен возвращать такие коды.
-            # Для простоты, если Alt, то это скорее всего не одиночный int от getch().
-            # Если вы хотите мапить "alt+x" на что-то, это лучше делать через term_mappings или строки.
-            logging.warning(f"Парсинг Alt-комбинаций ('{key_str}') может быть не универсальным и зависит от терминала/get_wch.")
-            # Если вы определили кастомные коды для Alt, то применяйте их.
-            # base_code |= 0x200 # Пример вашего предыдущего подхода
+            logging.warning(f"Парсинг Alt+комбинаций ('{key_str}') может быть не универсальным и зависит от терминала/get_wch.")
 
         if is_ctrl:
             if 'a' <= base_key_str <= 'z':
@@ -6779,6 +7094,13 @@ class SwayEditor:
                 return True   # Status changed
             
             if not os.path.exists(actual_filename_to_open):
+                self.text = [""]
+                self.filename = None
+                self.modified = False
+                self.encoding = "utf-8"
+                self.action_history.clear()
+                self.undone_actions.clear()
+                self.set_initial_cursor_position()
                 self._set_status_message(f"Error: File not found '{os.path.basename(actual_filename_to_open)}'")
                 logging.warning(f"Open file failed: file not found at '{actual_filename_to_open}'")
                 return True
@@ -7491,7 +7813,8 @@ class SwayEditor:
              redraw_is_needed = True # Though detect_language will also imply this
         self._lexer = None 
         self._last_git_filename = None # Reset for Git info updates
-        if self.git_info != ("", "", "0"): redraw_is_needed = True
+        if self.git_info != ("", "", "0"):
+            redraw_is_needed = True
         self.git_info = ("", "", "0") 
 
         # Reset cursor, scroll, selection, and history
@@ -7510,10 +7833,8 @@ class SwayEditor:
 
         # Re-detect language for the new (empty) buffer.
         # This will typically set TextLexer and clear the lru_cache for _get_tokenized_line.
-        self.detect_language() 
-        
+        self.detect_language()      
         self._set_status_message("New file created")
-        
         # Given the extensive state reset (text, cursor, scroll, filename, lexer, etc.),
         # a redraw is always necessary after successfully reaching this point.
         return True
@@ -7939,7 +8260,8 @@ class SwayEditor:
                         break
                     elif key_event in (curses.KEY_ENTER, 10, 13): # Enter/Return keys.
                         logging.debug(f"Prompt: Enter (int {key_event}) detected. Confirming.")
-                        input_result = "".join(input_buffer).strip(); break
+                        input_result = "".join(input_buffer).strip()
+                        break
                     elif key_event in (curses.KEY_BACKSPACE, 127, 8): # Backspace key (code can vary).
                         if cursor_char_pos > 0:
                             cursor_char_pos -= 1
@@ -8027,7 +8349,6 @@ class SwayEditor:
                     # will restore its own status bar content.
             except curses.error as e_final_clear_prompt:
                 logging.warning(f"Prompt: Curses error during final status line clear: {e_final_clear_prompt}")
-
             curses.flushinp() # Clear any unprocessed typeahead characters from terminal input buffer.
         
         return input_result
@@ -8046,7 +8367,6 @@ class SwayEditor:
         
         original_status = self.status_message
         status_changed_by_prompts = False # Track if prompts themselves alter final status view
-
         # Clear previous search state immediately
         self.highlighted_matches = []
         self.search_matches = []
@@ -8436,7 +8756,7 @@ class SwayEditor:
 
             # Disallow if the target path IS the current working directory itself (saving AS a directory).
             if absolute_target_path == current_working_dir:
-                 self._set_status_message(f"Cannot save: Target path is the current directory itself.")
+                 self._set_status_message("Cannot save: Target path is the current directory itself.")
                  logging.warning(f"Validation failed: Attempt to save as current directory '{absolute_target_path}'.")
                  return False
             
@@ -9219,7 +9539,7 @@ class SwayEditor:
 
 
     # ==================== bracket =======================
-    # метод, предназначенный для поиска парной скобки по нескольким строкам.
+    # this method designed to search for a matching bracket across multiple lines
     def find_matching_bracket_multiline(self, initial_char_y: int, initial_char_x: int) -> Optional[Tuple[int, int]]:
         """
         Searches for the matching bracket for the one at (initial_char_y, initial_char_x)
@@ -9239,9 +9559,8 @@ class SwayEditor:
 
         char_at_cursor = self.text[initial_char_y][initial_char_x]
         
-        brackets_map = {"(": ")", "{": "}", "[": "]", ")": "(", "}": "{", "]": "["}
-        open_brackets = "({["
-        # close_brackets = ")}]" # Not directly used in this simplified search logic a lot
+        brackets_map = {"(": ")", "{": "}", "[": "]", "<": ">", ")": "(", "}": "{", "]": "[", ">": "<"}
+        open_brackets = "({[<"
 
         if char_at_cursor not in brackets_map:
             return None # Character at cursor is not a bracket we handle
@@ -9265,33 +9584,29 @@ class SwayEditor:
                     current_x += 1
                 current_y += 1
                 current_x = 0 # Reset column for the new line
-        else: # char_at_cursor is a closing bracket, search backward for the opening one
+        else:  # char_at_cursor is a closing bracket, search backward for the opening one
             current_y, current_x = initial_char_y, initial_char_x - 1
             while current_y >= 0:
                 line = self.text[current_y]
-                # If current_x became -1 from previous line, adjust to end of this line
-                if current_x < 0 : current_x = len(line) -1 
-                
                 while current_x >= 0:
                     char = line[current_x]
-                    if char == char_at_cursor: # Found another closing bracket of the same type
+                    if char == char_at_cursor:
                         level += 1
-                    elif char == target_match_char: # Found a potential matching opening bracket
+                    elif char == target_match_char:
                         level -= 1
                         if level == 0:
-                            return (current_y, current_x) # Match found
+                            return (current_y, current_x)
                     current_x -= 1
                 current_y -= 1
-                # For the next line (previous one), start searching from its end.
-                # current_x will be set to len(line) - 1 at the start of the inner loop.
-                # No explicit current_x reset needed here as it's handled by inner loop init/condition
-        
+                if current_y >= 0:
+                    current_x = len(self.text[current_y]) - 1
+
         return None # No match found
 
 
-    # Highlight brackets ----------------------------
     def highlight_matching_brackets(self) -> None:
-        """Highlights the bracket at the cursor and its matching pair.
+        """
+        Highlights the bracket at the cursor and its matching pair.
 
         This method searches for a bracket character at or immediately to the
         left of the current cursor position. If a bracket is found, it uses
@@ -9300,9 +9615,9 @@ class SwayEditor:
         highlighted using `curses.A_REVERSE`.
 
         The method accounts for:
-        - Cursor position being at the end of a line or on an empty line.
-        - Vertical and horizontal scrolling to determine visibility.
-        - Display widths of characters (via `self.get_char_width` and `self.get_string_width`).
+            - Cursor position being at the end of a line or on an empty line.
+            - Vertical and horizontal scrolling to determine visibility.
+            - Display widths of characters (via `self.get_char_width` and `self.get_string_width`).
 
         This method is typically called as part of the main drawing cycle and
         modifies the screen directly using `self.stdscr.chgat()`. It does not
@@ -9312,15 +9627,22 @@ class SwayEditor:
             This implementation does NOT currently ignore brackets found within
             string literals or comments, which can lead to incorrect matches in
             source code.
+
+        Args:
+            None
+
+        Returns:
+            None
         """
         # 1. Get terminal dimensions and ensure basic conditions are met.
         term_height, term_width = self.stdscr.getmaxyx()
-
+        # Bounds check for cursor position
         if not (0 <= self.cursor_y < len(self.text)):
             logging.debug("highlight_matching_brackets: Cursor Y (%d) is out of text bounds (0-%d).",
                         self.cursor_y, len(self.text) - 1)
             return
 
+        # Check if cursor's line is visible on the screen
         if not (self.scroll_top <= self.cursor_y < self.scroll_top + self.visible_lines):
             logging.debug(
                 "highlight_matching_brackets: Cursor's line (%d) is not currently visible on screen (scroll_top: %d, visible_lines: %d).",
@@ -9333,76 +9655,53 @@ class SwayEditor:
             logging.debug("highlight_matching_brackets: Cursor is on an empty line at column 0.")
             return
 
-        # 2. Determine the bracket character at or near the cursor to be matched.
-        char_y_cursor_line = self.cursor_y
-        char_x_cursor_pos_ref = self.cursor_x
+        # 1.1 Find the bracket at or near the cursor
+        brackets_map_chars = "(){}[]<>"
+        bracket_pos = None
 
-        bracket_char_to_match: Optional[str] = None
-        # These will store the coordinates of the bracket that is actually being considered for matching.
-        final_char_y_for_first_bracket: Optional[int] = None # CORRECTLY RENAMED
-        final_char_x_for_first_bracket: Optional[int] = None # CORRECTLY RENAMED
-
-        brackets_map_chars = "(){}[]"
-
-        # Scenario A: Check character directly AT the cursor's X position.
-        if char_x_cursor_pos_ref < len(current_line_text):
-            char_at_cursor = current_line_text[char_x_cursor_pos_ref]
-            if char_at_cursor in brackets_map_chars:
-                bracket_char_to_match = char_at_cursor
-                final_char_y_for_first_bracket = char_y_cursor_line # USE RENAMED
-                final_char_x_for_first_bracket = char_x_cursor_pos_ref # USE RENAMED
-                logging.debug(f"highlight_matching_brackets: Candidate bracket '{bracket_char_to_match}' AT cursor ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket}).")
-
-        # Scenario B: If no bracket AT cursor, check character to the LEFT.
-        if bracket_char_to_match is None and char_x_cursor_pos_ref > 0:
-            char_x_left = char_x_cursor_pos_ref - 1
-            if char_x_left < len(current_line_text):
-                char_left_of_cursor = current_line_text[char_x_left]
-                if char_left_of_cursor in brackets_map_chars:
-                    bracket_char_to_match = char_left_of_cursor
-                    final_char_y_for_first_bracket = char_y_cursor_line # USE RENAMED
-                    final_char_x_for_first_bracket = char_x_left       # USE RENAMED
-                    logging.debug(f"highlight_matching_brackets: Candidate bracket '{bracket_char_to_match}' LEFT of cursor ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket}).")
-
-        # If no bracket was identified, exit.
-        if bracket_char_to_match is None or final_char_x_for_first_bracket is None or final_char_y_for_first_bracket is None:
-            logging.debug(f"highlight_matching_brackets: No suitable bracket found near cursor ({char_y_cursor_line},{char_x_cursor_pos_ref}) for matching.")
+        if 0 <= self.cursor_x < len(current_line_text) and current_line_text[self.cursor_x] in brackets_map_chars:
+            bracket_pos = (self.cursor_y, self.cursor_x)
+            logging.debug(f"highlight_matching_brackets: Candidate bracket '{current_line_text[self.cursor_x]}' AT cursor ({self.cursor_y},{self.cursor_x}).")
+        elif self.cursor_x > 0 and current_line_text[self.cursor_x - 1] in brackets_map_chars:
+            bracket_pos = (self.cursor_y, self.cursor_x - 1)
+            logging.debug(f"highlight_matching_brackets: Candidate bracket '{current_line_text[self.cursor_x - 1]}' LEFT of cursor ({self.cursor_y},{self.cursor_x - 1}).")
+        else:
+            logging.debug(f"highlight_matching_brackets: No suitable bracket found near cursor ({self.cursor_y},{self.cursor_x}) for matching.")
             return
 
-        # 3. Find the matching bracket.
-        # Use the definitive coordinates.
-        match_coords = self.find_matching_bracket_multiline(final_char_y_for_first_bracket, final_char_x_for_first_bracket)
+        # 2. Find the matching bracket using the determined position
+        bracket_char = self.text[bracket_pos[0]][bracket_pos[1]]
+        match_coords = self.find_matching_bracket_multiline(bracket_pos[0], bracket_pos[1])
 
         if not match_coords:
-            logging.debug(f"highlight_matching_brackets: No matching bracket found for '{bracket_char_to_match}' at ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket}).")
+            logging.debug(f"highlight_matching_brackets: No matching bracket found for '{bracket_char}' at ({bracket_pos[0]},{bracket_pos[1]}).")
             return
 
         match_y, match_x = match_coords
-        
         if not (0 <= match_y < len(self.text) and 0 <= match_x < len(self.text[match_y])):
             logging.warning(f"highlight_matching_brackets: Matching bracket coords ({match_y},{match_x}) are out of text bounds.")
             return
 
-        # 4. Define helper to calculate screen coordinates.
+        # 3. Calculate the display width of the line number column
         line_num_display_width = len(str(max(1, len(self.text)))) + 1
         if hasattr(self.drawer, '_text_start_x') and isinstance(self.drawer._text_start_x, int) and self.drawer._text_start_x >= 0:
             line_num_display_width = self.drawer._text_start_x
         else:
             logging.debug("highlight_matching_brackets: self.drawer._text_start_x not available or invalid, calculating line_num_display_width locally.")
 
-        def get_screen_coords_for_highlight(text_row_idx: int, text_col_idx: int) -> Optional[Tuple[int, int]]:
-            """Calculates screen (y,x) for a text coordinate.
+        def get_screen_coords_for_highlight(text_row_idx: int, text_col_idx: int) -> Optional[tuple[int, int]]:
+            """
+            Calculates screen (y, x) for a text coordinate.
 
             Args:
-                text_row_idx: The 0-based row index in the text buffer.
-                text_col_idx: The 0-based character column index in the line.
+                text_row_idx (int): The 0-based row index in the text buffer.
+                text_col_idx (int): The 0-based character column index in the line.
 
             Returns:
-                A tuple (screen_y, screen_x) if the coordinate is visible,
-                otherwise None.
+                Optional[Tuple[int, int]]: The screen coordinates if visible, otherwise None.
             """
             if not (self.scroll_top <= text_row_idx < self.scroll_top + self.visible_lines):
-                return None 
+                return None
             screen_y_coord = text_row_idx - self.scroll_top
             try:
                 if not (0 <= text_row_idx < len(self.text)):
@@ -9414,12 +9713,10 @@ class SwayEditor:
                 logging.warning(f"get_screen_coords_for_highlight: IndexError accessing text for ({text_row_idx},{text_col_idx}).")
                 return None
             screen_x_coord = line_num_display_width + prefix_width_unscrolled - self.scroll_left
-            char_display_width_at_coord: int
             if text_col_idx >= len(self.text[text_row_idx]):
                 logging.warning(f"get_screen_coords_for_highlight: text_col_idx {text_col_idx} is at or past EOL for line {text_row_idx} (len {len(self.text[text_row_idx])}). Cannot get char width for highlighting.")
                 return None
-            else:
-                char_display_width_at_coord = self.get_char_width(self.text[text_row_idx][text_col_idx])
+            char_display_width_at_coord = self.get_char_width(self.text[text_row_idx][text_col_idx])
             if char_display_width_at_coord <= 0:
                 logging.debug(f"get_screen_coords_for_highlight: Character at ({text_row_idx},{text_col_idx}) has width {char_display_width_at_coord}, not highlighting directly.")
                 return None
@@ -9427,35 +9724,31 @@ class SwayEditor:
                 return None
             return screen_y_coord, max(line_num_display_width, screen_x_coord)
 
-        # Calculate screen coordinates for the original bracket and its match.
-        # *** THE CRITICAL FIX IS HERE: Use the correctly named variables ***
-        coords1_on_screen = get_screen_coords_for_highlight(final_char_y_for_first_bracket, final_char_x_for_first_bracket)
+        # 4. Calculate screen coordinates for both brackets
+        coords1_on_screen = get_screen_coords_for_highlight(bracket_pos[0], bracket_pos[1])
         coords2_on_screen = get_screen_coords_for_highlight(match_y, match_x)
 
-        # 5. Apply highlighting if brackets are visible on screen.
+        # 5. Highlight brackets if visible on screen
         highlight_attr = curses.A_REVERSE
 
         if coords1_on_screen:
             scr_y1, scr_x1 = coords1_on_screen
-            # Use the definitive coordinates for getting the character and its width
-            char1_width = self.get_char_width(self.text[final_char_y_for_first_bracket][final_char_x_for_first_bracket])
-            
+            char1_width = self.get_char_width(self.text[bracket_pos[0]][bracket_pos[1]])
             if scr_x1 < term_width and char1_width > 0:
                 visible_cells_of_char1 = min(char1_width, term_width - scr_x1)
                 if visible_cells_of_char1 > 0:
                     try:
                         self.stdscr.chgat(scr_y1, scr_x1, visible_cells_of_char1, highlight_attr)
                         logging.debug(
-                            f"Highlighted bracket 1 ('{bracket_char_to_match}') at screen ({scr_y1},{scr_x1}) for {visible_cells_of_char1} cells, "
-                            f"text ({final_char_y_for_first_bracket},{final_char_x_for_first_bracket})"
+                            f"Highlighted bracket 1 ('{bracket_char}') at screen ({scr_y1},{scr_x1}) for {visible_cells_of_char1} cells, "
+                            f"text ({bracket_pos[0]},{bracket_pos[1]})"
                         )
                     except curses.error as e:
                         logging.warning(f"Curses error highlighting bracket 1 at screen ({scr_y1},{scr_x1}): {e}")
-        
+
         if coords2_on_screen:
             scr_y2, scr_x2 = coords2_on_screen
             char2_width = self.get_char_width(self.text[match_y][match_x])
-
             if scr_x2 < term_width and char2_width > 0:
                 visible_cells_of_char2 = min(char2_width, term_width - scr_x2)
                 if visible_cells_of_char2 > 0:
@@ -9506,13 +9799,13 @@ class SwayEditor:
         defaults = {
             "new_file": "F2", "open_file": "Ctrl+O", "save_file": "Ctrl+S",
             "save_as": "F5", "quit": "Ctrl+Q", "undo": "Ctrl+Z",
-            "redo": "Shift+Z", "copy": "Ctrl+C", "cut": "Ctrl+X",
+            "redo": "Ctrl+Y", "copy": "Ctrl+C", "cut": "Ctrl+X",
             "paste": "Ctrl+V", "select_all": "Ctrl+A", "delete": "Del",
             "goto_line": "Ctrl+G", "find": "Ctrl+F", "find_next": "F3",
             "search_and_replace": "F6", "lint": "F4", "git_menu": "F9",
             "help": "F1", "cancel_operation": "Esc", "tab": "Tab",
-            "shift_tab": "Shift+Tab", "comment_selected_lines": "Ctrl+/",
-            "uncomment_selected_lines": "Shift+/"
+            "shift_tab": "Shift+Tab", "do_comment_block": "Ctrl+/",
+            "do_uncomment_block": "Ctrl+\\"
         }
 
         return [
@@ -9524,18 +9817,18 @@ class SwayEditor:
             f"    {_kb('save_as', defaults['save_as']):<22}: Save as…",
             f"    {_kb('quit', defaults['quit']):<22}: Quit editor",
             "", "  Editing:",
-            f"    {_kb('undo', defaults['undo']):<22}: Undo",
-            f"    {_kb('redo', defaults['redo']):<22}: Redo",
             f"    {_kb('copy', defaults['copy']):<22}: Copy",
             f"    {_kb('cut', defaults['cut']):<22}: Cut",
             f"    {_kb('paste', defaults['paste']):<22}: Paste",
             f"    {_kb('select_all', defaults['select_all']):<22}: Select all",
+            f"    {_kb('undo', defaults['undo']):<22}: Undo",
+            f"    {_kb('redo', defaults['redo']):<22}: Redo",
             f"    {_kb('delete', defaults['delete']):<22}: Delete char/selection",
             "    Backspace            : Delete char left / selection",
             f"    {_kb('tab', defaults['tab']):<22}: Smart Tab / Indent block",
             f"    {_kb('shift_tab', defaults['shift_tab']):<22}: Smart Unindent / Unindent block",
-            f"    {_kb('comment_selected_lines', defaults['comment_selected_lines']):<22}: Comment block/line",
-            f"    {_kb('uncomment_selected_lines', defaults['uncomment_selected_lines']):<22}: Uncomment block/line",
+            f"    {_kb('do_comment_block', defaults['do_comment_block']):<22}: Comment block/line",
+            f"    {_kb('do_uncomment_block', defaults['do_uncomment_block']):<22}: Uncomment block/line",
             "", "  Navigation & Search:",
             f"    {_kb('goto_line', defaults['goto_line']):<22}: Go to line",
             f"    {_kb('find', defaults['find']):<22}: Find (prompt)",
@@ -9576,8 +9869,10 @@ class SwayEditor:
         view_x = (term_w - view_w) // 2
 
         # Убеждаемся в минимальных размерах
-        if view_h < 8: view_h = min(8, term_h - 2)
-        if view_w < 20: view_w = min(20, term_w - 2)
+        if view_h < 8: 
+            view_h = min(8, term_h - 2)
+        if view_w < 20: 
+            view_w = min(20, term_w - 2)
 
         prev_cursor = None
         
@@ -9862,22 +10157,11 @@ class SwayEditor:
 
         needs_redraw   = True  # Force an initial draw when the editor starts
         last_draw_time = 0.0   # Timestamp of the last screen draw
-        # Target FPS for screen updates, adjust for desired responsiveness vs. CPU usage.
-        # Higher FPS means more frequent redraws if needed, lower means less CPU.
         FPS = self.config.get("editor", {}).get("target_fps", 30) # Make FPS configurable
-
-        # Track the last known status message to detect changes from queue processing
-        # that might not be caught by the return value of _process_all_queues.
-        # Initialize with current status, or a value that ensures first check triggers.
-        last_known_status_message = object() # Unique object to ensure first comparison is different
 
         while True:
             # --- 1. Process background queues ---
-            # _process_all_queues updates self.status_message, self.git_info etc.
-            # It returns True if it processed any item that *might* have changed state.
-            # We also check self.status_message directly for changes.
-            
-            status_before_queue_processing = self.status_message # For precise change detection
+            status_before_queue_processing = self.status_message
             queues_processed_something = False
             try:
                 if self._process_all_queues():
@@ -9886,74 +10170,66 @@ class SwayEditor:
                 # If status message changed due to queue processing, flag for redraw.
                 if self.status_message != status_before_queue_processing:
                     needs_redraw = True
-                    last_known_status_message = self.status_message # Update tracker
                 elif queues_processed_something:
                     # If queues did something but status text itself didn't change,
                     # other state like self.git_info (affecting status bar) might have.
                     # Or an async task was launched. For safety, flag redraw.
                     needs_redraw = True
-            except Exception as e_queue_proc: 
+            except Exception:
                 logging.exception("Error during _process_all_queues")
                 self._set_status_message("Error processing background tasks (see log)")
-                # Error in queue processing should force a redraw to show the error status.
-                curses.flushinp() # Clear any pending input that might be causing issues
+                curses.flushinp()
                 needs_redraw = True 
 
             # --- 2. Get and handle user input ---
             try:
-                key_input = self.stdscr.get_wch() # Can be int (special key, char code) or str (char)
+                key_input = self.get_key_input(self.stdscr)
                 
-                if key_input != curses.ERR: # curses.ERR (-1) means no input was available
+                if key_input != curses.ERR:
                     logging.debug(f"Raw key from get_wch(): {repr(key_input)} (type: {type(key_input).__name__})")
                     
                     status_before_input_handling = self.status_message
                     
-                    # handle_input returns True if it made a change requiring redraw
                     if self.handle_input(key_input): 
                         needs_redraw = True
                     
-                    # Also, if status message was changed by handle_input (even if it returned False for other reasons)
                     if self.status_message != status_before_input_handling:
                         needs_redraw = True
-                        last_known_status_message = self.status_message # Update tracker
-                
-            except KeyboardInterrupt: # Ctrl+C typically
+                    
+            except KeyboardInterrupt:
                 logging.info("KeyboardInterrupt received, initiating exit.")
-                self.exit_editor() # Handles save prompts and sys.exit()
-                return # Exit the main loop and thus the run() method
+                self.exit_editor()
+                return
             except curses.error as e_curses_input:
-                # "no input" is an expected non-error when nodelay(True) is set
-                if "no input" not in str(e_curses_input).lower(): 
+                if "no input" not in str(e_curses_input).lower():
                     logging.error("Curses input error in main loop: %s", e_curses_input, exc_info=True)
                     self._set_status_message(f"Input error: {e_curses_input}")
                     curses.flushinp()
                     needs_redraw = True
-            except Exception as e_input_generic: 
+            except Exception:
                 logging.exception("Unhandled error during input processing in main loop.")
                 self._set_status_message("Input processing error (see log)")
                 curses.flushinp()
                 needs_redraw = True
 
             # --- 3. Draw the screen if needed and FPS allows ---
-            current_time = time.monotonic() # Use monotonic clock for reliable time differences
+            current_time = time.monotonic()
             if needs_redraw and (current_time - last_draw_time >= 1.0 / FPS):
                 try:
-                    self.drawer.draw() # Call the main drawing routine
+                    self.drawer.draw()
                 except curses.error as e_curses_draw:
                     logging.error("Curses error during screen drawing: %s", e_curses_draw, exc_info=True)
-                    # Try to set status, but drawing itself might be failing
                     self._set_status_message("Screen draw error (see log)")
-                except Exception as e_draw_generic: # Catch any other error during drawing
+                except Exception:
                     logging.exception("Unhandled error during screen drawing.")
                     self._set_status_message("Critical draw error (see log)")
                 
                 last_draw_time = current_time
-                needs_redraw = False # Reset flag after a successful (or attempted) draw
+                needs_redraw = False
 
             # --- 4. Brief sleep to yield CPU and control loop speed ---
-            # This also contributes to the overall responsiveness and feel.
-            # Too short: high CPU. Too long: laggy.
-            time.sleep(0.005) # 5ms, adjust as needed (e.g., 0.01 for ~100 FPS cap if drawing is fast)
+            time.sleep(0.005)
+
 
 
 ## Class DrawScreen ------------------------------------------------------
@@ -10267,7 +10543,7 @@ class DrawScreen:
             self._draw_text_with_syntax_highlighting()
             self._draw_search_highlights()
             self._draw_selection()
-            self._draw_matching_brackets()
+            self.editor.highlight_matching_brackets()
             self._draw_status_bar()
 
             # 6. Рисуем всплывающую панель линтера (если она активна)
@@ -10454,73 +10730,83 @@ class DrawScreen:
         except curses.error as e:
             logging.error(f"Ошибка curses при отрисовке панели линтера: {e}")
 
-    def _draw_search_highlights(self):
-        """Накладывает подсветку найденных совпадений."""
-        if not self.editor.highlighted_matches:
-            return # Нет совпадений для подсветки
 
-        # Цвет для подсветки поиска (например, A_REVERSE или специальная пара)
+    def _draw_search_highlights(self):
+        """
+        Applies visual highlighting to all search matches found in the visible text area.
+
+        This method iterates through all currently highlighted search matches and uses
+        curses attributes to visually distinguish them on the screen (for example,
+        by applying a reverse color scheme or a special color pair). Only matches
+        that are currently visible on the screen are processed.
+
+        Cautiously handles Unicode and wide characters, screen boundaries, and
+        possible curses errors for robust rendering.
+
+        Raises:
+            None. All curses errors are logged; the editor remains responsive.
+        """
+        if not self.editor.highlighted_matches:
+            return  # No matches to highlight
+
+        # Get the search highlight color attribute (defaults to A_REVERSE if not set)
         search_color = self.colors.get("search_highlight", curses.A_REVERSE)
         height, width = self.stdscr.getmaxyx()
-        line_num_width = len(str(max(1, len(self.editor.text)))) + 1 # Ширина номера строки + пробел
-        text_area_width = max(1, width - line_num_width)
+        line_num_width = len(str(max(1, len(self.editor.text)))) + 1  # Width for line numbers plus space
 
-        # Итерируем по всем совпадениям, которые нужно подсветить
+        # Iterate through all matches to be highlighted
         for match_row, match_start_idx, match_end_idx in self.editor.highlighted_matches:
-            # Проверяем, находится ли строка с совпадением в видимой области
+            # Check if the match is within the currently visible lines
             if match_row < self.editor.scroll_top or match_row >= self.editor.scroll_top + self.editor.visible_lines:
-                continue # Строка не на экране, пропускаем
+                continue  # Match is off-screen; skip
 
-            screen_y = match_row - self.editor.scroll_top # Экранная строка для этого совпадения
-            line = self.editor.text[match_row] # Оригинальная строка текста
+            screen_y = match_row - self.editor.scroll_top  # Screen row for this match
+            line = self.editor.text[match_row]  # The text of the line containing the match
 
-            # Позиция X на экране, где начинается совпадение
+            # Compute X screen positions (before and after scrolling) for match start and end
             match_screen_start_x_before_scroll = self.editor.get_string_width(line[:match_start_idx])
             match_screen_start_x = line_num_width + match_screen_start_x_before_scroll - self.editor.scroll_left
 
-            # Позиция X на экране, где заканчивается совпадение (или начинается следующий символ)
             match_screen_end_x_before_scroll = self.editor.get_string_width(line[:match_end_idx])
             match_screen_end_x = line_num_width + match_screen_end_x_before_scroll - self.editor.scroll_left
 
-            # Определяем видимую часть совпадения на экране
-            # Начальная X для отрисовки подсветки (не меньше, чем _text_start_x)
+            # Clamp drawing area to the visible screen boundaries
             draw_start_x = max(line_num_width, match_screen_start_x)
-
-            # Конечная X для отрисовки подсветки (не больше, чем правый край окна)
             draw_end_x = min(width, match_screen_end_x)
 
-            # Рассчитываем реальную ширину подсветки на экране
+            # Calculate the actual width of the highlight to draw
             highlight_width_on_screen = max(0, draw_end_x - draw_start_x)
 
-            # Применяем атрибут подсветки, если видимая ширина больше 0
+            # Apply the highlight attribute if there is something to show
             if highlight_width_on_screen > 0:
                 try:
-                    # Итерируем по символам оригинальной строки
-                    current_char_screen_x = line_num_width - self.editor.scroll_left # Начальная X для первого символа строки
+                    # Iterate over characters in the line to accurately highlight wide characters
+                    current_char_screen_x = line_num_width - self.editor.scroll_left  # Initial X for first char
                     for char_idx, char in enumerate(line):
                         char_width = self.editor.get_char_width(char)
                         char_screen_end_x = current_char_screen_x + char_width
 
-                        # Если символ находится в диапазоне совпадения и виден на экране
-                        if match_start_idx <= char_idx < match_end_idx and \
-                           current_char_screen_x < width and char_screen_end_x > line_num_width: # Проверка видимости
+                        # If this character falls within the match range and is visible
+                        if (match_start_idx <= char_idx < match_end_idx and
+                            current_char_screen_x < width and
+                            char_screen_end_x > line_num_width):
 
-                            # Координаты отрисовки символа на экране
                             draw_char_x = max(line_num_width, current_char_screen_x)
                             draw_char_width = min(char_width, width - draw_char_x)
 
                             if draw_char_width > 0:
-                               try:
-                                  # Подсвечиваем отдельный символ
-                                  # chgat(y, x, num_chars, attr). num_chars=1 для одного символа
-                                  self.stdscr.chgat(screen_y, draw_char_x, 1, search_color) # Подсвечиваем одну ячейку
-                               except curses.error as e:
-                                  # Ловим ошибку для отдельного символа
-                                  logging.warning(f"Curses error highlighting single char at ({screen_y}, {draw_char_x}): {e}")
-                        current_char_screen_x += char_width # Сдвигаем X для следующего символа
+                                try:
+                                    # Highlight a single character cell with the search color
+                                    # chgat(y, x, num_chars, attr): num_chars=1 for one character
+                                    self.stdscr.chgat(screen_y, draw_char_x, 1, search_color)
+                                except curses.error as e:
+                                    logging.warning(
+                                        f"Curses error highlighting single char at ({screen_y}, {draw_char_x}): {e}"
+                                    )
+                        current_char_screen_x += char_width  # Move X for the next character
                 except curses.error as e:
                     logging.error(f"Curses error applying search highlight: {e}")
- 
+
 
     def _draw_selection(self) -> None:
         """Paint the visual highlight for the current text selection.
@@ -10617,25 +10903,6 @@ class DrawScreen:
                         screen_y, draw_start_x, highlight_w, err,
                     )
 
-    def _draw_matching_brackets(self) -> None:
-        """Render visual hint for the bracket pair under the caret.
-
-        This thin wrapper simply delegates the actual detection and
-        highlighting logic to
-        :pymeth:`SwayEditor.highlight_matching_brackets`.  The editor
-        method is responsible for updating the internal structures that
-        :pymeth:`DrawScreen._draw_text_with_syntax_highlighting` consults
-        when painting coloured tokens; here we only *trigger* the update
-        during every frame.
-
-        Returns
-        -------
-        None
-            The function has no return value.  Any drawing errors are
-            expected to be handled deeper in the call-chain.
-        """
-        # Delegates to the editor; nothing to catch or return here.
-        self.editor.highlight_matching_brackets()
 
     def truncate_string(self, s: str, max_width: int) -> str:
         """Return *s* clipped to **visual** width *max_width*.
@@ -10780,26 +11047,42 @@ class DrawScreen:
                 pass
 
     def _position_cursor(self) -> None:
-        """Позиционирует курсор на экране, не позволяя ему «улетать» за Git-статус."""
+        """
+        Positions the cursor on the screen, ensuring it does not move beyond the status bar
+        and always remains within the visible text area.
+
+        This method adjusts both the logical (editor) and physical (screen) cursor positions.
+        It also takes into account line numbers, horizontal and vertical scrolling, and ensures
+        that the cursor never overlaps with the Git status or status bar at the bottom.
+
+        Side Effects:
+            May update self.editor.scroll_top and self.editor.scroll_left.
+            Moves the curses cursor to the calculated position.
+        """
         height, width = self.stdscr.getmaxyx()
-        max_row       = height - 2                 # последняя строка текста (height-1 – статус-бар)
-        line_num_width = len(str(max(1, len(self.editor.text)))) + 1  # «NN␠»
+        max_row = height - 2  # The last line available for text (height-1 is the status bar)
+        line_num_width = len(str(max(1, len(self.editor.text)))) + 1  # Width for line numbers (e.g. 'NN ')
         text_area_width = max(1, width - line_num_width)
 
-        # --- 1. Корректируем внутренние координаты ---------------------------------
+        # --- 1. Adjust internal coordinates ------------------------------------------
+        # Ensure the cursor_y is within valid range of lines.
         self.editor.cursor_y = max(0, min(self.editor.cursor_y, len(self.editor.text) - 1))
-        current_line         = self.editor.text[self.editor.cursor_y]
+        current_line = self.editor.text[self.editor.cursor_y]
+        # Ensure the cursor_x is within the current line's length.
         self.editor.cursor_x = max(0, min(self.editor.cursor_x, len(current_line)))
 
         cursor_line_idx = self.editor.cursor_y
         cursor_char_idx = self.editor.cursor_x
 
-        # --- 2. Вертикальная прокрутка ----------------------------------------------
+        # --- 2. Vertical scrolling ---------------------------------------------------
+        # Calculate the screen Y coordinate of the cursor.
         screen_y = cursor_line_idx - self.editor.scroll_top
         if screen_y < 0:
+            # Scroll up to bring the cursor line to the top of the visible area.
             self.editor.scroll_top = cursor_line_idx
             screen_y = 0
         elif screen_y >= self.editor.visible_lines:
+            # Scroll down to bring the cursor line to the bottom of the visible area.
             self.editor.scroll_top = min(
                 len(self.editor.text) - self.editor.visible_lines,
                 cursor_line_idx - self.editor.visible_lines + 1
@@ -10808,19 +11091,22 @@ class DrawScreen:
             screen_y = self.editor.visible_lines - 1
         screen_y = max(0, min(screen_y, max_row))
 
-        # --- 3. Горизонтальная прокрутка --------------------------------------------
+        # --- 3. Horizontal scrolling -------------------------------------------------
+        # Compute the pixel width before the cursor (taking multi-width chars into account).
         cursor_px_before_scroll = self.editor.get_string_width(current_line[:cursor_char_idx])
         current_cursor_screen_x = line_num_width + cursor_px_before_scroll - self.editor.scroll_left
 
         view_start_x = line_num_width
-        view_end_x   = width - 1                   # последний допустимый столбец
+        view_end_x = width - 1  # The last allowed column
 
         if current_cursor_screen_x < view_start_x:
+            # Scroll left to make the cursor visible at the start of the text area.
             self.editor.scroll_left = cursor_px_before_scroll
         elif current_cursor_screen_x > view_end_x:
+            # Scroll right to make the cursor visible at the end of the text area.
             self.editor.scroll_left = max(0, cursor_px_before_scroll - text_area_width + 1)
 
-        # --- 4. Итоговые экранные координаты ----------------------------------------
+        # --- 4. Final screen coordinates ---------------------------------------------
         final_cursor_screen_x = (
             line_num_width
             + cursor_px_before_scroll
@@ -10828,63 +11114,116 @@ class DrawScreen:
         )
         draw_cursor_x = max(view_start_x, min(view_end_x, final_cursor_screen_x))
 
-        # --- 5. Перемещаем курсор ----------------------------------------------------
+        # --- 5. Move the cursor -----------------------------------------------------
         try:
-            logging.debug(f"Positioning cursor: screen_y={screen_y}, draw_cursor_x={draw_cursor_x}. Logical: ({self.editor.cursor_y}, {self.editor.cursor_x}). Line: '{current_line}'")
+            logging.debug(
+                f"Positioning cursor: screen_y={screen_y}, draw_cursor_x={draw_cursor_x}. "
+                f"Logical: ({self.editor.cursor_y}, {self.editor.cursor_x}). Line: '{current_line}'"
+            )
             self.stdscr.move(screen_y, draw_cursor_x)
         except curses.error:
-            # запасной вариант – ставим в начало строки, если что-то пошло не так
+            # Fallback: move to the start of the line if something goes wrong.
             try:
                 self.stdscr.move(screen_y, view_start_x)
             except curses.error:
                 pass
 
+
     def _adjust_vertical_scroll(self):
         """
-        Adjusts vertical scroll (scroll_top) to ensure the cursor is visible.
-        Called after window resize or other events that might push cursor off-screen.
+        Adjusts the vertical scroll (scroll_top) to ensure the cursor remains visible on the screen.
+
+        This method is typically called after window resize events or other situations
+        where the cursor could move off-screen. It ensures that scroll_top is always
+        within valid bounds and that the cursor is always within the visible text area.
+
+        Side Effects:
+            Modifies self.editor.scroll_top as necessary.
+
+        Raises:
+            None. All adjustments are logged.
         """
         height, width = self.stdscr.getmaxyx()
         text_area_height = max(1, height - 2)
 
-        # Если общее количество строк меньше видимой области, scroll_top всегда 0
+        # If the total number of lines fits on the screen, always show from the top.
         if len(self.editor.text) <= text_area_height:
-             self.editor.scroll_top = 0
-             return
+            self.editor.scroll_top = 0
+            return
 
-        # Текущая экранная Y позиция курсора (относительно начала видимой области)
+        # Calculate the cursor's position relative to the visible area.
         screen_y = self.editor.cursor_y - self.editor.scroll_top
 
-        # Если курсор выше или ниже видимой области
+        # If the cursor is above the visible area, scroll up.
         if screen_y < 0:
-             # Сдвигаем scroll_top так, чтобы строка с курсором стала первой видимой
-             self.editor.scroll_top = self.editor.cursor_y
-             logging.debug(f"Adjusted vertical scroll: cursor above view. New scroll_top: {self.editor.scroll_top}")
+            self.editor.scroll_top = self.editor.cursor_y
+            logging.debug(f"Adjusted vertical scroll: cursor above view. New scroll_top: {self.editor.scroll_top}")
+        # If the cursor is below the visible area, scroll down.
         elif screen_y >= text_area_height:
-             # Сдвигаем scroll_top так, чтобы строка с курсором стала последней видимой
-             self.editor.scroll_top = self.editor.cursor_y - text_area_height + 1
-             logging.debug(f"Adjusted vertical scroll: cursor below view. New scroll_top: {self.editor.scroll_top}")
+            self.editor.scroll_top = self.editor.cursor_y - text_area_height + 1
+            logging.debug(f"Adjusted vertical scroll: cursor below view. New scroll_top: {self.editor.scroll_top}")
 
-        # Убеждаемся, что scroll_top не выходит за допустимые пределы (0 до len(text) - visible_lines)
+        # Ensure scroll_top stays within valid bounds.
         self.editor.scroll_top = max(0, min(self.editor.scroll_top, len(self.editor.text) - text_area_height))
         logging.debug(f"Final adjusted scroll_top: {self.editor.scroll_top}")
 
+
     def _update_display(self):
-        """Обновляет физический экран."""
+        """
+        Physically updates the screen contents using the curses library.
+
+        This method prepares the virtual screen refresh with `noutrefresh()`, which collects all
+        pending drawing operations in memory, and then applies all those changes at once to the
+        physical terminal using `curses.doupdate()`. This double-buffering approach helps prevent
+        flickering and ensures smoother UI updates.
+
+        If a curses error occurs during the refresh, the error is logged and the method
+        returns gracefully, assuming the main application loop will handle the situation.
+
+        Raises:
+            None. All errors are logged; the editor remains operational.
+        """
         try:
-            # noutrefresh() - подготавливает обновление в памяти
+            # noutrefresh() prepares window updates in memory, without immediately
+            # applying them to the physical terminal screen.
             self.stdscr.noutrefresh()
-            # doupdate() - выполняет все подготовленные обновления на физическом экране
+
+            # doupdate() applies all pending updates from all windows to the terminal at once.
             curses.doupdate()
         except curses.error as e:
             logging.error(f"Curses doupdate error: {e}")
-            pass # Продолжаем, надеясь, что главный цикл обработает
+            # Continue running; the main application loop will handle screen errors gracefully.
+            pass
 
 
 def main_curses_function(stdscr):
     """
-    Initializes locale, and editor, then runs the main editor loop.
-    This function is intended to be passed to curses.wrapper.
+    Initializes and runs the SwayPad editor inside the curses wrapper context.
+
+    This function sets up locale and signal handling, initializes the editor,
+    processes command-line arguments, and starts the main event loop. It is
+    intended to be passed to `curses.wrapper()` as the main entry point
+    for the terminal-based editor.
+
+    Signal handling is used to ignore suspension (Ctrl+Z) and interrupt (Ctrl+C)
+    where supported, preventing the editor from being stopped unexpectedly by these keys.
+
+    Locale is set to the system default to support correct character width calculations
+    and other locale-dependent behaviors.
+
+    If a filename is provided via the command line, it is loaded into the editor;
+    otherwise, an empty buffer is used.
+
+    Any unhandled exceptions during editor execution are logged in detail to
+    multiple places (log files, stderr, and a dedicated critical error log file),
+    and the exception is re-raised to ensure curses restores the terminal.
+
+    Args:
+        stdscr (curses.window): The curses standard screen object provided by curses.wrapper().
+
+    Raises:
+        Exception: Any unhandled exception encountered during the editor's lifetime is re-raised
+            after logging for proper cleanup and debugging.
     """
     # Signal handling (Ctrl+Z, Ctrl+C)
     try:
@@ -10929,7 +11268,7 @@ def main_curses_function(stdscr):
         logger.debug("Starting editor's main run() loop.")
         editor.run() # This call will block until the editor exits.
 
-    except Exception as e_editor: # Catch any unhandled exceptions during editor operation
+    except Exception: # Catch any unhandled exceptions during editor operation
         # This logging will go to the configured handlers (file, console, error.log)
         logger.critical("Unhandled exception during editor execution (inside curses.wrapper):", exc_info=True)
         
