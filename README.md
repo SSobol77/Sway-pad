@@ -1,26 +1,44 @@
-![swaypadm2](https://github.com/user-attachments/assets/01bdf424-7dce-4a99-9631-de3b7e87313b)
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/01bdf424-7dce-4a99-9631-de3b7e87313b" alt="swaypadm2" width="720">
+</p>
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://www.gnu.org/licenses/gpl-3.0)
-![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)
-![FreeBSD](https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white)
-![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/SSobol77/sway-pad/pulls)
-
-
+<p align="center">
+  <a href="https://www.gnu.org/licenses/gpl-3.0">
+    <img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3">
+  </a>
+  <img src="https://img.shields.io/badge/Python-3.11%2B-blue?logo=python" alt="Python Version">
+  <img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black" alt="Linux support">
+  <img src="https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white" alt="FreeBSD support">
+  <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white" alt="Windows support">
+  <a href="https://github.com/SSobol77/sway-pad/pulls">
+    <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome">
+  </a>
+</p>
 
 ---
 
-<br>
-
-> [!IMPORTANT]
 > **🚫 Ethical Restrictions**
-> 
-> My works cannot be used in:
-> 
-> - Military applications or systems  
-> - Surveillance technologies  
-> - Any activity violating human rights
+>
+> This software must not be used for:
+>
+> * Military applications or defense systems
+> * Mass surveillance or tracking systems
+> * Projects violating international human rights conventions
+
+---
+
+<h1 align="center">🌊 Sway-pad</h1>
+<h3 align="center">Cross-platform Terminal Editor for Modern DevOps Engineers</h3>
+
+---
+
+<br>
+
+## ✨ Overview
+
+**Sway-pad** is a fast, minimal, and extensible terminal-based code editor written in Python — designed with the needs of DevOps engineers, SREs, and sysadmins in mind.
+
+Whether you’re editing YAML inside a container or deploying infrastructure over SSH — Sway-pad provides a Git-aware, plugin-enabled, and keyboard-friendly environment without GUI overhead.
 
 <br>
 
@@ -28,127 +46,34 @@
 
 <br>
 
-<br>
+### 🔍 Why Sway-pad for DevOps?
 
-<div align="center">
-  <h1>🌊Sway-pad</h1>
-  <h3>Cross-Platform Terminal Code Editor for DevOps Engineers</h3>
-</div>
-
-<br>
-
----
-
-<br>
-
-### 🌊 **Sway-pad** — Lightweight Terminal Code Editor for DevOps Engineers and System Administrators
-
-**Sway-pad** is a fast, minimalist, and highly configurable terminal-based code editor written in Python. Designed specifically for DevOps engineers and system administrators, it combines simplicity with powerful features — all in your terminal.
-
-🧩 **Key Features:**
-
-*  Terminal-first UI optimized for SSH and server environments
-*  Instant startup and low memory usage — perfect for remote systems
-*  Easy configuration via `.swayterm.toml`
-*  Cross-platform: Linux, FreeBSD, macOS, Windows (via PowerShell)
-*  Built-in **Git integration**: stage, commit, push and view diffs — without leaving the editor
-
-🎯 **Ideal For:**
-
-* Editing scripts, configs, and automation pipelines (YAML, INI, Dockerfile, etc.)
-* Managing infrastructure-as-code and DevOps assets on the fly
-* Working inside terminals, containers, or headless environments
-* Server-side editing via SSH sessions
-
-🧠 **Philosophy:**
-
-> **"As lightweight as `nano`, as powerful as `vim`, as Git-aware as `Magit`, and written in Python — for modern DevOps."**
+* ⚡️ **Fast start-up**, minimal memory usage
+* 🧩 **Built-in DevOps linter support**: Bash, YAML, Terraform, Docker, K8s, Ansible, Helm, etc.
+* ⛓ **Zero GUI**: fully terminal-native, perfect for headless Linux/FreeBSD systems
+* 🧠 **Modular config system** using `.toml` with per-user overrides
+* 💬 **Syntax highlighting** powered by Pygments, with customizable themes
+* 🎹 **Custom keybindings**: define any command or combo via `config.toml`
+* 🔧 **Plugin-ready architecture**: drop-in support for linters, LSPs, or Git tools
+* 🧰 **Full Git support**: stage, diff, commit, push — without leaving the terminal
+* 🪶 **Lightweight design**: no daemons, no background agents — just your terminal and Python
 
 <br>
 
 ---
 
-<br>
+### 🖥 Supported Platforms
 
-## ⚡ Quick Start
-
-### Installation  
-
-```bash
-# Linux (PyPI) - Required First Step:
-sudo apt-get install xclip || sudo apt-get install xsel  # Must choose one
-pip install sway-pad --user
-
-# FreeBSD
-sudo pkg install xclip sway-pad
-
-# Development Build
-git clone https://github.com/SSobol77/Sway-pad.git && cd Sway-pad
-python3 -m pip install -e .
-```
-
-### Basic Usage  
-```bash
-# Open single file
-sway-pad example.py
-
-# Project mode (multi-tab)
-sway-pad src/ tests/ config.toml
-```
+| OS      | Support Level | Notes                                      |
+| ------- | ------------- | ------------------------------------------ |
+| Linux   | ✅ Full        | Works in X11, Wayland, TTY, SSH            |
+| FreeBSD | ✅ Full        | `xclip` required for clipboard             |
+| macOS   | ⚠️ Partial    | Clipboard/TTY requires `pbcopy` workaround |
+| Windows | ⚠️ Partial    | Works via `Windows Terminal` and WSL       |
 
 <br>
 
-> [!Warning]
-> **System Requirements:**
->  
-> **Linux**  
-> Editor **requires** either `xclip` or `xsel`  
-> 
-> **FreeBSD**  
-> Editor **requires xclip only** (xsel removed from repositories)  
-> 
-> **All Systems:**  
-> • Install required clipboard utility before first use  
-> • Restart terminal after installation  
-
-<br>
-
-# Custom keybindings
-```bash
-sway-pad --config ~/.config/swaypad/keybinds.toml
-```
-
----
-
-<br>
-
-## 🛠 Configuration
-
-### `~/.config/swaypad/config.toml`
-```toml
-[editor]
-theme = "nord"
-font_family = "Fira Code"
-tab_size = 4
-auto_indent = true
-
-[keybindings]
-save = "ctrl+s"
-quit = "ctrl+shift+q"
-split_pane = "ctrl+alt+enter"
-
-[plugins]
-lsp_enabled = true
-git_diff = { enabled = true, hotkey = "f5" }
-```
-
-<br>
-
----
-
-<br>
-
-## 📚 Supported Formats (40+)
+### 📚 Supported Formats (40+)
 
 | Language       | Extensions                                | Icon |
 |----------------|-------------------------------------------|------|
@@ -194,66 +119,118 @@ git_diff = { enabled = true, hotkey = "f5" }
 
 ---
 
-<br>
+### 🔌 Configuration
 
-## 🏗 Architecture
+Create or modify `~/.config/swaypad/config.toml` to customize your environment:
 
-```bash
-Sway-pad/
-├── core/               # Editor Engine
-│   ├── renderer/       # Curses-based UI
-│   ├── syntax/         # Language Parsers
-│   └── plugins/        # LSP/Git Integration
-├── themes/             # Color Schemes
-│   ├── nord.toml
-│   └── solarized_dark.toml
-├── docs/               # Configuration Guides
-├── tests/              # Benchmark Suite
-└── swaypad.py          # CLI Entry Point
+```toml
+[editor]
+theme = "nord"
+font_family = "Fira Code"
+tab_size = 4
+auto_indent = true
+
+[keybindings]
+save = "ctrl+s"
+quit = "ctrl+q"
+run_linter = "f8"
+split_pane = "ctrl+alt+enter"
+
+[plugins]
+lsp_enabled = true
+git_diff = { enabled = true, hotkey = "f5" }
 ```
 
+You can override defaults per project or user, and dynamically reload config without restarting the editor.
+
+---
+
+### 💡 Use Cases
+
+* **Edit Kubernetes manifests** over SSH directly inside a running pod:
+
+  ```bash
+  sway-pad /etc/k8s/deploy.yaml
+  ```
+
+* **Write Terraform files** and check them live with `tfsec`:
+
+  ```bash
+  sway-pad main.tf
+  ```
+
+* **Work on Dockerfiles in CI environments**:
+
+  ```bash
+  sway-pad Dockerfile
+  ```
+
+* **Configure Nix and TOML projects** side-by-side:
+
+  ```bash
+  sway-pad flake.nix config.toml
+  ```
+
+* **Review Git history and patch files on remote server**:
+
+  ```bash
+  sway-pad .gitignore .gitlab-ci.yml
+  ```
+
+---
+
+# DevOps Linters Integration for SwayPad
+
+This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
+
+
+<br>
+
 ---
 
 <br>
 
-## 🧪 Development
+## ⚡ Quick Start
 
-### Testing Matrix
-```bash
-# Run Core Tests
-pytest tests/core --cov --cov-report=html
 
-# Performance Benchmark
-python3 -m tests.benchmarks scroll_through_10k_lines
+<br>
 
-# Linting
-flake8 . --count --max-complexity=10 --statistics
+> [!Warning]
+> **System Requirements:**
+>  
+> **Linux**  
+> Editor **requires** either `xclip` or `xsel`  
+> 
+> **FreeBSD**  
+> Editor **requires xclip only** (xsel removed from repositories)  
+> 
+> **All Systems:**  
+> • Install required clipboard utility before first use  
+> • Restart terminal after installation  
+
+<br>
+
+---
+
+## 🛠 Configuration
+
+### `~/.config/swaypad/config.toml`
+```toml
+[editor]
+theme = "nord"
+font_family = "Fira Code"
+tab_size = 4
+auto_indent = true
+
+[keybindings]
+save = "ctrl+s"
+quit = "ctrl+shift+q"
+split_pane = "ctrl+alt+enter"
+
+[plugins]
+lsp_enabled = true
+git_diff = { enabled = true, hotkey = "f5" }
 ```
-
-| **Metric**           | **Result**         |
-|----------------------|--------------------|
-| Test Coverage        | 92% Core Modules   |
-| Max File Size        | 2GB (Compressed)   |
-| Concurrent Sessions  | 8+ Tabs Stable     |
-
----
-
-<br>
-
-## 🤝 Contributing
-
-1. Fork & Clone Repository
-2. Create Feature Branch: `git checkout -b feat/your-feature`
-3. Commit Changes: `git commit -m 'feat: add your feature'`
-4. Push to Branch: `git push origin feat/your-feature`
-5. Open Pull Request
-
-**Contribution Guidelines**:  
-- Follow PEP8 Style Guide  
-- Add Type Hints for New Code  
-- Include Benchmark Results for Performance Changes
-
----
 
 <br>
 
@@ -459,6 +436,24 @@ Each linter below includes installation instructions and dependency requirements
 
 ---
 
+<br>
+
+## 🤝 Contributing
+
+1. Fork & Clone Repository
+2. Create Feature Branch: `git checkout -b feat/your-feature`
+3. Commit Changes: `git commit -m 'feat: add your feature'`
+4. Push to Branch: `git push origin feat/your-feature`
+5. Open Pull Request
+
+**Contribution Guidelines**:  
+- Follow PEP8 Style Guide  
+- Add Type Hints for New Code  
+- Include Benchmark Results for Performance Changes
+
+
+<br>
+
 ### 📌 License
 
 This integration module is MIT-licensed. All linters are third-party tools with their own licenses.
@@ -471,12 +466,7 @@ Feel free to open issues or submit PRs for new linters, documentation improvemen
 
 <br>
 
----
-
-<br>
-
-
-## 📜 License
+### 📜 License
 
 **GNU General Public License v3.0**  
 Commercial use requires explicit permission.  
