@@ -40,9 +40,6 @@
 
 Whether you’re editing YAML inside a container or deploying infrastructure over SSH — Sway-pad provides a Git-aware, plugin-enabled, and keyboard-friendly environment without GUI overhead.
 
-<br>
-
----
 
 <br>
 
@@ -61,6 +58,8 @@ Whether you’re editing YAML inside a container or deploying infrastructure ove
 <br>
 
 ---
+
+<br>
 
 ### 🖥 Supported Platforms
 
@@ -118,6 +117,27 @@ Whether you’re editing YAML inside a container or deploying infrastructure ove
 <br>
 
 ---
+
+<br>
+
+### ⚡ Quick Start
+
+<br>
+
+> [!Warning]
+> **System Requirements:**
+>  
+> **Linux**  
+> Editor **requires** either `xclip` or `xsel`  
+> 
+> **FreeBSD**  
+> Editor **requires xclip only** (xsel removed from repositories)  
+> 
+> **All Systems:**  
+> • Install required clipboard utility before first use  
+> • Restart terminal after installation  
+
+<br>
 
 ### 🔌 Configuration
 
@@ -177,70 +197,21 @@ You can override defaults per project or user, and dynamically reload config wit
   sway-pad .gitignore .gitlab-ci.yml
   ```
 
----
-
-# DevOps Linters Integration for SwayPad
-
-This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
-
-
 <br>
 
 ---
 
 <br>
-
-## ⚡ Quick Start
-
-
-<br>
-
-> [!Warning]
-> **System Requirements:**
->  
-> **Linux**  
-> Editor **requires** either `xclip` or `xsel`  
-> 
-> **FreeBSD**  
-> Editor **requires xclip only** (xsel removed from repositories)  
-> 
-> **All Systems:**  
-> • Install required clipboard utility before first use  
-> • Restart terminal after installation  
-
-<br>
-
----
-
-## 🛠 Configuration
-
-### `~/.config/swaypad/config.toml`
-```toml
-[editor]
-theme = "nord"
-font_family = "Fira Code"
-tab_size = 4
-auto_indent = true
-
-[keybindings]
-save = "ctrl+s"
-quit = "ctrl+shift+q"
-split_pane = "ctrl+alt+enter"
-
-[plugins]
-lsp_enabled = true
-git_diff = { enabled = true, hotkey = "f5" }
-```
-
-<br>
-
----
 
 # DevOps Linters Integration for SwayPad
 
 This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Python, Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
 
+<br>
+
 ---
+
+<br>
 
 ## 🔧 Requirements
 
@@ -273,7 +244,11 @@ Or dry-run without installing:
 ./install_devops_linters.sh --dry-run
 ```
 
+<br>
+
 ---
+
+<br>
 
 ## 📦 Linters and Setup Instructions
 
@@ -434,6 +409,8 @@ Each linter below includes installation instructions and dependency requirements
   rustup component add clippy
   ```
 
+<br>
+
 ---
 
 <br>
@@ -451,27 +428,16 @@ Each linter below includes installation instructions and dependency requirements
 - Add Type Hints for New Code  
 - Include Benchmark Results for Performance Changes
 
-
-<br>
-
-### 📌 License
-
-This integration module is MIT-licensed. All linters are third-party tools with their own licenses.
-
----
-
-### 💬 Questions & Contributions
-
-Feel free to open issues or submit PRs for new linters, documentation improvements, or integration support.
-
 <br>
 
 ### 📜 License
 
-**GNU General Public License v3.0**  
-Commercial use requires explicit permission.  
-Full text available in [LICENSE](LICENSE).
+- **Sway-pad** is licensed under the **GNU General Public License v3.0**  
+  Commercial use requires explicit permission from the author.  
+  See full text in [LICENSE](LICENSE).
 
+- **DevOps Linters Plugin** (`lint_devops.py`) is released under the **MIT License**.  
+  Each linter it invokes is a third-party tool and follows its own license.
 
 <br>
 
