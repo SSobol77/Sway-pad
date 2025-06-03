@@ -26,7 +26,13 @@
 > * Mass surveillance or tracking systems
 > * Projects violating international human rights conventions
 
+<br>
+
 ---
+
+<br>
+
+<br>
 
 <h1 align="center">🌊 Sway-pad</h1>
 <h3 align="center">Cross-platform Terminal Editor for Modern DevOps Engineers</h3>
@@ -60,7 +66,7 @@ Whether you’re editing YAML inside a container or deploying infrastructure ove
 
 <br>
 
-### 🖥 Supported Platforms
+## 🖥 Supported Platforms
 
 | OS      | Support Level | Notes                                      |
 | ------- | ------------- | ------------------------------------------ |
@@ -119,7 +125,7 @@ Whether you’re editing YAML inside a container or deploying infrastructure ove
 
 <br>
 
-### ⚡ Quick Start
+## ⚡ Quick Start
 
 <br>
 
@@ -202,7 +208,7 @@ You can override defaults per project or user, and dynamically reload config wit
 
 <br>
 
-# DevOps Linters Integration for SwayPad
+## 🧩 DevOps Linters Integration for SwayPad
 
 This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Python, Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
 
