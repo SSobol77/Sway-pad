@@ -4,58 +4,59 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-# [logging]
-# file_level = "DEBUG"  # Level for editor.log
-# console_level = "WARNING" # Level for console output
-# log_to_console = true # Enable/disable console logging for ERROR/CRITICAL
-# separate_error_log = false # Enable/disable separate error.log
+[logging]
+file_level = "DEBUG"
+console_level = "WARNING"
+log_to_console = false
+separate_error_log = false
 
 [colors]
-line_number = "yellow"
-cursor = "yellow"
-literal = "magenta"
-decorator = "cyan"
-selector = "magenta"
-property = "cyan"
-punctuation = "white"   
-status = "bright_white"
-variable = "white"    
-tag = "blue"          
-attribute = "cyan"    
-magic = "magenta"      
-builtin = "yellow"     
-exception = "red"      
-class = "yellow"       
-escape = "cyan"       
-background      = "#0D1117"
-foreground      = "#C9D1D9"
-comment         = "#8B949E"
-keyword         = "#D2A8FF"
-string          = "#A5D6FF"
-number          = "#79C0FF"
-function        = "#FFA657"
-constant        = "#D29922"
-type            = "#F2CC60"
-operator        = "#F0F6FC"
-selection_bg    = "#264F78"
-search_highlight_bg = "#3C2D00"
-status_bg       = "#161B22"
-status_fg       = "#C9D1D9"
-git_clean       = "#79C0FF"
-git_dirty       = "#FFAB70"
-error           = "#FF7B72"
+line_number      = "blue"
+#line_number      = "#553f07"  # dark yellow
+cursor           = "yellow"
+literal          = "magenta"
+decorator        = "cyan"
+selector         = "magenta"
+property         = "cyan"
+punctuation      = "white"   
+status           = "bright_white"
+variable         = "white"    
+tag              = "blue"          
+attribute        = "cyan"    
+magic            = "magenta"      
+builtin          = "yellow"     
+exception        = "red"      
+class            = "yellow"       
+escape           = "cyan"       
+background       = "#0D1117"
+foreground       = "#C9D1D9"
+comment          = "#456954"
+keyword          = "#D2A8FF"
+string           = "#A5D6FF"
+number           = "#79C0FF"
+function         = "#FFA657"
+constant         = "#D29922"
+type             = "#F2CC60"
+operator         = "#F0F6FC"
+selection_bg     = "#264F78"
+search_highlight = "#FF1493"    
+status_bg        = "#161B22"
+status_fg        = "#C9D1D9"
+git_clean        = "#79C0FF"
+git_dirty        = "#FFAB70"
+error            = "#FF7B72"
 
 [fonts]
-font_family = "monospace"    # Используется системный моноширинный шрифт
+font_family = "monospace"  
 font_size = 12
 
 [keybindings]
-# ── базовые операции ──────────────────────────────────────────────
+# ── baisc operation ────────────
 copy                 = "ctrl+c"
 cut                  = "ctrl+x"
 paste                = "ctrl+v"
 undo                 = "ctrl+z"
-redo                 = "shift+z"
+redo                 = "ctrl+y"
 quit                 = 17
 save_file            = 19 
 open_file            = "ctrl+o"
@@ -69,26 +70,25 @@ find_and_replace = "f6"
 git_menu     = "f9"  
 goto_line = "ctrl+g"
 tab = "tab"
-comment_line = "alt+#"
+#comment_line = "alt+#" delete this
 toggle_insert_mode = "insert"
 lint = "f4"   
-comment_selected_lines = 31
-uncomment_selected_lines = 63
-
-# ── перемещение курсора / выделение ───────────────────────────────
-extend_selection_right = "shift+right"
-extend_selection_left  = "shift+left"
+do_comment_block = "ctrl+/"
+do_uncomment_block = "ctrl+\\"
+# ── move cursor / select ─────────────
+extend_selection_left  = ["shift+left", "alt+h"]
+extend_selection_right = ["shift+right", "alt+l"]
+extend_selection_up    = ["shift+up", "alt+k"]
+extend_selection_down  = ["shift+down", "alt+j"]
 select_to_home         = "shift+home"
 select_to_end          = "shift+end"
-extend_selection_up    = "shift+pgup"
-extend_selection_down  = "shift+pgdn"
 go_to_top    = "home"
 go_to_bottom = "end" 
 page_up      = "pgup"
 page_down    = "pgdn"
 
 [editor]
-use_system_clipboard = true  # Использовать системный буфер обмена (pyperclip)
+use_system_clipboard = true  # Use the system clipboard (pyperclip)
 show_line_numbers = true
 tab_size = 4
 use_spaces = true
