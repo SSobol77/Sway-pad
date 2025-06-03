@@ -190,7 +190,7 @@ You can override defaults per project or user, and dynamically reload config wit
 
 <br>
 
-## 🧩 DevOps Linters Integration for SwayPad
+## 🧩 DevOps Linters Integration for Sway-Pad
 
 This repository provides a plugin module `lint_devops.py` to integrate fast and modern linters for DevOps and infrastructure-as-code files into the SwayPad text editor. It enables automatic linting of Python, Bash, YAML, Dockerfiles, Terraform, Kubernetes, GitHub Actions, Ansible, Jsonnet, Lua, Nix, TOML, Go, C, and Rust files.
 
