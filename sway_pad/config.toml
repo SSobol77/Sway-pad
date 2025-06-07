@@ -48,44 +48,44 @@ error            = "#FF7B72"
 
 [fonts]
 font_family = "monospace"  
-font_size = 12
+font_size = 16
 
 [keybindings]
 # ── baisc operation ────────────
-copy                 = "ctrl+c"
-cut                  = "ctrl+x"
-paste                = "ctrl+v"
-undo                 = "ctrl+z"
-redo                 = "ctrl+y"
-quit                 = 17
-save_file            = 19 
-open_file            = "ctrl+o"
-select_all           = "ctrl+a"
-delete               = "del"
-new_file             = "f2"
-find       = "ctrl+f"
-find_next  = "f3"
-save_as              = "f5"  
-find_and_replace = "f6"
-git_menu     = "f9"  
-goto_line = "ctrl+g"
-tab = "tab"
-#comment_line = "alt+#" delete this
-toggle_insert_mode = "insert"
-lint = "f4"   
-do_comment_block = "ctrl+/"
-do_uncomment_block = "ctrl+\\"
-# ── move cursor / select ─────────────
-extend_selection_left  = ["shift+left", "alt+h"]
-extend_selection_right = ["shift+right", "alt+l"]
-extend_selection_up    = ["shift+up", "alt+k"]
-extend_selection_down  = ["shift+down", "alt+j"]
-select_to_home         = "shift+home"
-select_to_end          = "shift+end"
-go_to_top    = "home"
-go_to_bottom = "end" 
-page_up      = "pgup"
-page_down    = "pgdn"
+# copy                 = "ctrl+c"
+# cut                  = "ctrl+x"
+# paste                = "ctrl+v"
+# #undo                 = ["ctrl+z", 26, 407]
+# redo                 = "ctrl+y"
+# quit                 = 17
+# save_file            = 19 
+# open_file            = "ctrl+o"
+# select_all           = "ctrl+a"
+# delete               = "del"
+# new_file             = "f2"
+# find       = "ctrl+f"
+# find_next  = "f3"
+# save_as              = "f5"  
+# find_and_replace = "f6"
+# git_menu     = "f9"  
+# goto_line = "ctrl+g"
+# tab = "tab"
+# #comment_line = "alt+#" delete this
+# toggle_insert_mode = "insert"
+# lint = "f4"   
+# do_comment_block = "ctrl+/"
+# do_uncomment_block = "ctrl+\\"
+# # ── move cursor / select ─────────────
+# extend_selection_left  = ["shift+left", "alt+h"]
+# extend_selection_right = ["shift+right", "alt+l"]
+# extend_selection_up    = ["shift+up", "alt+k"]
+# extend_selection_down  = ["shift+down", "alt+j"]
+# select_to_home         = "shift+home"
+# select_to_end          = "shift+end"
+# go_to_top    = "home"
+# go_to_bottom = "end" 
+# page_up      = "pgup"
+# page_down    = "pgdn"
 
 [editor]
 use_system_clipboard = true  # Use the system clipboard (pyperclip)
