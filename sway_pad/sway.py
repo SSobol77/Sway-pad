@@ -108,67 +108,70 @@ def deep_merge(base: Dict[Any, Any], override: Dict[Any, Any]) -> Dict[Any, Any]
 
 # --- Safe Subprocess Execution Utility ---
 def safe_run(
-    cmd: List[str], 
-    cwd: Optional[str] = None, 
-    timeout: Optional[float] = None, # Added explicit timeout parameter
+    cmd: list[str],
+    cwd: Optional[str] = None,
+    timeout: Optional[float] = None,
     **kwargs: Any
 ) -> subprocess.CompletedProcess:
-    """
-    Provides a safer and more convenient way to run external commands using subprocess.run.
-    - Captures stdout and stderr.
-    - Decodes output as UTF-8 text, replacing decoding errors.
-    - Does not raise an exception for non-zero exit codes (check=False).
-    - Allows specifying a current working directory (cwd) and a timeout.
+    """Safely executes an external command and captures its output.
+
+    This utility wraps `subprocess.run()` with safe defaults:
+    - Ensures text output with UTF-8 decoding and error replacement.
+    - Captures both stdout and stderr.
+    - Handles common error scenarios gracefully.
+    - Never raises exceptions — instead returns a CompletedProcess with error output and code.
 
     Args:
-        cmd (List[str]): The command and its arguments as a list of strings.
-        cwd (Optional[str]): The working directory for the command. Defaults to None (current dir).
-        timeout (Optional[float]): Timeout in seconds for the command. Defaults to None (no timeout).
-        **kwargs: Additional keyword arguments to pass to subprocess.run.
+        cmd (list[str]): Command to execute, passed as a list of arguments.
+        cwd (Optional[str], optional): Working directory for the subprocess. Defaults to None.
+        timeout (Optional[float], optional): Timeout in seconds. Defaults to None.
+        **kwargs (Any): Additional keyword arguments forwarded to `subprocess.run`.
 
     Returns:
-        subprocess.CompletedProcess: An object containing information about the completed process,
-                                     including returncode, stdout, and stderr.
+        subprocess.CompletedProcess: Result of the command execution, with `returncode`, `stdout`, and `stderr`.
+
+    Warnings:
+        If the caller provides `check=True` via `kwargs`, it will override the default behavior
+        and may cause exceptions to propagate.
     """
-    # Ensure text=True is compatible with encoding and errors (it is)
-    # For Python 3.7+, universal_newlines=True is implied by text=True.
-    # For older versions, explicitly setting universal_newlines might be useful
-    # if cross-platform line ending normalization is desired from the start,
-    # but text=True usually handles this.
-    
-    # Ensure 'check' is not overridden by kwargs to be True if we want to always handle non-zero returns manually
-    if 'check' in kwargs:
-        logging.warning("safe_run: 'check' in kwargs is overriding default False. Caller must handle CalledProcessError.")
-    
+    if "check" in kwargs:
+        logging.warning(
+            "safe_run: 'check=True' passed in kwargs — caller is responsible for handling exceptions."
+        )
+
     effective_kwargs = {
-        'capture_output': True,
-        'text': True,
-        'check': False, # Default to False, caller should check result.returncode
-        'encoding': 'utf-8',
-        'errors': 'replace',
-        **kwargs # User-provided kwargs can override defaults (except those explicitly set above)
+        "capture_output": True,
+        "text": True,
+        "check": False,
+        "encoding": "utf-8",
+        "errors": "replace",
+        **kwargs,
     }
+
     if cwd is not None:
-        effective_kwargs['cwd'] = cwd
+        effective_kwargs["cwd"] = cwd
     if timeout is not None:
-        effective_kwargs['timeout'] = timeout
-        
+        effective_kwargs["timeout"] = timeout
+
     try:
         return subprocess.run(cmd, **effective_kwargs)
-    except FileNotFoundError as e_fnf:
-        # Construct a CompletedProcess object to mimic failure if command not found
-        logging.error(f"safe_run: Command '{cmd[0]}' not found: {e_fnf}")
-        return subprocess.CompletedProcess(args=cmd, returncode=127, stdout="", stderr=str(e_fnf))
-    except subprocess.TimeoutExpired as e_timeout:
-        logging.warning(f"safe_run: Command '{' '.join(cmd)}' timed out after {timeout}s: {e_timeout.stderr or e_timeout.stdout or ''}")
-        # TimeoutExpired exception has stdout and stderr attributes
-        return subprocess.CompletedProcess(args=cmd, returncode=-9, # Or signal.SIGKILL equivalent
-                                           stdout=e_timeout.stdout.decode('utf-8', 'replace') if e_timeout.stdout else "", 
-                                           stderr=e_timeout.stderr.decode('utf-8', 'replace') if e_timeout.stderr else "")
-    except Exception as e_general:
-        # Catch other potential errors from subprocess.run
-        logging.error(f"safe_run: Error running command '{' '.join(cmd)}': {e_general}", exc_info=True)
-        return subprocess.CompletedProcess(args=cmd, returncode=-1, stdout="", stderr=str(e_general))
+    except FileNotFoundError as e:
+        logging.error(f"safe_run: Command not found: {cmd[0]!r}", exc_info=True)
+        return subprocess.CompletedProcess(cmd, returncode=127, stdout="", stderr=str(e))
+    except subprocess.TimeoutExpired as e:
+        logging.warning(f"safe_run: Command timed out after {timeout}s: {' '.join(cmd)}")
+        return subprocess.CompletedProcess(
+            cmd,
+            returncode=-9,
+            stdout=(e.stdout.decode("utf-8", "replace") if e.stdout else ""),
+            stderr=(e.stderr.decode("utf-8", "replace") if e.stderr else "Process timed out."),
+        )
+    except OSError as e:
+        logging.error(f"safe_run: OS error while running {cmd}: {e}", exc_info=True)
+        return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr=str(e))
+    except Exception as e:
+        logging.exception(f"safe_run: Unexpected error while executing: {' '.join(cmd)}")
+        return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="Unexpected error occurred.")
 
 
 # --- Enhanced Logging Setup Function ---
@@ -1128,23 +1131,38 @@ class SwayEditor:
 
         logging.info("SwayEditor closed successfully.")
 
-    # ───────────────────── Keybinding Initialization ─────────────────────
+
+### NEW NEW CODE ============НЕ РАБОТАЕТ ===============  Ctrl+/ остальное проверено ==================================
     def _load_keybindings(self) -> dict[str, list[Union[int, str]]]:
         """
-        Reads the [keybindings] section from config.toml and the default keybindings,
-        then parses them into a dictionary mapping action names to key codes.
-
-        Returns:
-            dict[str, list[Union[int, str]]]: Keys — action names (e.g., "save_file"),
-                                            values — список key-кодов (int или str).
+        Исправленная версия с улучшенной поддержкой TTY
         """
-        import curses
+        
+        # Получаем правильные коды клавиш для TTY
+        def get_backspace_code():
+            """Определяет правильный код для Backspace в зависимости от терминала"""
+            return [curses.KEY_BACKSPACE, 8, 127]
+        
+        def get_ctrl_z_codes():
+            """Получает все возможные коды для Ctrl+Z"""
+            codes = [26]  # ASCII SUB (стандартный Ctrl+Z)
+            
+            if hasattr(curses, 'KEY_SUSPEND'):
+                codes.append(curses.KEY_SUSPEND)
+                
+            codes.append(407)  # Альтернативный код для undo
+            return codes
+
+        def get_ctrl_slash_codes():
+            """Получает все возможные коды для Ctrl+/"""
+            return [51]  # ASCII-код для Ctrl+#
+
         default_keybindings: dict[str, Union[str, int, list[Union[str, int]]]] = {
             "delete": ["del", curses.KEY_DC],
             "paste": ["ctrl+v", 22],
             "copy": ["ctrl+c", 3],
             "cut": ["ctrl+x", 24],
-            "undo": ["ctrl+z", 26, 407],
+            "undo": ["ctrl+z"] + get_ctrl_z_codes(),
             "redo": ["ctrl+y", 558, 25],
             "new_file": ["f2", 266],
             "open_file": ["ctrl+o", 15],
@@ -1162,7 +1180,7 @@ class SwayEditor:
             "tab": ["tab", 9],
             "shift_tab": ["shift+tab", 353],
             "lint": ["f4", 268],
-            "do_comment_block": ["ctrl+/", 31, 263],
+            "do_comment_block": ["ctrl+#", 51] + get_ctrl_slash_codes() + [31],
             "do_uncomment_block": ["ctrl+\\", 28],
             "handle_home": ["home", curses.KEY_HOME, 262],
             "handle_end": ["end", getattr(curses, 'KEY_END', curses.KEY_LL), 360],
@@ -1171,13 +1189,14 @@ class SwayEditor:
             "toggle_insert_mode": ["insert", curses.KEY_IC, 331],
             "select_to_home": [curses.KEY_SHOME],
             "select_to_end": [curses.KEY_SEND],
-            # и вот тут поддержка Alt и Shift биндингов для выделения:
-            "extend_selection_up":    ["shift+up", getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)), "alt+up"],
-            "extend_selection_down":  ["shift+down", getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)), "alt+j"],
-            "extend_selection_left":  ["shift+left", curses.KEY_SLEFT, "alt+h"],
-            "extend_selection_right": ["shift+right", curses.KEY_SRIGHT, "alt+l"],
+            "extend_selection_up": ["shift+up", getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)), "alt-k"],
+            "extend_selection_down": ["shift+down", getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)), "alt-j"],
+            "extend_selection_left": ["shift+left", curses.KEY_SLEFT, "alt-h"],
+            "extend_selection_right": ["shift+right", curses.KEY_SRIGHT, "alt-l"],
+            "handle_backspace": ["backspace"] + get_backspace_code(),
         }
-
+        
+        # Остальная часть метода остается без изменений...
         user_keybindings_config = self.config.get("keybindings", {})
         parsed_keybindings: dict[str, list[Union[int, str]]] = {}
 
@@ -1226,20 +1245,9 @@ class SwayEditor:
 
 
     def _decode_keystring(self, key_input: Union[str, int]) -> Union[int, str]:
-        """Converts a key binding specification to an integer key code or a logical string (for Alt-combos).
-
-        Args:
-            key_input (Union[str, int]): Key code as integer or string specification (e.g. 'ctrl+x', 'alt-h').
-
-        Raises:
-            ValueError: If input cannot be parsed.
-
-        Returns:
-            Union[int, str]: Integer key code or string for logical Alt combinations.
         """
-        import curses
-        import logging
-
+        Улучшенная версия с поддержкой TTY
+        """
         if isinstance(key_input, int):
             return key_input
 
@@ -1252,11 +1260,34 @@ class SwayEditor:
         if not s:
             raise ValueError("Key string cannot be empty.")
 
+        logging.debug(f"_decode_keystring: Parsing key_input: {original_key_string!r} (initial s: {s!r})")
+
+        # Нормализация alt+key к alt-key
+        if "alt" in s.split('+'):
+            parts = s.split('+')
+            if "alt" in parts:
+                base_key_for_alt = parts[-1]
+                other_mods = [m for m in parts[:-1] if m != "alt"]
+                other_mods.sort()
+                
+                normalized_s_parts = ["alt-"] 
+                if other_mods:
+                    normalized_s_parts.append("+".join(other_mods))
+                    normalized_s_parts.append("+")
+                normalized_s_parts.append(base_key_for_alt)
+                
+                s = "".join(normalized_s_parts)
+                logging.debug(f"_decode_keystring: Normalized '{original_key_string}' to '{s}' for Alt processing.")
+
+        if s.startswith("alt-"):
+            logging.debug(f"_decode_keystring: Interpreted as logical Alt-binding: {s!r}")
+            return s
+
+        # Улучшенная карта именованных клавиш с поддержкой TTY
         named_keys_map: Dict[str, int] = {
-            'f1': curses.KEY_F1, 'f2': curses.KEY_F2, 'f3': curses.KEY_F3,
-            'f4': curses.KEY_F4, 'f5': curses.KEY_F5, 'f6': curses.KEY_F6,
-            'f7': curses.KEY_F7, 'f8': curses.KEY_F8, 'f9': curses.KEY_F9,
-            'f10': curses.KEY_F10, 'f11': curses.KEY_F11, 'f12': curses.KEY_F12,
+            'f1': curses.KEY_F1, 'f2': curses.KEY_F2, 'f3': curses.KEY_F3, 'f4': curses.KEY_F4,
+            'f5': curses.KEY_F5, 'f6': curses.KEY_F6, 'f7': curses.KEY_F7, 'f8': curses.KEY_F8,
+            'f9': curses.KEY_F9, 'f10': curses.KEY_F10, 'f11': curses.KEY_F11, 'f12': curses.KEY_F12,
             'left': curses.KEY_LEFT, 'right': curses.KEY_RIGHT,
             'up': curses.KEY_UP, 'down': curses.KEY_DOWN,
             'home': curses.KEY_HOME, 'end': getattr(curses, 'KEY_END', curses.KEY_LL),
@@ -1283,274 +1314,130 @@ class SwayEditor:
             '/': ord('/'), '?': ord('?'), '\\': ord('\\'),
         }
 
-        # Логируем попытку парсинга
-        logging.debug(f"_decode_keystring: Parsing key_input: {original_key_string!r} (normalized: {s!r})")
+        # Добавляем функциональные клавиши
+        named_keys_map.update({f"f{i}": getattr(curses, f"KEY_F{i}", 256 + i) for i in range(1, 13)})
 
-        # --- Поддержка alt-хоткеев: если строка уже alt-*, возвращаем её как есть (для TTY) ---
-        if s.startswith("alt-"):
-            logging.debug(f"_decode_keystring: Interpreted as logical Alt-binding: {s!r}")
-            return s
-
-        # First, check for an exact match in the named_keys_map
         if s in named_keys_map:
             code = named_keys_map[s]
             logging.debug(f"_decode_keystring: Named key {s!r} resolved to code {code}")
             return code
 
-        # If no full match, try to parse into modifiers + base key
+        # Разбор модификаторов
         parts = s.split('+')
         base_key_str = parts[-1].strip()
         modifiers = set(p.strip() for p in parts[:-1])
 
-        base_code: int
+        if "alt" in modifiers:
+            logging.error(f"_decode_keystring: 'alt' unexpectedly found in modifiers for '{s}' at a late stage.")
+            modifiers.remove("alt")
+            remaining_modifiers_part = ""
+            if modifiers:
+                sorted_remaining_modifiers = sorted(list(modifiers))
+                remaining_modifiers_part = "+".join(sorted_remaining_modifiers) + "+"
+            return f"alt-{remaining_modifiers_part}{base_key_str}"
 
+        # Определение базовой клавиши
+        base_code: int
         if base_key_str in named_keys_map:
             base_code = named_keys_map[base_key_str]
-            logging.debug(f"_decode_keystring: Base key {base_key_str!r} resolved to code {base_code}")
         elif len(base_key_str) == 1:
             base_code = ord(base_key_str)
-            logging.debug(f"_decode_keystring: Base key {base_key_str!r} resolved to ASCII {base_code}")
         else:
-            logging.error(f"_decode_keystring: Unknown base key '{base_key_str}' in '{original_key_string}' after checking named_keys_map.")
-            raise ValueError(f"Unknown base key '{base_key_str}' in '{original_key_string}' after checking named_keys_map.")
+            raise ValueError(f"Unknown base key '{base_key_str}' in '{original_key_string}'")
 
-        # Apply modifiers
+        # ИСПРАВЛЕНО: Улучшенное применение модификатора Ctrl
         if "ctrl" in modifiers:
             modifiers.remove("ctrl")
             if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1:
                 base_code = ord(base_key_str) - ord('a') + 1
-                logging.debug(f"_decode_keystring: CTRL modifier applied to '{base_key_str}', result code: {base_code}")
-            elif base_key_str == '/':
-                base_code = 31
-                logging.debug("_decode_keystring: CTRL modifier applied to '/', result code: 31")
-            elif base_key_str == '\\':
-                base_code = 28
-                logging.debug("_decode_keystring: CTRL modifier applied to '\\', result code: 28")
-            elif base_key_str == '[':
-                base_code = 27
-                logging.debug("_decode_keystring: CTRL modifier applied to '[', result code: 27")
-            elif base_key_str == ']':
-                base_code = 29
-                logging.debug("_decode_keystring: CTRL modifier applied to ']', result code: 29")
-            else:
-                logging.warning(
-                    f"_decode_keystring: Ctrl modifier with base '{base_key_str}' in '{original_key_string}'. "
-                    f"Resulting code {base_code} is based on the base key's direct code. "
-                    f"This might not match terminal output for Ctrl combinations with non-letters/non-specific-symbols."
-                )
-
-        if "shift" in modifiers:
-            modifiers.remove("shift")
-            if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1 and base_code == ord(base_key_str):
-                base_code = ord(base_key_str.upper())
-                logging.debug(f"_decode_keystring: SHIFT modifier applied to '{base_key_str}', result code: {base_code}")
-            elif base_key_str not in [
-                'up', 'down', 'left', 'right', 'home', 'end',
-                'pageup', 'pagedown', 'tab',
-                'f1', 'f2', 'f3', 'f4', 'f5', 'f6',
-                'f7', 'f8', 'f9', 'f10', 'f11', 'f12'
-            ]:
-                logging.warning(
-                    f"_decode_keystring: Remaining 'shift' modifier for base '{base_key_str}' in '{original_key_string}'. "
-                    f"Resulting code: {base_code}. This might not reflect terminal output accurately."
-                )
-
-        if "alt" in modifiers:
-            modifiers.remove("alt")
-            # Возвращаем строку для alt-комбинаций (универсально для TTY и терминала)
-            result = f"alt-{base_key_str}"
-            logging.debug(f"_decode_keystring: ALT modifier applied, logical alt-key: {result!r}")
-            return result
-
-        if modifiers:  # Остались нераспознанные модификаторы
-            logging.error(f"_decode_keystring: Unknown or unhandled modifiers {list(modifiers)} in '{original_key_string}'")
-            raise ValueError(f"Unknown or unhandled modifiers {list(modifiers)} in '{original_key_string}'")
-
-        logging.debug(f"_decode_keystring: Final resolved code for '{original_key_string}': {base_code}")
-        return base_code
-
-            
-    # функция для разбора последовательностей клавиш (Alt-стрелки и Alt+h/j/k/l)
-    def parse_alt_key(self, seq: str) -> str:
-        """Parses escape sequences for Alt+Arrows or Alt+HJKL.
-
-        Args:
-            seq (str): Raw key sequence.
-
-        Returns:
-            str: Logical key name.
-        """
-        if seq.startswith('\x1b[1;3'):
-            direction = seq[-1]
-            return {'A': 'alt+up', 'B': 'alt+down', 'C': 'alt+right', 'D': 'alt+left'}.get(direction, '')
-        if seq.startswith('\x1b') and len(seq) == 2:
-            letter = seq[1].lower()
-            if letter in 'hjkl':
-                return f'alt+{letter}'
-        return ''
-
-    def get_key_input(self, stdscr) -> str | int:
-        """Reads user input, detects Alt+arrows or Alt+h/j/k/l, else returns original key.
-
-        Args:
-            stdscr: curses window
-
-        Returns:
-            str | int: Logical key name or original key.
-        """
-        import curses
-        key = stdscr.get_wch()
-        if key == '\x1b':
-            stdscr.nodelay(True)
-            seq = key
-            try:
-                for _ in range(6):
-                    next_char = stdscr.get_wch()
-                    if isinstance(next_char, int):
-                        break
-                    seq += next_char
-                    parsed = self.parse_alt_key(seq)
-                    if parsed:
-                        stdscr.nodelay(False)
-                        return parsed
-            except curses.error:
-                pass
-            finally:
-                stdscr.nodelay(False)
-        return key
-  
-    # ----- Decode key ----------------------------------------------------------- 
-    def _decode_keystring(self, key_input: Union[str, int]) -> int:
-        """
-        Translate a human-readable key specification or an integer key code
-        into a curses integer key code.
-
-        Args:
-            key_input: Either an int (platform key code) or a str
-                like "ctrl+/", "f1", "alt+x" (alt support is basic).
-
-        Returns:
-            The resolved curses integer key code.
-
-        Raises:
-            ValueError: If the string is empty, refers to an unknown key name,
-            or contains an invalid modifier combination.
-        """
-        if isinstance(key_input, int):
-            return key_input # If already an integer, just return it
-
-        if not isinstance(key_input, str): # Should be a string if not an integer
-            raise ValueError(f"Invalid key_input type: {type(key_input)}. Expected str or int.")
-
-        original_key_string = key_input
-        s = key_input.strip().lower() # Use 's' for brevity and case-insensitivity
-
-        if not s:
-            raise ValueError("Key string cannot be empty.")
-
-        # 1. Map of full key names, including complex Shift combinations
-        named_keys_map: Dict[str, int] = {
-            'f1': curses.KEY_F1, 'f2': curses.KEY_F2, 'f3': curses.KEY_F3,
-            'f4': curses.KEY_F4, 'f5': curses.KEY_F5, 'f6': curses.KEY_F6,
-            'f7': curses.KEY_F7, 'f8': curses.KEY_F8, 'f9': curses.KEY_F9,
-            'f10': curses.KEY_F10, 'f11': curses.KEY_F11, 'f12': curses.KEY_F12,
-            'left': curses.KEY_LEFT, 'right': curses.KEY_RIGHT,
-            'up': curses.KEY_UP, 'down': curses.KEY_DOWN,
-            'home': curses.KEY_HOME, 'end': getattr(curses, 'KEY_END', curses.KEY_LL),
-            'pageup': curses.KEY_PPAGE, 'pgup': curses.KEY_PPAGE,
-            'pagedown': curses.KEY_NPAGE, 'pgdn': curses.KEY_NPAGE,
-            'delete': curses.KEY_DC, 'del': curses.KEY_DC,
-            'backspace': curses.KEY_BACKSPACE,
-            'insert': curses.KEY_IC,
-            'tab': curses.ascii.TAB,
-            'enter': curses.KEY_ENTER, 'return': curses.KEY_ENTER,
-            'space': ord(' '),
-            'esc': 27, 'escape': 27,
-            'shift+left': curses.KEY_SLEFT, 'sleft': curses.KEY_SLEFT,
-            'shift+right': curses.KEY_SRIGHT, 'sright': curses.KEY_SRIGHT,
-            'shift+up': getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)),
-            'sup': getattr(curses, 'KEY_SR', getattr(curses, 'KEY_SPREVIOUS', 337)),
-            'shift+down': getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)),
-            'sdown': getattr(curses, 'KEY_SF', getattr(curses, 'KEY_SNEXT', 336)),
-            'shift+home': curses.KEY_SHOME,
-            'shift+end': curses.KEY_SEND,
-            'shift+pageup': getattr(curses, 'KEY_SPPAGE', getattr(curses, 'KEY_SPREVIOUS', 337)),
-            'shift+pagedown': getattr(curses, 'KEY_SNPAGE', getattr(curses, 'KEY_SNEXT', 336)),
-            'shift+tab': getattr(curses, 'KEY_BTAB', 353),
-            '/': ord('/'), '?': ord('?'), '\\': ord('\\'),
-        }
-
-        # First, check for an exact match in the named_keys_map
-        if s in named_keys_map:
-            return named_keys_map[s]
-
-        # If no full match, try to parse into modifiers + base key
-        parts = s.split('+')
-        base_key_str = parts[-1].strip()
-        modifiers = set(p.strip() for p in parts[:-1])
-
-        base_code: int
-
-        # Determine base_code
-        if base_key_str in named_keys_map: # e.g., "del" if original was "ctrl+del"
-            base_code = named_keys_map[base_key_str]
-        elif len(base_key_str) == 1: # Single character base
-            base_code = ord(base_key_str)
-        else:
-            raise ValueError(f"Unknown base key '{base_key_str}' in '{original_key_string}' after checking named_keys_map.")
-
-        # Apply modifiers
-        if "ctrl" in modifiers:
-            modifiers.remove("ctrl")
-            # Standard Ctrl+letter (a-z) -> ASCII 1-26
-            if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1:
-                base_code = ord(base_key_str) - ord('a') + 1
-            # Specific Ctrl+symbol mappings that generate control characters
+            elif base_key_str == '#': 
+                base_code = 51  # Ctrl+#
+                logging.debug("_decode_keystring: Ctrl+# mapped to code 51")
             elif base_key_str == '/': 
-                base_code = 31 # ASCII US (Unit Separator)
-            elif base_key_str == '\\':
-                base_code = 28 # ASCII FS (File Separator)
+                base_code = 31  # Ctrl+/ = ASCII 31
+                logging.debug("_decode_keystring: Ctrl+/ mapped to code 31")
+            elif base_key_str == '\\': 
+                base_code = 28  # Ctrl+// = ASCII 28
             elif base_key_str == '[': 
-                base_code = 27 # Ctrl+[ is Esc
+                base_code = 27  # Ctrl+[ = ESC
             elif base_key_str == ']': 
-                base_code = 29 # Ctrl+] is GS (Group Separator)
-            # For other Ctrl combinations (e.g., Ctrl+<named_key>, Ctrl+<other_symbol>),
-            # the base_code (already determined from ord() or named_keys_map) remains.
-            # This might not always match what the terminal sends for complex Ctrl sequences.
-            # Such bindings are more reliably specified using direct integer codes if known.
-            else:
-                logging.warning(f"Ctrl modifier with base '{base_key_str}' in '{original_key_string}'. "
-                                f"Resulting code {base_code} is based on the base key's direct code. "
-                                f"This might not match terminal output for Ctrl combinations with non-letters/non-specific-symbols.")
-        
+                base_code = 29  # Ctrl+]
+            elif base_key_str == 'z':  # Специально для Ctrl+Z
+                base_code = 26
+
+
+        # Применение модификатора Shift
         if "shift" in modifiers:
             modifiers.remove("shift")
-            # Shift + letter -> uppercase letter (only if base_code is still the lowercase char's ord)
             if 'a' <= base_key_str <= 'z' and len(base_key_str) == 1 and base_code == ord(base_key_str):
                 base_code = ord(base_key_str.upper())
-            # If 'shift' was part of a key already handled by named_keys_map (e.g., 'shift+tab'), it's already processed.
-            # This warning is for 'shift' remaining with other base keys where its effect isn't standard.
-            elif base_key_str not in ['up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown', 'tab',
-                                    'f1','f2','f3','f4','f5','f6','f7','f8','f9','f10','f11','f12']: # Known keys with specific shift variants
-                logging.warning(f"Remaining 'shift' modifier for base '{base_key_str}' in '{original_key_string}'. "
-                                f"Resulting code: {base_code}. This might not reflect terminal output accurately.")
 
-        if "alt" in modifiers:
-            modifiers.remove("alt")
-            base_code |= 0x200 # Custom Alt convention (may not work reliably in TTYs)
-            logging.debug(f"Applied custom Alt modifier (|=0x200) to key '{base_key_str}', code: {base_code}")
-
-        if modifiers: # Any remaining unhandled modifiers
+        if modifiers:
             raise ValueError(f"Unknown or unhandled modifiers {list(modifiers)} in '{original_key_string}'")
 
+        logging.debug(f"_decode_keystring: Final resolved integer key code for '{original_key_string}': {base_code}")
         return base_code
 
 
-    # ───────────────────── Action Map Setup ─────────────────────
+    def get_key_input_tty_safe(self, stdscr) -> str | int:
+        """
+        Улучшенная версия get_key_input с лучшей поддержкой TTY
+        """
+        try:
+            key = stdscr.get_wch()
+            
+            # Специальная обработка для проблемных клавиш в TTY
+            if isinstance(key, int):
+                logging.debug(f"get_key_input_tty_safe: Received integer key: {key}")
+                
+                # Проверяем на специальные коды TTY
+                if key == 8:  # Ctrl+H (может быть Backspace в TTY)
+                    logging.debug("get_key_input_tty_safe: Detected Ctrl+H/Backspace (code 8)")
+                    return curses.KEY_BACKSPACE
+                elif key == 127:  # DEL (может быть Backspace в некоторых TTY)
+                    logging.debug("get_key_input_tty_safe: Detected DEL as Backspace (code 127)")
+                    return curses.KEY_BACKSPACE
+                elif key == 26:  # Ctrl+Z
+                    logging.debug("get_key_input_tty_safe: Detected Ctrl+Z (code 26)")
+                    return 26
+                #elif key == 31:  # Ctrl+/ ДОБАВЛЕНО!
+                #    logging.debug("get_key_input_tty_safe: Detected Ctrl+/ (code 31)")
+                #    return 31
+                elif key == 263:  # Ctrl+/
+                    logging.debug("get_key_input_tty_safe: Detected Ctrl+/ (code 263)")
+                    return 263
+                
+            if key == '\x1b':  # ESC последовательность
+                stdscr.nodelay(True)
+                seq = key
+                try:
+                    for _ in range(6):
+                        next_char = stdscr.get_wch()
+                        if isinstance(next_char, int):
+                            break
+                        seq += next_char
+                        parsed = self.parse_alt_key(seq)
+                        if parsed:
+                            stdscr.nodelay(False)
+                            logging.debug(f"get_key_input_tty_safe: Parsed alt sequence: {parsed}")
+                            return parsed
+                except curses.error:
+                    logging.debug(f"get_key_input_tty_safe: curses.error, current sequence: {repr(seq)}")
+                    pass
+                finally:
+                    stdscr.nodelay(False)
+                    
+            logging.debug(f"get_key_input_tty_safe: returning: {repr(key)}")
+            return key
+            
+        except Exception as e:
+            logging.error(f"get_key_input_tty_safe: Unexpected error: {e}")
+            return -1
+
+
     def _setup_action_map(self) -> Dict[Union[int, str], Callable[..., Any]]:
         """
-        Build the action-map: an integer key-code → bound-callable dict.
-        Uses self.keybindings which maps action_name to a list of integer key_codes.
+        Улучшенная версия с дополнительной поддержкой TTY клавиш
         """
         action_to_method_map: Dict[str, Callable] = {
             "open_file": self.open_file, "save_file": self.save_file,
@@ -1574,7 +1461,6 @@ class SwayEditor:
             "do_comment_block": self.do_comment_block,
             "do_uncomment_block": self.do_uncomment_block,
             "toggle_insert_mode": self.toggle_insert_mode,
-            # Methods for builtin_curses_key_handlers (if not already above)
             "handle_up": self.handle_up, "handle_down": self.handle_down,
             "handle_left": self.handle_left, "handle_right": self.handle_right,
             "handle_backspace": self.handle_backspace, "handle_enter": self.handle_enter,
@@ -1582,63 +1468,64 @@ class SwayEditor:
 
         final_key_action_map: Dict[Union[int, str], Callable] = {}
 
-
-        # 1. Add built-in handlers first. They can be overridden by self.keybindings.
+        # ИСПРАВЛЕНО: Расширенные встроенные обработчики с поддержкой TTY
         builtin_curses_key_handlers: Dict[int, Callable] = {
-            curses.KEY_UP:        action_to_method_map["handle_up"],
-            curses.KEY_DOWN:      action_to_method_map["handle_down"],
-            curses.KEY_LEFT:      action_to_method_map["handle_left"],
-            curses.KEY_RIGHT:     action_to_method_map["handle_right"],
-            curses.KEY_HOME:      action_to_method_map["handle_home"],
-            curses.KEY_END:       action_to_method_map["handle_end"],
-            curses.KEY_PPAGE:     action_to_method_map["handle_page_up"],
-            curses.KEY_NPAGE:     action_to_method_map["handle_page_down"],
+            curses.KEY_UP: action_to_method_map["handle_up"],
+            curses.KEY_DOWN: action_to_method_map["handle_down"],
+            curses.KEY_LEFT: action_to_method_map["handle_left"],
+            curses.KEY_RIGHT: action_to_method_map["handle_right"],
+            curses.KEY_HOME: action_to_method_map["handle_home"],
+            curses.KEY_END: action_to_method_map["handle_end"],
+            curses.KEY_PPAGE: action_to_method_map["handle_page_up"],
+            curses.KEY_NPAGE: action_to_method_map["handle_page_down"],
             curses.KEY_BACKSPACE: action_to_method_map["handle_backspace"],
-            curses.KEY_DC:        action_to_method_map["delete"],
-            curses.KEY_ENTER:     action_to_method_map["handle_enter"],
-            10:                   action_to_method_map["handle_enter"], # ASCII LF
-            13:                   action_to_method_map["handle_enter"], # ASCII CR
-            curses.KEY_SLEFT:     action_to_method_map["extend_selection_left"],
-            curses.KEY_SRIGHT:    action_to_method_map["extend_selection_right"],
-            getattr(curses, 'KEY_SR', 337):       action_to_method_map["extend_selection_up"],
-            getattr(curses, 'KEY_SF', 336):       action_to_method_map["extend_selection_down"],
-            curses.KEY_SHOME:     action_to_method_map["select_to_home"],
-            curses.KEY_SEND:      action_to_method_map["select_to_end"],
-            curses.KEY_IC:        action_to_method_map["toggle_insert_mode"],
-            curses.KEY_RESIZE:    self.handle_resize, # Direct method call
-            getattr(curses, 'KEY_BTAB', 353):   action_to_method_map["shift_tab"],
-            
+            8: action_to_method_map["handle_backspace"],  # Ctrl+H в TTY
+            127: action_to_method_map["handle_backspace"],  # DEL в TTY
+            curses.KEY_DC: action_to_method_map["delete"],
+            curses.KEY_ENTER: action_to_method_map["handle_enter"],
+            10: action_to_method_map["handle_enter"],  # LF
+            13: action_to_method_map["handle_enter"],  # CR
+            curses.KEY_SLEFT: action_to_method_map["extend_selection_left"],
+            curses.KEY_SRIGHT: action_to_method_map["extend_selection_right"],
+            getattr(curses, 'KEY_SR', 337): action_to_method_map["extend_selection_up"],
+            getattr(curses, 'KEY_SF', 336): action_to_method_map["extend_selection_down"],
+            curses.KEY_SHOME: action_to_method_map["select_to_home"],
+            curses.KEY_SEND: action_to_method_map["select_to_end"],
+            curses.KEY_IC: action_to_method_map["toggle_insert_mode"],
+            curses.KEY_RESIZE: self.handle_resize,
+            getattr(curses, 'KEY_BTAB', 353): action_to_method_map["shift_tab"],
+            # Дополнительные коды для TTY совместимости
+            26: action_to_method_map["undo"],  # Ctrl+Z
+            407: action_to_method_map["undo"],  # Альтернативный Ctrl+Z
+            31: action_to_method_map["do_comment_block"],  #  Ctrl+/
+            51: action_to_method_map["do_comment_block"],  #  Ctrl+#
         }
+        
         for key_code, method_callable in builtin_curses_key_handlers.items():
             final_key_action_map[key_code] = method_callable
-            # No detailed log here for initial built-ins to reduce noise;
-            # Overwrites will be logged more prominently.
 
-        # 2. Populate from self.keybindings, potentially overwriting built-ins.
-        # self.keybindings is Dict[str, List[int]]                 
+        # Остальная часть метода остается без изменений...
         for action_name, key_code_list in self.keybindings.items():
             method_callable = action_to_method_map.get(action_name)
             if not method_callable:
                 logging.warning(f"Action '{action_name}' in keybindings but no corresponding method. Ignored.")
                 continue
 
-            if not isinstance(key_code_list, list):  # Should have been ensured by _load_keybindings
+            if not isinstance(key_code_list, list):
                 logging.error(f"Keybinding for '{action_name}' is not a list: {key_code_list}. Skipped.")
                 continue
 
             for key_code_value in key_code_list:
-                if not isinstance(key_code_value, (int, str)):  # ДОБАВИЛИ: теперь поддерживаем str!
+                if not isinstance(key_code_value, (int, str)):
                     logging.error(f"Key code '{key_code_value}' for '{action_name}' is not int or str. Skipped.")
                     continue
 
-                # Log if this key_code_value is overwriting an existing different method
                 if key_code_value in final_key_action_map and \
                 final_key_action_map[key_code_value].__name__ != method_callable.__name__:
                     logging.warning(
                         f"Keybinding from config/defaults: Action '{action_name}' (code {key_code_value}, method '{method_callable.__name__}') "
                         f"is OVERWRITING existing mapping for method '{final_key_action_map[key_code_value].__name__}'."
                     )
-                # Log if it's a new mapping from keybindings or if it's mapping to the same method (confirming an alias)
                 elif key_code_value not in final_key_action_map or final_key_action_map[key_code_value].__name__ == method_callable.__name__:
                     logging.debug(
                         f"Mapped from config/defaults (or confirmed alias): Action '{action_name}' (key code {key_code_value}) "
@@ -1646,30 +1533,101 @@ class SwayEditor:
                     )
                 final_key_action_map[key_code_value] = method_callable
 
-        
-        # 3. Ensure F4 for linting is present if not specifically overridden for F4
-        #    by a different action in user's keybindings.
-        f4_key_code_default = curses.KEY_F4 # Standard F4 code
-        lint_method_target = action_to_method_map.get("lint") # The method F4 should ideally call
+        # Fallback для F4
+        f4_key_code_default = curses.KEY_F4
+        lint_method_target = action_to_method_map.get("lint")
 
         if lint_method_target:
             current_f4_mapping = final_key_action_map.get(f4_key_code_default)
-            # If F4 is not mapped OR it's mapped to something other than 'run_lint_async' or 'show_lint_panel'
             if not current_f4_mapping or \
                 (current_f4_mapping.__name__ not in ('run_lint_async', 'show_lint_panel') and \
-                current_f4_mapping != lint_method_target) : # Check actual method object too
+                current_f4_mapping != lint_method_target):
 
-                if current_f4_mapping: # It was mapped to something else
+                if current_f4_mapping:
                     logging.info(f"Fallback F4 mapping for lint method '{lint_method_target.__name__}' "
                                 f"is overwriting the existing F4 mapping for '{current_f4_mapping.__name__}'.")
-                else: # F4 was not mapped at all
+                else:
                     logging.debug(f"Mapped fallback F4 (key code {f4_key_code_default}) to lint method '{lint_method_target.__name__}'.")
                 final_key_action_map[f4_key_code_default] = lint_method_target
 
         final_map_log_str = {k: v.__name__ for k, v in final_key_action_map.items()}
         logging.debug(f"Final constructed action map (Key Code -> Method Name): {final_map_log_str}")
         return final_key_action_map
-        
+
+
+    # функция для разбора последовательностей клавиш (Alt-стрелки и Alt+h/j/k/l)
+    def parse_alt_key(self, seq: str) -> str:
+        """Parses escape sequences for Alt+Arrows or Alt+HJKL.
+        Maps Alt+Arrow sequences to their corresponding Alt+HJKL logical names.
+
+        Args:
+            seq (str): Raw key sequence from the terminal.
+
+        Returns:
+            str: Logical key name (e.g., 'alt-k', 'alt-h'), or an empty string
+                if the sequence is not recognized as a supported Alt-key combination.
+        """
+
+        # For Alt+Arrow keys (e.g., \x1b[1;3A for Alt+Up in some modern emulators)
+        # These sequences can vary significantly. This covers one common variant.
+        # \x1bOA, \x1bOB, \x1bOC, \x1bOD is another frequent variant (xterm, vt100 application mode)
+        if seq.startswith('\x1b[1;3'): # Typical for some modern emulators
+            direction_char = seq[-1]
+            # Map arrow characters (A,B,C,D) to HJKL equivalents
+            # A (Up) -> k, B (Down) -> j, C (Right) -> l, D (Left) -> h
+            # IMPORTANT: using a hyphen for consistency with 'alt-h' format
+            mapping = {'A': 'alt-k', 'B': 'alt-j', 'C': 'alt-l', 'D': 'alt-h'}
+            return mapping.get(direction_char, '')
+        elif seq.startswith('\x1bO'): # Another common variant for arrow keys
+            direction_char = seq[-1]
+            mapping = {'A': 'alt-k', 'B': 'alt-j', 'C': 'alt-l', 'D': 'alt-h'}
+            return mapping.get(direction_char, '')
+
+        # For Alt+Letter combinations (e.g., \x1bh for Alt+h)
+        # This is a standard way many terminals send Alt+<char>
+        if seq.startswith('\x1b') and len(seq) == 2:
+            letter = seq[1].lower() # Get the second character after ESC
+            # Check if it's one of the expected HJKL letters
+            if letter in 'hjkl':
+                return f'alt-{letter}' # Use a hyphen
+            # If you want to support other Alt+letters, you can expand the condition or remove it
+            # elif letter.isalpha():
+            #     return f'alt-{letter}'
+
+        return ''
+
+    def get_key_input(self, stdscr) -> str | int:
+        """Reads user input, detects Alt+arrows or Alt+h/j/k/l, else returns original key.
+
+        Args:
+            stdscr: curses window
+
+        Returns:
+            str | int: Logical key name or original key.
+        """
+
+        key = stdscr.get_wch()
+        if key == '\x1b':
+            stdscr.nodelay(True)
+            seq = key
+            try:
+                for _ in range(6):
+                    next_char = stdscr.get_wch()
+                    if isinstance(next_char, int):
+                        break
+                    seq += next_char
+                    parsed = self.parse_alt_key(seq)
+                    if parsed:
+                        stdscr.nodelay(False)
+                        return parsed
+            except curses.error:
+                logging.debug(f"get_key_input: curses.error, current sequence: {repr(seq)}")
+                pass
+            finally:
+                stdscr.nodelay(False)
+        logging.debug(f"get_key_input: returning: {repr(key)}")
+        return key
+  
                 
     # ─────────────────────  Get comment prefix for current language ─────────────────────
     def get_line_comment_prefix(self) -> Optional[str]:
@@ -1935,7 +1893,7 @@ class SwayEditor:
         name = self._lexer.name.lower()
         if name in {"python", "python3", "py"}:
             return ('"""', '"""')
-        if name in {"javascript", "typescript", "java", "c", "cpp", "c++",
+        if name in {"javascript", "jsonc", "typescript", "java", "c", "cpp", "c++",
                     "csharp", "go", "css", "php", "rust", "swift", "scala"}:
             return ("/*", "*/")
         if name in {"sql", "plpgsql"}:
@@ -1962,6 +1920,7 @@ class SwayEditor:
             zero-based indices into :pyattr:`self.text`, or ``None`` when
             the stored selection coordinates are inconsistent.
         """
+        
         if self.is_selecting and self.selection_start and self.selection_end:
             norm_range = self._get_normalized_selection_range()
             if not norm_range:
@@ -1977,6 +1936,8 @@ class SwayEditor:
         else:
             return self.cursor_y, self.cursor_y
 
+
+ # ───────────────────── Comment/Uncomment Block - all in one ─────────────────────
     def toggle_comment_block(self) -> None:
         """
         Comment **or** uncomment the current selection in a single keystroke.
@@ -1986,6 +1947,7 @@ class SwayEditor:
         2. Otherwise fall back to the traditional “prefix every line with
         a line-comment marker” logic.
         """
+
         # 1. Determine the line interval affected by the operation
         line_range = self._determine_lines_to_toggle_comment()
         if line_range is None:
@@ -2025,42 +1987,6 @@ class SwayEditor:
             return  # block path handled → skip line-comment logic
 
         # 3. Fallback to single-line prefix commenting
-        comment_prefix = self.get_line_comment_prefix()
-        if not comment_prefix:
-            self._set_status_message(
-                "Line comments not supported for this language.")
-            return
-
-        with self._state_lock:
-            all_commented = True
-            non_empty_seen = False
-
-            for y in range(start_y, end_y + 1):
-                if y >= len(self.text):
-                    continue
-                line = self.text[y]
-                if line.strip():
-                    non_empty_seen = True
-                    if not line.lstrip().startswith(comment_prefix.strip()):
-                        all_commented = False
-                        break
-
-            if not non_empty_seen and (end_y > start_y or not self.text[start_y].strip()):
-                action = "comment"
-            else:
-                action = "uncomment" if all_commented else "comment"
-
-            logging.debug(
-                "toggle_comment_block: decided '%s' for lines %d–%d",
-                action, start_y, end_y
-            )
-
-            if action == "comment":
-                self.comment_lines(start_y, end_y, comment_prefix)
-            else:
-                self.uncomment_lines(start_y, end_y, comment_prefix)
-
-
         comment_prefix = self.get_line_comment_prefix()
         if not comment_prefix:
             self._set_status_message("Line comments not supported for this language.")
@@ -2103,6 +2029,7 @@ class SwayEditor:
                 self.comment_lines(start_y, end_y, comment_prefix)
             else:
                 self.uncomment_lines(start_y, end_y, comment_prefix)
+
 
     # ───────────────────── Comment/Uncomment Block ─────────────────────
     def do_comment_block(self) -> bool:
@@ -2194,94 +2121,100 @@ class SwayEditor:
             made_change = True
         
         return made_change or (self.status_message != original_status)
+  
     
     # Note:  This method is called from the main loop when a key is pressed.
     # --------------------- Input Handler --------------------
     def handle_input(self, key: Union[str, int]) -> bool:
         """
         Handles all key presses received from curses.get_wch().
-        It prioritizes mapped actions (from self.action_map) for known integer key codes
-        and for single character strings that represent control characters (e.g., '\n', '\x1b').
+        It prioritizes mapped actions (from self.action_map) for known integer key codes,
+        logical string keys (like 'alt-h'), and single character strings that represent
+        control characters (e.g., ord('\n'), ord('\x1b')).
         If not handled by action_map, it attempts to process the input as a printable character.
 
         Args:
             key (Union[str, int]): The key event received. Can be an integer (for special keys
                                    or some character codes) or a string (for most characters
-                                   and some special sequences like Esc).
+                                   and some special sequences like Esc or 'alt-h').
 
         Returns:
             bool: True if the input resulted in a change to the editor's state
                   (text, cursor, scroll, selection, modified status, or status message)
                   that requires a screen redraw. False otherwise.
         """
+
         logging.debug("handle_input: Received raw key event → %r (type: %s)", key, type(key).__name__)
-        
-        action_caused_visual_change = False 
+
+        action_caused_visual_change = False
         original_status = self.status_message # Store to detect if status message changes
 
         with self._state_lock: # Ensure thread safety for state modifications
             try:
-                # - 1.  Determine the integer key code for action_map lookup ---
-                # This code will be used to check against self.action_map.
-                key_code_for_action_map: Optional[int] = None
-                is_potentially_printable_char_string = False # Flag if 'key' is a string but not a known control char for map
-
-                # --- universal lookup for action_map (int or str, TTY or GUI) ---
+                # --- Attempt 1: Direct key lookup (handles integers and string keys like 'alt-h') ---
                 if key in self.action_map:
-                    result = self.action_map[key]()
-                    return result if result is not None else True
-                
-                # ────────────────────────────────────────────────────────────────
-                if isinstance(key, int):
-                    key_code_for_action_map = key # Directly use if it's already an integer
-                elif isinstance(key, str) and len(key) == 1:
-                    # For single character strings, get their ordinal value.
-                    # This is crucial for control characters like '\n', '\x1b' (Esc),
-                    # Ctrl+Letter (which might arrive as ASCII 1-26), etc.
-                    key_code_for_action_map = ord(key)
-                    # If this ordinal isn't in action_map, it might be a printable char.
-                    if not (0 <= key_code_for_action_map <= 31 or key_code_for_action_map == 127 or key_code_for_action_map == 27): # Common control ranges + Esc
-                         if key_code_for_action_map not in self.action_map: # Double check if it's a mapped printable like '/' for comment
-                            is_potentially_printable_char_string = True
-                # If 'key' is a multi-character string (e.g., some escape sequences not fully resolved by curses),
-                # key_code_for_action_map will remain None, and it won't match integer keys in action_map.
-                # Such strings will be handled as "unhandled input" later if not processed.
-
-                logging.debug(f"handle_input: Derived key_code_for_action_map = {key_code_for_action_map} from input {repr(key)}")
-
-                # ---  2. Try to execute an action from the action_map ---
-                if key_code_for_action_map is not None and key_code_for_action_map in self.action_map:
                     logging.debug(
-                        f"handle_input: Key code {key_code_for_action_map} found in action_map. "
-                        f"Calling method: {self.action_map[key_code_for_action_map].__name__}"
+                        f"handle_input: Key '{key}' (type: {type(key).__name__}) found directly in action_map. "
+                        f"Calling method: {self.action_map[key].__name__}"
                     )
-                    # Methods in action_map are expected to return True if they changed state
-                    # and require a redraw.
-                    if self.action_map[key_code_for_action_map]():
+                    # Methods in action_map are expected to return True if they changed state.
+                    if self.action_map[key]():
                         action_caused_visual_change = True
                     # Even if the action method returned False, if it changed the status message,
-                    # that constitutes a visual change needing a redraw.
+                    # that constitutes a visual change.
                     if self.status_message != original_status:
                         action_caused_visual_change = True
                     return action_caused_visual_change
 
-                # -- 3. Handle as a printable character if not mapped and plausible ---
-                # This covers:
-                # a) Single char strings that were not control chars mapped in Step 2.
-                # b) Integer key codes (from get_wch) that were not in action_map but are in a printable Unicode range.
+                # --- Attempt 2: If key is a single char string, try its ordinal value ---
+                # This is for control characters (like Ctrl+A -> '\x01') or other single chars
+                # that might be mapped via their integer code.
+                key_code_for_action_map: Optional[int] = None
+                is_potentially_printable_char_string = False # Will be True if it's a single char str not mapped by ord()
 
-                if is_potentially_printable_char_string: # key was str, len 1, not a common control char, and ord(key) not in map
-                    # This 'key' is the original string character
+                if isinstance(key, str) and len(key) == 1:
+                    key_code_for_action_map = ord(key)
+                    if key_code_for_action_map in self.action_map:
+                        logging.debug(
+                            f"handle_input: Ordinal value {key_code_for_action_map} of string key '{key}' found in action_map. "
+                            f"Calling method: {self.action_map[key_code_for_action_map].__name__}"
+                        )
+                        if self.action_map[key_code_for_action_map]():
+                            action_caused_visual_change = True
+                        if self.status_message != original_status:
+                            action_caused_visual_change = True
+                        return action_caused_visual_change
+                    else:
+                        # It's a single char string, its ord() is not in action_map.
+                        # It might be a printable character for text insertion.
+                        # Exclude common control ranges that should ideally be in action_map if handled.
+                        if not (0 <= key_code_for_action_map <= 31 or key_code_for_action_map == 127):
+                            is_potentially_printable_char_string = True
+                            logging.debug(f"handle_input: String key '{key}' (ord: {key_code_for_action_map}) not in action_map, marked as potentially printable.")
+                        # else: it's a control character string not in action_map, will be unhandled later.
+
+                elif isinstance(key, int):
+                    # If 'key' was an int and not found in the first check, it means this specific int code
+                    # is not directly mapped. It might be a printable char code if it's in the Unicode range.
+                    # The first `if key in self.action_map:` would have caught mapped integer keys like curses.KEY_UP.
+                    # So, key_code_for_action_map is simply `key` here for potential printable check.
+                    key_code_for_action_map = key # Retain for logging if it becomes unhandled
+                    pass # Will be checked in "Handle as a printable character" block if it's in range.
+
+                # If we reach here, the key was not found directly, and if it was a single char string,
+                # its ordinal was not found.
+                logging.debug(f"handle_input: Key {repr(key)} (derived code for map: {key_code_for_action_map}) not handled by action_map yet.")
+
+                # --- Attempt 3: Handle as a printable character if not mapped and plausible ---
+                if is_potentially_printable_char_string: # key was str, len 1, not a control char, ord(key) not in map
                     if wcswidth(key) > 0: # Check if it's displayable with a positive width
                         logging.debug(f"handle_input: Treating string '{repr(key)}' as printable character for insertion.")
                         if self.insert_text(key): # insert_text returns True if it modified content
                             action_caused_visual_change = True
                     else:
-                        # String is single char, not a control char in map, but has no display width
                         self._set_status_message(f"Ignored unhandled zero-width/non-displayable string: {repr(key)}")
-                        # action_caused_visual_change will be true if status changes from original
-                
-                elif isinstance(key, int): # And key_code_for_action_map (which is 'key') was not in action_map
+
+                elif isinstance(key, int) and key not in self.action_map: # Integer key not in action_map
                     if 32 <= key < 1114112: # Plausible Unicode codepoint for a printable character
                         try:
                             char_from_code = chr(key)
@@ -2291,34 +2224,41 @@ class SwayEditor:
                                     action_caused_visual_change = True
                             else:
                                 self._set_status_message(f"Ignored non-displayable/zero-width int key: {key} ('{repr(char_from_code)}')")
-                        except ValueError: # chr(key) can raise for invalid Unicode code points
+                        except ValueError:
                             logging.warning(f"handle_input: Invalid ordinal for chr(): {key}. Cannot convert to character.")
                             self._set_status_message(f"Invalid key code: {key}")
-                        # Any of these paths sets action_caused_visual_change if status changes (checked at end)
                     else: # Integer key not printable and not in action_map (e.g., unmapped function key code)
                         KEY_LOGGER.debug("Unhandled integer key code (not printable range, not in action_map): %r", key)
                         self._set_status_message(f"Unhandled key code: {key}")
-                
-                # --- 4. Fallback for any other unhandled input types or unmapped sequences ---
-                # This is reached if 'key' was not ERR, not handled by action_map, and not processed as a printable char.
-                # Example: A multi-character string from get_wch() that isn't a known escape sequence handled by action_map.
-                elif key != curses.ERR: # Ensure it wasn't just "no input"
-                    # The conditions above should have ideally handled all valid single char strings or mapped ints.
-                    # If 'key' is a string here, it's likely a multi-char sequence not understood.
+
+                # --- Attempt 4: Fallback for any other unhandled input ---
+                # This is reached if 'key' was not ERR, not handled by action_map (directly or via ord()),
+                # and not processed as a printable char.
+                # Example: A multi-character string from get_wch() that isn't 'alt-...' or similar.
+                elif key != curses.ERR and not is_potentially_printable_char_string and not (isinstance(key, int) and 32 <= key < 1114112):
+                    # The conditions mean:
+                    # - It's not curses.ERR.
+                    # - It wasn't a single char string marked as printable.
+                    # - It wasn't an integer in the printable range.
+                    # - And it wasn't caught by action_map earlier.
+                    # So, it's likely a multi-char string that `parse_alt_key` didn't resolve,
+                    # or an unmapped control character string/int.
                     KEY_LOGGER.debug("Completely unhandled input by primary logic: %r (type: %s)", key, type(key).__name__)
                     self._set_status_message(f"Unhandled input sequence: {repr(key)}")
+
 
                 # If status message was changed by any of the preceding branches, it implies a redraw is needed.
                 if self.status_message != original_status:
                     action_caused_visual_change = True
-                    
+
                 return action_caused_visual_change
 
             except Exception as e_handler: # Catch-all for unexpected errors within the input handler itself
                 logging.exception("Input handler critical error. This should be investigated.")
                 self._set_status_message(f"Input handler error (see log): {str(e_handler)[:50]}")
                 return True # Assume redraw is needed to display the error status
-                        
+
+
     # --- LSP --------------------------------------------------------------
     def _start_lsp_server_if_needed(self) -> None:
         """
@@ -3001,47 +2941,62 @@ class SwayEditor:
                 f"Falling back to internal clipboard."
             , exc_info=True) # Include stack trace for unexpected errors
             return False
-
+ 
+ 
     def get_selected_text(self):
-        """Возвращает выделенный текст."""
+        """
+        Returns the currently selected text from the editor buffer.
+
+        This method retrieves text between `selection_start` and `selection_end`, inclusive.
+        It handles single-line and multi-line selections and normalizes the order if the 
+        start of the selection is logically after the end.
+
+        Returns:
+            str: The selected text as a string. Returns an empty string if no selection is active.
+        """
+
         if not self.is_selecting or self.selection_start is None or self.selection_end is None:
             return ""
+
         start_row, start_col = self.selection_start
         end_row, end_col = self.selection_end
 
-        # Нормализация: начало должно быть раньше конца
+        # Normalize the selection so that the start always comes before the end
         if start_row > end_row or (start_row == end_row and start_col > end_col):
             start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
 
         selected_lines = []
+
         if start_row == end_row:
-            # Убедимся, что индексы в пределах строки
+            # Ensure indices are within the bounds of the line
             line = self.text[start_row]
             start_col = max(0, min(start_col, len(line)))
             end_col = max(0, min(end_col, len(line)))
             selected_lines.append(line[start_col:end_col])
         else:
-            # Первая строка (от start_col до конца)
+            # First line (from start_col to the end)
             line = self.text[start_row]
             start_col = max(0, min(start_col, len(line)))
             selected_lines.append(line[start_col:])
-            # Средние строки
+
+            # Middle lines (entire lines between the first and last)
             for row in range(start_row + 1, end_row):
-                if 0 <= row < len(self.text): # Проверка на всякий случай
+                if 0 <= row < len(self.text):  # Safety check
                     selected_lines.append(self.text[row])
-            # Последняя строка (от начала до end_col)
-            if 0 <= end_row < len(self.text): # Проверка на всякий случай
+
+            # Last line (from the beginning to end_col)
+            if 0 <= end_row < len(self.text):  # Safety check
                 line = self.text[end_row]
                 end_col = max(0, min(end_col, len(line)))
                 selected_lines.append(line[:end_col])
-            # Если end_row > len(self.text)-1 (что не должно произойти при нормализации)
             elif end_row == len(self.text) and end_col == 0:
-                 # Особый случай, когда выделение до конца последней строки и переходит на новую
-                 pass # Ничего не добавляем, так как end_col=0 на несуществующей строке
+                # Special case: selection ends at column 0 on a new non-existent line
+                pass  # Do not add anything
             else:
-                 logging.warning(f"get_selected_text: end_row {end_row} out of bounds {len(self.text)}")
+                logging.warning(f"get_selected_text: end_row {end_row} out of bounds {len(self.text)}")
 
         return "\n".join(selected_lines)
+
 
     def copy(self) -> bool:
         """
@@ -3054,6 +3009,7 @@ class SwayEditor:
             bool: True if the status message changed as a result of this operation, 
                   False otherwise.
         """
+
         original_status = self.status_message # Store to check for actual change
         
         selected_text = self.get_selected_text() # Retrieves text based on self.selection_start/end
@@ -3175,29 +3131,34 @@ class SwayEditor:
             return self.unindent_current_line() # This method now returns bool
 
 
-    @functools.lru_cache(maxsize=20000) # Настройте maxsize по необходимости
+    @functools.lru_cache(maxsize=20000)  # Adjust maxsize based on memory and performance requirements
     def _get_tokenized_line(self, line_content: str, lexer_id: int, is_text_lexer: bool) -> List[Tuple[str, int]]:
         """
-        Tokenizes a single line of content using the current lexer (identified by id).
-        This method is memoized using lru_cache.
-        `lexer_id` is used to ensure cache invalidation if the lexer object changes.
-        `is_text_lexer` is a boolean flag for a common special case.
+        Tokenizes a single line of text using the current syntax lexer.
+
+        This method is memoized using functools.lru_cache to improve performance on repeated lines.
+        The `lexer_id` parameter ensures that cache entries are invalidated when the lexer instance changes.
+        The `is_text_lexer` flag signals whether a fallback lexer is used that applies no syntax highlighting.
+
+        Args:
+            line_content (str): The text content of the line to be tokenized.
+            lexer_id (int): An identifier (usually id(self._lexer)) to help cache tokenization per lexer.
+            is_text_lexer (bool): Whether a simple no-color lexer is used.
+
+        Returns:
+            List[Tuple[str, int]]: A list of tuples where each tuple is a (substring, color_pair_attribute).
         """
-        # Эта функция должна быть независимой от состояния self._lexer напрямую, 
-        # но мы передаем lexer_id, чтобы lru_cache мог различать вызовы для разных лексеров.
-        # Текущий self._lexer будет использоваться для фактической токенизации.
-        
-        # Если self._lexer не определен, это проблема, но lru_cache вызовется с lexer_id=None (или id(None))
-        # Лучше убедиться, что лексер есть, перед вызовом этой функции из apply_syntax_highlighting_with_pygments.
-        if self._lexer is None: # Защита, хотя вызывающий код должен это обеспечить
+        # This function must not directly rely on self._lexer state in order to work well with lru_cache.
+        # Instead, lexer_id is used as part of the cache key to differentiate between lexers.
+        # The actual lexer instance is still used to perform tokenization.
+
+        if self._lexer is None:
+            # Safety check: the calling code (e.g., apply_syntax_highlighting_with_pygments) should prevent this.
             logging.warning("_get_tokenized_line called with self._lexer being None. Returning default.")
-            return [(line_content, curses.color_pair(0))] # Возвращаем дефолт
+            return [(line_content, curses.color_pair(0))]  # Return the full line with default coloring
 
-        # Проверяем, соответствует ли переданный lexer_id текущему self._lexer.id
-        # Это важно, если self._lexer может измениться между вызовами, которые lru_cache считает одинаковыми.
-        # Однако, если lexer_id передается как id(self._lexer) из вызывающего кода, эта проверка здесь избыточна.
-
-        token_color_map = { # Копируем или получаем доступ к карте цветов
+        # A token-to-color mapping for various token types
+        token_color_map = {
             Token.Keyword: curses.color_pair(2), Token.Keyword.Constant: curses.color_pair(2),
             Token.Keyword.Declaration: curses.color_pair(2), Token.Keyword.Namespace: curses.color_pair(2),
             Token.Keyword.Pseudo: curses.color_pair(2), Token.Keyword.Reserved: curses.color_pair(2),
@@ -3221,20 +3182,20 @@ class SwayEditor:
             Token.Generic.Emph: curses.color_pair(3) | curses.A_BOLD, Token.Generic.Strong: curses.color_pair(2) | curses.A_BOLD,
             Token.Generic.Prompt: curses.color_pair(7), Token.Generic.Output: curses.color_pair(0),
         }
+
         default_color = curses.color_pair(0)
         tokenized_segments = []
 
-        # Используем is_text_lexer флаг (переданный как аргумент) для TextLexer
         if is_text_lexer:
-            # logging.debug(f"Pygments _get_tokenized_line: Using TextLexer direct passthrough for content: '{line_content[:70]}'")
+            # Plain text fallback: apply default color only
             if not line_content:
                 tokenized_segments.append(("", default_color))
             else:
                 tokenized_segments.append((line_content, default_color))
         else:
             try:
-                # logging.debug(f"Pygments _get_tokenized_line: Lexing with '{self._lexer.name}': '{line_content[:70]}'")
-                raw_tokens = list(lex(line_content, self._lexer)) # Используем текущий self._lexer
+                # Tokenize line using Pygments lexer
+                raw_tokens = list(lex(line_content, self._lexer))
 
                 if not raw_tokens and line_content:
                     tokenized_segments.append((line_content, default_color))
@@ -3244,17 +3205,25 @@ class SwayEditor:
                     for token_type, text_value in raw_tokens:
                         color_attr = default_color
                         current_type = token_type
+
+                        # Resolve token type to nearest parent with a defined color
                         while current_type:
                             if current_type in token_color_map:
                                 color_attr = token_color_map[current_type]
                                 break
                             current_type = current_type.parent
+
                         tokenized_segments.append((text_value, color_attr))
+
             except Exception as e:
-                logging.error(f"Pygments _get_tokenized_line: Error tokenizing: '{line_content[:70]}'. Error: {e}", exc_info=True)
+                logging.error(
+                    f"Pygments _get_tokenized_line: Error tokenizing: '{line_content[:70]}'. Error: {e}",
+                    exc_info=True
+                )
                 tokenized_segments = [(line_content, default_color)]
-        
+
         return tokenized_segments
+
 
     # Syntax-highlighting helper --------------------------------------------------
     def apply_syntax_highlighting_with_pygments(
@@ -3283,6 +3252,7 @@ class SwayEditor:
             ``(substring, curses_attribute)`` tuples that can be fed directly
             to the drawing routines.
         """
+
         # Ensure that we have a lexer first.
         if self._lexer is None:
             self.detect_language()
@@ -3315,17 +3285,36 @@ class SwayEditor:
 
         return highlighted
 
+        
     # Colour-initialisation helper -------------------------------------------
     def _detect_color_capabilities() -> tuple[bool, bool, int]:
-        """Return a tuple (have_color, use_extended, max_colors)."""
+        """
+        Detects the terminal's color support capabilities.
+
+        Returns:
+            tuple[bool, bool, int]: A tuple of the form:
+                - have_color (bool): Whether the terminal supports at least 8 colors.
+                - use_extended (bool): Whether extended color modes (256+) are supported.
+                - max_colors (int): The number of colors supported by the terminal.
+
+        Notes:
+            This function queries the terminal's color capabilities using `curses.tigetnum("colors")`
+            and applies thresholds for interpreting the result:
+                - Fewer than 8 colors: considered no usable color support.
+                - 8–15 colors: basic ANSI palette.
+                - 16–255 colors: normal extended mode.
+                - 256 or more: full extended color mode is assumed.
+        """
         max_colors = curses.tigetnum("colors")
+
         if max_colors < 8:
-            return False, False, max_colors
+            return False, False, max_colors             # Not enough colors for meaningful display
         if max_colors < 16:
-            return True, False, max_colors      # базовая 8-цветная палитра
+            return True, False, max_colors              # Basic 8-color palette
         if max_colors < 256:
-            return True, False, max_colors      # 16-цветная (с «яркими»)
-        return True, True, max_colors           # 256 цветов и выше
+            return True, False, max_colors              # 16-color mode (with bright variants)
+        return True, True, max_colors                   # 256-color mode or better
+
 
  
     def init_colors(self) -> None:
@@ -3344,6 +3333,7 @@ class SwayEditor:
         This method aims for broad compatibility, especially for server environments
         where TrueColor support might be absent or unreliable through curses.
         """
+
         # Helper to safely parse hex color strings if provided by user config.
         def parse_hex_color(hex_str: str) -> Optional[int]:
             """Parse hex color string like '#FFAA00' or 'FFAA00' to int."""
@@ -6816,135 +6806,6 @@ class SwayEditor:
             self.undo()
         else:
             logging.debug(f"Unhandled control key: {key_code}")
-
-
-    def parse_key(self, key_str: str) -> int:
-        """
-        Преобразует строку-описание горячей клавиши в curses-код.
-        """
-        if isinstance(key_str, int):
-            return key_str
-
-        key_str = key_str.strip().lower()
-        if not key_str:
-            raise ValueError("Пустая строка для горячей клавиши")
-
-        # Сначала проверяем на точное совпадение в named, включая shift-комбинации
-        # (они должны быть в нижнем регистре в named)
-        named = {
-            "del": getattr(curses, 'KEY_DC', 330),
-            "delete": getattr(curses, 'KEY_DC', 330),
-            "backspace": getattr(curses, 'KEY_BACKSPACE', 127), # Обычно 263 в keypad(True)
-            "tab": ord("\t"), # curses.KEY_TAB (обычно 9)
-            "enter": ord("\n"), # curses.KEY_ENTER (обычно 10 или 13)
-            "space": ord(" "),
-            "esc": 27, # curses.KEY_EXIT или 27
-            "escape": 27,
-            "up": getattr(curses, 'KEY_UP', 259),
-            "down": getattr(curses, 'KEY_DOWN', 258),
-            "left": getattr(curses, 'KEY_LEFT', 260),
-            "right": getattr(curses, 'KEY_RIGHT', 261),
-            "home": getattr(curses, 'KEY_HOME', 262),
-            "end": getattr(curses, 'KEY_END', 360), # Может быть KEY_LL или специфичный для терминала
-            "pageup": getattr(curses, 'KEY_PPAGE', 339),
-            "pgup": getattr(curses, 'KEY_PPAGE', 339),
-            "pagedown": getattr(curses, 'KEY_NPAGE', 338),
-            "pgdn": getattr(curses, 'KEY_NPAGE', 338),
-            "insert": getattr(curses, 'KEY_IC', 331),
-            # Явные Shift-комбинации для спец. клавиш, которые curses может возвращать
-            "sright": getattr(curses, 'KEY_SRIGHT', 402), # Shift+Right
-            "sleft": getattr(curses, 'KEY_SLEFT', 393),   # Shift+Left
-            "shome": getattr(curses, 'KEY_SHOME', 391),   # Shift+Home
-            "send": getattr(curses, 'KEY_SEND', 386),    # Shift+End
-            "spgup": getattr(curses, 'KEY_SPREVIOUS', 337), # Shift+PgUp (KEY_SR в некоторых системах)
-            "spgdn": getattr(curses, 'KEY_SNEXT', 336),     # Shift+PgDn (KEY_SF в некоторых системах)
-            # Добавим ваши:
-            "shift+pgup": getattr(curses, 'KEY_SPREVIOUS', 337),
-            "shift+pgdn": getattr(curses, 'KEY_SNEXT', 336),
-        }
-        named.update({f"f{i}": getattr(curses, f"KEY_F{i}", 256 + i) for i in range(1, 13)}) # KEY_F(i) обычно > 256
-
-        if key_str in named:
-            return named[key_str]
-
-        parts = key_str.split('+')
-        modifiers = []
-        base_key_str = ""
-
-        for part in parts:
-            if part in ("ctrl", "alt", "shift"):
-                modifiers.append(part)
-            else:
-                if base_key_str: # Уже нашли одну "базовую" клавишу
-                    raise ValueError(f"Несколько базовых клавиш в хоткее: {key_str}")
-                base_key_str = part
-        
-        if not base_key_str:
-            raise ValueError(f"Не найдена базовая клавиша в хоткее: {key_str}")
-
-        # Обработка базовой клавиши
-        base_code: int
-        if base_key_str in named: 
-            base_code = named[base_key_str]
-        elif len(base_key_str) == 1:
-            base_code = ord(base_key_str) # "z" -> ord('z')
-        else: # Если базовая клавиша не одиночный символ и не в named (напр. "f1")
-            raise ValueError(f"Неизвестная базовая клавиша: {base_key_str} в {key_str}")
-
-        # Применение модификаторов
-        # curses не имеет универсальных кодов для Alt+<буква> или Shift+<буква> (кроме заглавных).
-        # Ctrl+<буква> обычно это ord(буква) & 0x1F или ord(буква) - ord('a') + 1.
-
-        is_ctrl = "ctrl" in modifiers
-        is_alt = "alt" in modifiers # Alt часто реализуется через Esc-префикс, get_wch() может вернуть строку
-        is_shift = "shift" in modifiers
-
-        if is_alt:
-            logging.warning(f"Парсинг Alt+комбинаций ('{key_str}') может быть не универсальным и зависит от терминала/get_wch.")
-
-        if is_ctrl:
-            if 'a' <= base_key_str <= 'z':
-                char_code = ord(base_key_str)
-                # Ctrl+буква (a-z) -> 1-26
-                # Ctrl+Shift+буква (A-Z) -> кастомный диапазон, например 257-282
-                # (ord(ch) - ord('a') + 1)
-                ctrl_val = char_code - ord('a') + 1
-                if is_shift:
-                    # Пример: Ctrl+Shift+A = 257 (0x101)
-                    # Предполагаем, что такие коды не конфликтуют с curses.KEY_*
-                    # Это уже было в вашей логике:
-                    base_code = ctrl_val | 0x100 # 256 + (1..26)
-                else:
-                    base_code = ctrl_val
-            # elif base_key_str == '[': base_code = 27 # Ctrl+[ -> Esc
-            # ... другие специальные Ctrl комбинации ...
-            else:
-                raise ValueError(f"Ctrl можно применять только к буквам a-z в {key_str} (или нужны явные маппинги)")
-        
-        elif is_shift: # Shift без Ctrl
-            if 'a' <= base_key_str <= 'z':
-                # shift+z -> ord('Z')
-                base_code = ord(base_key_str.upper())
-            # Для Shift + спец.клавиша (например, Shift+Tab) - они должны быть в `named` как "shift+tab"
-            # или ваш get_wch() должен возвращать для них спец. код, который вы положите в `named`
-            # или напрямую в `action_map`.
-            # Эта ветка не должна ловить "shift+pgup", т.к. он уже в named.
-            # Если мы здесь, значит это что-то типа "shift+1" или "shift+]"
-            # Для них curses обычно не генерирует спец. коды, а возвращает сами символы ('!', '}')
-            # Если base_key_str это '1', то ord(base_key_str.upper()) даст ошибку.
-            # Значит, `shift+<не_буква>` должен быть явно определен в `named` или `term_mappings`.
-            # Если мы дошли сюда с `shift+<не_буква>`, и его нет в `named`, это ошибка.
-            elif not ('a' <= base_key_str <= 'z'):
-                 # Если это "shift+f1", то "f1" уже должно было быть обработано `named`.
-                 # Если это "shift+enter", то "enter" в `named`, но shift+enter - другой код.
-                 # Это сложно сделать универсально. Лучше явные маппинги.
-                raise ValueError(f"Shift с не-буквенной клавишей '{base_key_str}' должен быть явно определен в 'named_keys' (например, 'shift+tab')")
-
-        # Обработка Alt в конце, если другие модификаторы уже применены
-        if is_alt:
-             base_code |= 0x200 # Ваш предыдущий подход для кастомных Alt кодов
-
-        return base_code
     
 
     def get_char_width(self, char):
@@ -7944,21 +7805,22 @@ class SwayEditor:
             
         return action_taken_requiring_redraw
 
-    # New refactoring Ruff
-    def exit_editor(self) -> None:  # This method either exits or returns; no bool for redraw needed by caller
-        """Attempts to exit the editor.
+    # New refactoring
+    def exit_editor(self) -> None:
+        """Attempts to gracefully exit the editor.
 
         Workflow:
-            1. Если буфер изменён – запросить сохранение.
-            2. Остановить фоновые сервисы (автосохранение и др.).
-            2-B. Корректно выключить LSP-сервер (shutdown → exit → terminate).
-            3. Восстановить терминал (curses.endwin).
-            4. Завершить процесс (sys.exit).
+            1. If the buffer is modified, prompt the user to save changes.
+            2. Stop background services (e.g., auto-save).
+            2-B. Properly shut down the LSP server (shutdown → exit → terminate).
+            3. Restore the terminal state (curses.endwin).
+            4. Exit the process (sys.exit).
 
         Notes:
-            * Метод идемпотентен: повторный вызов безопасен, если сервер уже
-            завершён или потоки остановлены.
+            * This method is idempotent — it is safe to call multiple times even
+            if the LSP server has already exited or background threads are stopped.
         """
+            
         logging.debug("exit_editor: Attempting to exit editor.")
 
         # 1. Prompt user to save changes if needed.
@@ -8007,7 +7869,7 @@ class SwayEditor:
                         "exit_editor: Auto-save thread still alive after brief join attempt."
                     )
 
-        # ── LSP ── 2-B. Gracefully shut down Ruff-LSP (or другой активный сервер)
+        # 2-B. Gracefully shut down Ruff-LSP (or another active server).
         if getattr(self, "_lsp_proc", None) and self._lsp_proc.poll() is None:
             logging.debug("exit_editor: Sending shutdown/exit to LSP server.")
             try:
@@ -8018,7 +7880,7 @@ class SwayEditor:
                     "exit_editor: Could not send LSP shutdown/exit: %s", exc, exc_info=True
                 )
 
-            # Close stdin so the server receives EOF.
+            # Close stdin to send EOF to the LSP server.
             try:
                 self._lsp_proc.stdin.close()  # type: ignore[union-attr]
             except Exception:
@@ -8031,11 +7893,11 @@ class SwayEditor:
                 logging.warning("exit_editor: LSP process did not exit in time; killing.")
                 self._lsp_proc.kill()
 
-        # Join reader thread to avoid dangling daemons.
+        # Join the LSP reader thread to avoid dangling daemon threads.
         if getattr(self, "_lsp_reader", None) and self._lsp_reader.is_alive():
             self._lsp_reader.join(timeout=0.5)
 
-        # 3. Gracefully terminate curses.
+        # 3. Gracefully terminate curses and clear terminal.
         if threading.current_thread() is threading.main_thread():
             logging.debug(
                 "exit_editor: Running in main thread, attempting to call curses.endwin()."
@@ -8045,12 +7907,14 @@ class SwayEditor:
                 curses.nocbreak()
                 curses.echo()
                 curses.endwin()
+                os.system("clear")  # Clear terminal screen after exit
+                sys.exit(0)
                 logging.info(
                     "exit_editor: curses.endwin() called successfully. Terminal restored."
                 )
             except curses.error as e:
                 logging.error(f"exit_editor: Curses error during curses.endwin(): {e}")
-            except Exception as e:  # Catch any other unexpected error
+            except Exception as e:
                 logging.error(
                     f"exit_editor: Unexpected error during curses.endwin(): {e}",
                     exc_info=True,
@@ -8061,7 +7925,7 @@ class SwayEditor:
                 "This is risky. Skipping direct call."
             )
 
-        # 4. Terminate the program.
+        # 4. Final termination.
         logging.info("exit_editor: Exiting program with sys.exit(0).")
         sys.exit(0)
 
@@ -8538,6 +8402,7 @@ class SwayEditor:
                   changed as a result of the find operation or user interaction 
                   with the prompt, False otherwise (though unlikely for this method).
         """
+
         logging.debug("find_prompt called")
         
         # Store initial state to compare against for determining if a redraw is needed.
@@ -8621,6 +8486,7 @@ class SwayEditor:
         Returns:
             bool: True if the cursor position, scroll, or status message changed, False otherwise.
         """
+
         original_status = self.status_message
         original_cursor_pos = (self.cursor_y, self.cursor_x)
         original_scroll_pos = (self.scroll_top, self.scroll_left)
@@ -9765,24 +9631,18 @@ class SwayEditor:
     # NEW scrolling
     # ==================== HELP ==================================
     def _build_help_lines(self) -> list[str]:
-        """Return a list of formatted help‑screen lines.
-
-        The text is generated dynamically, so customised keybindings that
-        the user defines in ``self.config['keybindings']`` are shown instead
-        of the defaults.
-
-        Returns
-        -------
-        list[str]
-            Each element is a single display line (no ``\n``) ready to be
-            passed to ``curses.addstr``.
-        """
-
+        # This method seems correct as is, based on your provided code.
+        # It uses self.config to get keybindings.
         def _kb(action: str, default: str) -> str:
             """Return a prettified key‑binding string for *action*."""
+            # Ensure self.config is accessed correctly
             raw = self.config.get("keybindings", {}).get(action, default)
-            if isinstance(raw, int):
+            if isinstance(raw, int): # If the binding is a direct int (curses code), use default string
                 raw = default
+            elif isinstance(raw, list): # If it's a list, take the first string representation or default
+                str_bindings = [item for item in raw if isinstance(item, str)]
+                raw = str_bindings[0] if str_bindings else default
+
             parts = str(raw).strip().lower().split('+')
             formatted = []
             for part in parts:
@@ -9793,6 +9653,7 @@ class SwayEditor:
                 elif part.startswith("f") and part[1:].isdigit():
                     formatted.append(part.upper())
                 else:
+                    # Capitalize if fully alphabetic, otherwise use as is
                     formatted.append(part.capitalize() if part.isalpha() else part)
             return '+'.join(formatted)
 
@@ -9804,12 +9665,12 @@ class SwayEditor:
             "goto_line": "Ctrl+G", "find": "Ctrl+F", "find_next": "F3",
             "search_and_replace": "F6", "lint": "F4", "git_menu": "F9",
             "help": "F1", "cancel_operation": "Esc", "tab": "Tab",
-            "shift_tab": "Shift+Tab", "do_comment_block": "Ctrl+/",
-            "do_uncomment_block": "Ctrl+\\"
+            "shift_tab": "Shift+Tab", "do_comment_block": "Ctrl+/", # tty: Ctrl+#
+            "do_uncomment_block": "Ctrl+\\" # Example: Ctrl+\
         }
-
+        # Your existing help lines structure
         return [
-            "  ──  Sway-Pad Help  ──  ", "",
+            "                 ──  Sway-Pad Help  ──  ", "",
             "  File Operations:",
             f"    {_kb('new_file', defaults['new_file']):<22}: New file",
             f"    {_kb('open_file', defaults['open_file']):<22}: Open file",
@@ -9824,198 +9685,246 @@ class SwayEditor:
             f"    {_kb('undo', defaults['undo']):<22}: Undo",
             f"    {_kb('redo', defaults['redo']):<22}: Redo",
             f"    {_kb('delete', defaults['delete']):<22}: Delete char/selection",
-            "    Backspace            : Delete char left / selection",
+            "    Backspace             : Delete char left / selection",
             f"    {_kb('tab', defaults['tab']):<22}: Smart Tab / Indent block",
             f"    {_kb('shift_tab', defaults['shift_tab']):<22}: Smart Unindent / Unindent block",
-            f"    {_kb('do_comment_block', defaults['do_comment_block']):<22}: Comment block/line",
+            f"    {_kb('do_comment_block', defaults['do_comment_block']):<22}: Comment block/line (Ctrl+#)",
             f"    {_kb('do_uncomment_block', defaults['do_uncomment_block']):<22}: Uncomment block/line",
             "", "  Navigation & Search:",
             f"    {_kb('goto_line', defaults['goto_line']):<22}: Go to line",
             f"    {_kb('find', defaults['find']):<22}: Find (prompt)",
             f"    {_kb('find_next', defaults['find_next']):<22}: Find next occurrence",
             f"    {_kb('search_and_replace', defaults['search_and_replace']):<22}: Search & Replace (regex)",
-            "    Arrows, Home, End    : Cursor movement",
-            "    PageUp, PageDown     : Scroll by page",
-            "    Shift+Nav Keys       : Extend selection",
+            "    Arrows, Home, End     : Cursor movement",
+            "    PageUp, PageDown      : Scroll by page",
+            "    Shift+Nav Keys        : Extend selection",
             "", "  Tools & Features:",
-            f"    {_kb('lint', defaults['lint']):<22}: Diagnostics (LSP)",
+            f"    {_kb('lint', defaults['lint']):<22}: Diagnostics (LSP/Linters)", # Updated
             f"    {_kb('git_menu', defaults['git_menu']):<22}: Git menu",
             f"    {_kb('help', defaults['help']):<22}: This help screen",
-            f"    {_kb('cancel_operation', defaults['cancel_operation']):<22}: Cancel / Close Panel / Exit",
-            "    Insert Key           : Toggle Insert/Replace mode",
-            "", "  ──────────────────────────",
-            "", "    Press any key to close ",
-            "", "   Licensed under the GPL v3 ",
-            "", "   © 2025 Siergej Sobolewski",
+            f"    {_kb('cancel_operation', defaults['cancel_operation']):<22}: Cancel / Close Panel", # Simplified
+            "    Insert Key            : Toggle Insert/Replace mode",
+            "", "   ────────────────────────────────────────────────────",
+            "", "              Press any key to close help", # Changed
+            "", "               Licensed under the GPL v3 ",
+            "", "               © 2025 Siergej Sobolewski",
         ]
 
 
     def show_help(self) -> bool:
         """Displays a centered, scrollable help window.
-        Uses textual indicators for scrolling on a dark grey background.
+        Uses textual indicators for scrolling and adapts colors based on terminal capabilities.
         """
+
         lines = self._build_help_lines()
-        
-        # ОТЛАДКА: проверим, что у нас есть строки
-        if not lines:
-            lines = ["Нет данных для отображения", "Проверьте метод _build_help_lines()"]
-        
+
+        if not lines: # Should not happen if _build_help_lines is robust
+            self._set_status_message("Error: Help content is empty.")
+            return True
+
         term_h, term_w = self.stdscr.getmaxyx()
 
-        # Упрощенные размеры
-        view_h = min(len(lines) + 4, term_h - 4)  # +4 для рамки и отступов
-        view_w = min(max(len(line) for line in lines) + 10, term_w - 4)  # +10 для отступов и указателей
-        view_y = (term_h - view_h) // 2
-        view_x = (term_w - view_w) // 2
+        # Calculate window dimensions for the help panel
+        # Ensure some padding and that it doesn't exceed terminal dimensions
+        text_max_width = 0
+        if lines: # Avoid error if lines is empty, though we check above
+            text_max_width = max(len(line) for line in lines)
 
-        # Убеждаемся в минимальных размерах
-        if view_h < 8: 
-            view_h = min(8, term_h - 2)
-        if view_w < 20: 
-            view_w = min(20, term_w - 2)
+        # Add padding for borders and internal margins
+        view_w = min(text_max_width + 6, term_w - 4) # +2 for side borders, +4 for side margins
+        view_h = min(len(lines) + 4, term_h - 4)     # +2 for top/bottom borders, +2 for top/bottom margins
 
-        prev_cursor = None
-        
-        # Цвета
-        help_text_attr = curses.A_NORMAL
-        help_bg_attr = curses.A_NORMAL
-        frame_border_attr = curses.A_BOLD
-        scroll_indicator_attr = curses.A_BOLD | curses.A_REVERSE
+        # Ensure minimum dimensions
+        view_w = max(20, view_w) # Minimum width for readability
+        view_h = max(8, view_h)  # Minimum height
 
+        # Center the help window
+        view_y = max(0, (term_h - view_h) // 2)
+        view_x = max(0, (term_w - view_w) // 2)
+
+        # Re-check if dimensions are too small even after adjustments
+        if view_h <= 4 or view_w <= 4: # Need space for border and content
+            self._set_status_message("Terminal too small for help.")
+            return True
+
+        original_cursor_visibility = curses.curs_set(0) # Hide cursor for help screen
+
+        # --- Color Attributes ---
+        # Defaults for monochrome or very limited color terminals
+        default_text_attr = curses.A_NORMAL
+        default_bg_attr = curses.A_NORMAL # Will be background of the help window
+        default_border_attr = curses.A_BOLD
+        default_scroll_attr = curses.A_BOLD | curses.A_REVERSE
+
+        # Attempt to use nicer colors if available
         try:
             if curses.has_colors():
-                HELP_CONTENT_PAIR_ID = 98
-                curses.init_pair(HELP_CONTENT_PAIR_ID, 231, 236)
-                help_bg_attr = curses.color_pair(HELP_CONTENT_PAIR_ID)
-                help_text_attr = curses.color_pair(HELP_CONTENT_PAIR_ID)
+                # Use editor's pre-defined colors if they fit the semantic need,
+                # or define new pairs if necessary and COLOR_PAIRS allows.
+                # For simplicity, let's define specific pairs for help if > 8 colors.
+                # Ensure these pair IDs don't clash with those in self.init_colors()
+                # It's safer to use a range of pair IDs known to be free.
+                # Example: use pairs starting from 30 upwards if 0-20 are used by init_colors.
 
-                FRAME_BORDER_PAIR_ID = 97
-                curses.init_pair(FRAME_BORDER_PAIR_ID, 250, 236)
-                frame_border_attr = curses.color_pair(FRAME_BORDER_PAIR_ID) | curses.A_BOLD
+                HELP_PAIR_ID_START = 30 # Arbitrary start for help-specific color pairs
 
-                SCROLL_INDICATOR_PAIR_ID = 99
-                curses.init_pair(SCROLL_INDICATOR_PAIR_ID, 226, 236)
-                scroll_indicator_attr = curses.color_pair(SCROLL_INDICATOR_PAIR_ID) | curses.A_BOLD
-                
-        except curses.error:
-            pass
+                if curses.COLORS >= 256 and curses.COLOR_PAIRS > HELP_PAIR_ID_START + 2:
+                    # 256+ color mode: e.g., light text on a dark grey background
+                    curses.init_pair(HELP_PAIR_ID_START, 231, 236) # fg: almost white, bg: dark grey
+                    default_bg_attr = curses.color_pair(HELP_PAIR_ID_START)
+                    default_text_attr = curses.color_pair(HELP_PAIR_ID_START)
+
+                    curses.init_pair(HELP_PAIR_ID_START + 1, 250, 236) # fg: lighter grey for border
+                    default_border_attr = curses.color_pair(HELP_PAIR_ID_START + 1) | curses.A_BOLD
+
+                    curses.init_pair(HELP_PAIR_ID_START + 2, 226, 236) # fg: yellow for scroll indicators
+                    default_scroll_attr = curses.color_pair(HELP_PAIR_ID_START + 2) | curses.A_BOLD
+                elif curses.COLORS >= 8 and curses.COLOR_PAIRS > HELP_PAIR_ID_START + 2:
+                    # 8/16 color mode: e.g., white text on blue background
+                    curses.init_pair(HELP_PAIR_ID_START, curses.COLOR_WHITE, curses.COLOR_BLUE)
+                    default_bg_attr = curses.color_pair(HELP_PAIR_ID_START)
+                    default_text_attr = curses.color_pair(HELP_PAIR_ID_START)
+
+                    curses.init_pair(HELP_PAIR_ID_START + 1, curses.COLOR_CYAN, curses.COLOR_BLUE)
+                    default_border_attr = curses.color_pair(HELP_PAIR_ID_START + 1) | curses.A_BOLD
+                    
+                    # For scroll indicator, use existing reverse or a specific pair
+                    curses.init_pair(HELP_PAIR_ID_START + 2, curses.COLOR_BLACK, curses.COLOR_WHITE) # Black on White
+                    default_scroll_attr = curses.color_pair(HELP_PAIR_ID_START + 2)
+                # If fewer than 8 colors or not enough pairs, the A_NORMAL defaults will be used.
+        except curses.error as e_color:
+            logging.warning(f"SwayEditor.show_help: Curses error initializing help colors: {e_color}. Using defaults.")
+        except Exception as e_gen_color:
+            logging.error(f"SwayEditor.show_help: General error initializing help colors: {e_gen_color}", exc_info=True)
+
 
         try:
-            # Создаем окно
             win = curses.newwin(view_h, view_w, view_y, view_x)
             win.keypad(True)
-            win.bkgd(" ", help_bg_attr)
+            win.bkgd(" ", default_bg_attr) # Apply the background to the new window
 
-            # Параметры прокрутки
-            content_height = view_h - 2  # Высота для текста (минус рамка)
-            max_lines_visible = content_height
-            total_lines = len(lines)
-            max_scroll = max(0, total_lines - max_lines_visible)
-            
-            top = 0
-            
-            # Указатели
-            SCROLL_UP_INDICATOR = "↑"
-            SCROLL_DN_INDICATOR = "↓"
+            content_display_height = view_h - 2 # Available height for text lines (excluding borders)
+            max_lines_on_screen = content_display_height
+            total_content_lines = len(lines)
+            max_scroll_offset = max(0, total_content_lines - max_lines_on_screen)
+            current_scroll_top = 0
 
-            prev_cursor_val = curses.curs_set(0)
-            if prev_cursor_val is not None and prev_cursor_val != curses.ERR:
-                prev_cursor = prev_cursor_val
+            SCROLL_UP_INDICATOR = "↑ (PgUp/k)" # More informative
+            SCROLL_DN_INDICATOR = "↓ (PgDn/j)"
 
             while True:
-                # Очищаем окно
-                win.erase()
-                
-                # Рисуем рамку
-                win.attron(frame_border_attr)
-                win.border()
-                win.attroff(frame_border_attr)
+                win.erase() # Clear window content for this frame
 
-                # Отображаем текст ВНУТРИ рамки
-                for i in range(max_lines_visible):
-                    line_index = top + i
-                    if line_index < total_lines:
-                        display_line = lines[line_index]
-                        # Обрезаем строку если она слишком длинная
-                        max_text_width = view_w - 4  # -4 для рамки и отступов
-                        if len(display_line) > max_text_width:
-                            display_line = display_line[:max_text_width-3] + "..."
+                # Draw border
+                win.attron(default_border_attr)
+                win.border()
+                win.attroff(default_border_attr)
+
+                # Display visible portion of help lines
+                for i in range(max_lines_on_screen):
+                    line_idx_in_buffer = current_scroll_top + i
+                    if line_idx_in_buffer < total_content_lines:
+                        line_to_display = lines[line_idx_in_buffer]
+                        # Truncate line if it's wider than the content area of the help window
+                        # Content area width: view_w - 2 (for borders) - 2 (for L/R margins)
+                        drawable_text_width = view_w - 4
+                        if len(line_to_display) > drawable_text_width:
+                            # A simple truncation; consider wcwidth for Unicode if needed here
+                            line_to_display = line_to_display[:drawable_text_width - 3] + "..."
                         
                         try:
-                            win.addstr(1 + i, 2, display_line, help_text_attr)
-                        except curses.error:
+                            # Draw text with left/right margin of 1 char inside the border
+                            win.addstr(i + 1, 2, line_to_display, default_text_attr)
+                        except curses.error: # Curses can fail if trying to write outside window
                             pass
 
-                # Добавляем указатели прокрутки
-                if top > 0:
+                # Draw scroll indicators if scrolling is possible
+                if current_scroll_top > 0:
                     try:
-                        win.addstr(1, view_w - 3, SCROLL_UP_INDICATOR, scroll_indicator_attr)
+                        # Position at top-right corner, inside border
+                        win.addstr(1, view_w - (len(SCROLL_UP_INDICATOR) + 2), SCROLL_UP_INDICATOR, default_scroll_attr)
                     except curses.error:
                         pass
-                        
-                if top < max_scroll:
-                    try:
-                        win.addstr(view_h - 2, view_w - 3, SCROLL_DN_INDICATOR, scroll_indicator_attr)
-                    except curses.error:
-                        pass
-
-                # Информация о позиции (если есть прокрутка)
-                if max_scroll > 0:
-                    scroll_info = f"{top + 1}/{max_scroll + 1}"
-                    try:
-                        win.addstr(view_h - 1, 2, scroll_info, scroll_indicator_attr)
-                    except curses.error:
-                        pass
-
-                # Обновляем экран
-                win.refresh()
-
-                # Обработка клавиш
-                key = win.getch()
                 
-                # Клавиши прокрутки - НЕ закрывают окно
-                if key in (curses.KEY_UP, ord("k"), ord("K")):
-                    if top > 0:
-                        top -= 1
-                elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
-                    if top < max_scroll:
-                        top += 1
-                elif key == curses.KEY_PPAGE:  # Page Up
-                    top = max(0, top - max_lines_visible)
-                elif key == curses.KEY_NPAGE:  # Page Down
-                    top = min(max_scroll, top + max_lines_visible)
-                elif key in (curses.KEY_HOME, ord("g")):
-                    top = 0
-                elif key in (curses.KEY_END, ord("G")):
-                    top = max_scroll
+                if current_scroll_top < max_scroll_offset:
+                    try:
+                        # Position at bottom-right corner, inside border
+                        win.addstr(view_h - 2, view_w - (len(SCROLL_DN_INDICATOR) + 2), SCROLL_DN_INDICATOR, default_scroll_attr)
+                    except curses.error:
+                        pass
+                
+                # Optional: Display scroll position (e.g., "Line X/Y")
+                if max_scroll_offset > 0:
+                    # Display at bottom-left corner, inside border
+                    scroll_pos_info = f"{(current_scroll_top + 1)}-{min(current_scroll_top + max_lines_on_screen, total_content_lines)}/{total_content_lines}"
+                    try:
+                        win.addstr(view_h - 2, 2, scroll_pos_info, default_scroll_attr)
+                    except curses.error:
+                        pass
+
+                win.refresh()
+                key_press = win.getch()
+
+                if key_press in (curses.KEY_UP, ord('k'), ord('K')):
+                    current_scroll_top = max(0, current_scroll_top - 1)
+                elif key_press in (curses.KEY_DOWN, ord('j'), ord('J')):
+                    current_scroll_top = min(max_scroll_offset, current_scroll_top + 1)
+                elif key_press == curses.KEY_PPAGE:
+                    current_scroll_top = max(0, current_scroll_top - max_lines_on_screen)
+                elif key_press == curses.KEY_NPAGE:
+                    current_scroll_top = min(max_scroll_offset, current_scroll_top + max_lines_on_screen)
+                elif key_press in (curses.KEY_HOME, ord('g')): # 'g' like in less/vim
+                    current_scroll_top = 0
+                elif key_press in (curses.KEY_END, ord('G')): # 'G' like in less/vim
+                    current_scroll_top = max_scroll_offset
+                elif key_press == curses.KEY_RESIZE:
+                    # Re-calculate dimensions and redraw on resize
+                    term_h, term_w = self.stdscr.getmaxyx()
+                    view_w = min(text_max_width + 6, term_w - 4)
+                    view_w = max(20, view_w)
+                    view_h = min(len(lines) + 4, term_h - 4) 
+                    view_h = max(8, view_h)
+                    view_y = max(0, (term_h - view_h) // 2)
+                    view_x = max(0, (term_w - view_w) // 2)
+                    try:
+                        win.resize(view_h, view_w)
+                        win.mvwin(view_y, view_x)
+                    except curses.error:
+                        pass
+                    content_display_height = view_h - 2
+                    max_lines_on_screen = content_display_height
+                    max_scroll_offset = max(0, total_content_lines - max_lines_on_screen)
+                    current_scroll_top = min(current_scroll_top, max_scroll_offset)
                 else:
-                    # ВСЕ остальные клавиши закрывают окно
+                    # Any other key closes the help window
                     break
         
-        except curses.error as e:
-            logging.error(f"Curses error in help window: {e}", exc_info=True)
-            self._set_status_message(f"Help error: {e}")
-        except Exception as e:
-            logging.error(f"General error in help window: {e}", exc_info=True)
-            self._set_status_message(f"Help error: {e}")
+        except curses.error as e_curses_help:
+            logging.error(f"SwayEditor.show_help: Curses error in help window main loop: {e_curses_help}", exc_info=True)
+            self._set_status_message(f"Help display error: {e_curses_help}")
+        except Exception as e_general_help:
+            logging.error(f"SwayEditor.show_help: General error in help window: {e_general_help}", exc_info=True)
+            self._set_status_message(f"Help display error: {e_general_help}")
         finally:
-            if prev_cursor is not None:
-                try: 
-                    curses.curs_set(prev_cursor)
-                except curses.error: 
+            if original_cursor_visibility is not None and original_cursor_visibility != curses.ERR:
+                try:
+                    curses.curs_set(original_cursor_visibility)
+                except curses.error:
                     pass
-
-            # Принудительно очищаем и обновляем весь экран
+            
+            # Explicitly clear the main screen and refresh to remove help window artifacts
+            # and ensure the editor UI is fully redrawn.
             try:
-                self.stdscr.clear()
-                self.stdscr.refresh()
+                self.stdscr.clear() 
+                self.stdscr.refresh() # This might be too aggressive if main loop handles redraw well
             except curses.error:
                 pass
 
             self._set_status_message("Help closed")
-            self._force_full_redraw = True
-            return True
-                
+            self._force_full_redraw = True # Signal main loop to redraw everything
+            return True # Indicates status changed or a major UI interaction happened.
+
+
     # ==================== QUEUE PROCESSING =======================
     def _process_all_queues(self) -> bool:
         """
