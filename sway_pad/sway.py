@@ -30,7 +30,9 @@ import curses.ascii
 import signal
 import json
 import importlib.util
+import asyncio
 #import uuid 
+
 
 from pygments.lexers import get_lexer_for_filename, guess_lexer, TextLexer
 from pygments import lex
@@ -214,7 +216,7 @@ def safe_run(
     except OSError as e:
         logging.error(f"safe_run: OS error while running {cmd}: {e}", exc_info=True)
         return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr=str(e))
-    except Exception as e:
+    except Exception as _:
         logging.exception(f"safe_run: Unexpected error while executing: {' '.join(cmd)}")
         return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="Unexpected error occurred.")
 
@@ -1040,6 +1042,7 @@ class KeyBinder:
             "select_all": ["ctrl+a", 1],
             "quit": ["ctrl+q", 17],
             "goto_line": ["ctrl+g", 7],
+            "request_ai_explanation": ["f7", 271], 
             "git_menu": ["f9", 273],
             "help": ["f1", 265],
             "find": ["ctrl+f", 6],
@@ -1323,7 +1326,8 @@ class KeyBinder:
             "handle_right": self.editor.handle_right,
             "handle_backspace": self.editor.handle_backspace,
             "handle_enter": self.editor.handle_enter,
-
+            "request_ai_explanation": self.editor.request_ai_explanation,
+            
             "debug_show_lexer": lambda: self.editor._set_status_message(
                 f"Current Lexer: {self.editor._lexer.name if self.editor._lexer else 'None'}"
             )
@@ -4851,6 +4855,121 @@ class DrawScreen:
             pass
 
 
+# sway.py
+
+# ... (все ваши импорты, включая 'import threading', 'import asyncio', 'import queue')
+
+# ==================== AsyncEngine Class ====================
+
+class AsyncEngine:
+    """
+    Runs an asyncio event loop in a separate thread to manage long-running
+    and I/O-bound tasks like LSP clients and AI chat clients, without
+    blocking the main curses UI thread.
+    """
+    def __init__(self, to_ui_queue: queue.Queue):
+        """
+        Args:
+            to_ui_queue: A thread-safe queue to send results back to the main UI thread.
+        """
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.thread: Optional[threading.Thread] = None
+        self.from_ui_queue: queue.Queue = queue.Queue()
+        self.to_ui_queue: queue.Queue = to_ui_queue
+        self._tasks = set()
+
+    def _start_loop_in_thread(self):
+        """Internal method to set up and run the event loop."""
+        try:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self.main_loop())
+        finally:
+            if self.loop and self.loop.is_running():
+                self.loop.stop()
+            self.loop.close()
+            logging.info("AsyncEngine event loop has shut down.")
+
+    def start(self):
+        """Starts the asyncio event loop in a background thread."""
+        if self.thread is not None:
+            logging.warning("AsyncEngine already started.")
+            return
+        logging.info("Starting AsyncEngine background thread...")
+        self.thread = threading.Thread(target=self._start_loop_in_thread, daemon=True, name="AsyncEngineThread")
+        self.thread.start()
+
+    async def main_loop(self):
+        """The main async loop that listens for tasks from the UI."""
+        logging.info("AsyncEngine main_loop running.")
+        # Здесь в будущем можно будет инициализировать долгоживущие клиенты
+        # self.ai_client = AiChatClient(...)
+        # self.lsp_client = LspClient(...)
+        # await self.lsp_client.start()
+
+        while True:
+            try:
+                task_data = await self.loop.run_in_executor(None, self.from_ui_queue.get)
+                if task_data is None:
+                    logging.info("AsyncEngine received stop signal (None).")
+                    break
+                task = asyncio.create_task(self.dispatch_task(task_data))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+            except Exception as e:
+                logging.error(f"Error in AsyncEngine main_loop: {e}", exc_info=True)
+                await asyncio.sleep(1)
+        await self._cancel_all_tasks()
+
+    async def dispatch_task(self, task_data: Dict[str, Any]):
+        """Dispatches a task to the correct async handler based on its type."""
+        task_type = task_data.get("type")
+        logging.debug(f"AsyncEngine dispatching task of type: {task_type}")
+        try:
+            if task_type == "ai_chat":
+                # Временно импортируем и создаем клиента здесь.
+                # В будущем он должен быть атрибутом класса.
+                # from ai_chat_client import AiChatClient
+                # ai_client = self.ai_client
+                # ЗАГЛУШКА: имитируем долгий AI-запрос
+                await asyncio.sleep(3) # Имитация работы
+                reply_text = f"AI reply for: '{task_data.get('prompt', '')[:30]}...'"
+                self.to_ui_queue.put({"type": "ai_reply", "text": reply_text})
+            else:
+                logging.warning(f"AsyncEngine received unknown task type: {task_type}")
+        except Exception as e:
+            logging.error(f"Error executing async task '{task_type}': {e}", exc_info=True)
+            self.to_ui_queue.put({"type": "task_error", "task_type": task_type, "error": str(e)})
+
+    def submit_task(self, task_data: Dict[str, Any]):
+        """Thread-safe method for the UI thread to submit a task."""
+        self.from_ui_queue.put(task_data)
+
+    def stop(self):
+        """Gracefully stops the AsyncEngine."""
+        if not self.thread or not self.loop or not self.thread.is_alive():
+            return
+        logging.info("Stopping AsyncEngine...")
+        try:
+            self.from_ui_queue.put(None)
+            self.thread.join(timeout=5)
+            if self.thread.is_alive():
+                logging.error("AsyncEngine thread did not stop gracefully.")
+        except Exception as e:
+            logging.error(f"Exception while stopping AsyncEngine: {e}", exc_info=True)
+
+    async def _cancel_all_tasks(self):
+        """Cancels all running asyncio tasks."""
+        if not self._tasks:
+            return
+        logging.info(f"Cancelling {len(self._tasks)} outstanding async tasks...")
+        for task in list(self._tasks):
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        logging.info("All async tasks cancelled.")
+
+
+
 ## ==================== SwayEditor Class ====================
 class SwayEditor:
     """
@@ -5120,6 +5239,13 @@ class SwayEditor:
         self._msg_q: "queue.Queue[str]" = queue.Queue() # очередь _msg_q является общей для всего редактора
         self._git_q: "queue.Queue[tuple[str,str,str]]" = queue.Queue()
         self._git_cmd_q: "queue.Queue[str]" = queue.Queue()
+
+        # ─────────────────────  ASYNC ENGINE  ────────────────────
+        self._async_results_q: "queue.Queue[dict]" = queue.Queue()
+        
+        # Async Engine Component Initialization 
+        self.async_engine = AsyncEngine(to_ui_queue=self._async_results_q)
+        self.async_engine.start()
 
         # ───────────────────── Language / Highlighting state ──────────────────
         self.current_language: Optional[str] = None
@@ -9769,6 +9895,9 @@ class SwayEditor:
             self._auto_save_stop_event.set()
             if hasattr(self, "_auto_save_thread") and self._auto_save_thread and self._auto_save_thread.is_alive():
                 self._auto_save_thread.join(timeout=0.1)
+        # to stop Async Engine:
+        if hasattr(self, 'async_engine'):
+            self.async_engine.stop()
 
         # 3. Gracefully shut down all linters via the LinterBridge.
         # THIS IS THE FIX. All LSP-related logic is replaced by this single call.
@@ -11288,6 +11417,26 @@ class SwayEditor:
             self._force_full_redraw = True  # Signal main loop to redraw everything
             return True  # Indicates status changed or a major UI interaction happened.
 
+    # AI
+    def request_ai_explanation(self) -> bool:
+        """Sends selected text to the AI for an explanation."""
+        selected_text = self.get_selected_text()
+        if not selected_text:
+            self._set_status_message("No text selected to explain.")
+            return True # Статус изменился
+
+        prompt_text = f"Please explain the following code snippet:\n\n```\n{selected_text}\n```"
+        
+        # Отправляем задачу в асинхронный движок
+        self.async_engine.submit_task({
+            "type": "ai_chat",
+            "prompt": prompt_text
+        })
+        
+        self._set_status_message("Sent request to AI assistant...")
+        logging.info("Submitted AI explanation task.")
+        return True # Статус изменился
+
     # ==================== QUEUE PROCESSING =======================
     def _process_all_queues(self) -> bool:
         """
@@ -11337,7 +11486,28 @@ class SwayEditor:
         if self.linter_bridge.process_lsp_queue():
             any_state_changed_by_queues = True
 
-        # --- 5. Lint panel auto-hide logic ---
+        # --- 5. For ASYNC ENGINE QUEUE ---
+        try:
+            while True:
+                async_result = self._async_results_q.get_nowait()
+                logging.debug(f"Processed async result: {async_result}")
+                
+                # Обрабатываем результат
+                if async_result.get("type") == "ai_reply":
+                    # Например, показываем ответ в панели или статус-баре
+                    reply_text = async_result.get("text", "AI response was empty.")
+                    # Давайте для простоты покажем его в статус-баре
+                    self._set_status_message(f"AI: {reply_text[:100]}")
+                elif async_result.get("type") == "task_error":
+                    error_msg = async_result.get("error", "Unknown async error.")
+                    self._set_status_message(f"Async Error: {error_msg[:100]}")
+                
+                any_state_changed_by_queues = True
+
+        except queue.Empty:
+            pass
+
+        # --- 6. Lint panel auto-hide logic ---
         if self.lint_panel_active and self.lint_panel_message:
             if hasattr(self, "drawer") and hasattr(self.drawer, "_keep_lint_panel_alive"):
                 self.drawer._keep_lint_panel_alive()
