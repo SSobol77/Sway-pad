@@ -167,6 +167,183 @@ folder_open = "📂"
 nix = "❄️"
 default = "❓" 
 
+
+# This section defines the comment syntax for various programming languages.
+# The editor uses this information to toggle comments on and off.
+# You can add new languages or modify existing ones here.
+#
+# - `line_prefix` is used for single-line comments (e.g., //, #).
+# - `block_delims` is an array of two strings for block comments (e.g., ["/*", "*/"]).
+# - `docstring_delim` is for language-specific documentation strings (e.g., """).
+
+[comments]
+
+# --- Scripting Languages ---
+[comments.python]
+line_prefix = "# "
+docstring_delim = '"""'
+
+[comments.ruby]
+line_prefix = "# "
+block_delims = ["=begin", "=end"]
+
+[comments.perl]
+line_prefix = "# "
+block_delims = ["=pod", "=cut"]
+
+[comments.lua]
+line_prefix = "-- "
+block_delims = ["--[[", "]]"]
+
+# --- Web Development ---
+[comments.javascript]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.typescript]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.php]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.html]
+block_delims = ["<!--", "-->"]
+
+[comments.xml]
+block_delims = ["<!--", "-->"]
+
+[comments.css]
+block_delims = ["/*", "*/"]
+
+[comments.scss]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+# --- C-Family and Compiled Languages ---
+[comments.c]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.cpp]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.csharp]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.java]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.go]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.rust]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.swift]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.kotlin]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.scala]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+[comments.dart]
+line_prefix = "// "
+block_delims = ["/*", "*/"]
+
+# --- Functional Languages ---
+[comments.haskell]
+line_prefix = "-- "
+block_delims = ["{-", "-}"]
+
+[comments.elixir]
+line_prefix = "# "
+docstring_delim = '"""'
+
+[comments.erlang]
+line_prefix = "% "
+
+[comments.clojure]
+line_prefix = ";; "
+
+[comments.fsharp]
+line_prefix = "// "
+block_delims = ["(*", "*)"]
+
+[comments.ocaml]
+block_delims = ["(*", "*)"]
+
+
+# --- Shell and System ---
+[comments.shell] # Covers sh, bash, zsh, etc.
+line_prefix = "# "
+
+[comments.powershell]
+line_prefix = "# "
+block_delims = ["<#", "#>"]
+
+[comments.dockerfile]
+line_prefix = "# "
+
+[comments.makefile]
+line_prefix = "# "
+
+[comments.vim]
+line_prefix = "\" "
+
+[comments.assembly]
+line_prefix = "; "
+
+# --- Data, Config, and Markup ---
+[comments.sql]
+line_prefix = "-- "
+block_delims = ["/*", "*/"]
+
+[comments.yaml]
+line_prefix = "# "
+
+[comments.toml]
+line_prefix = "# "
+
+[comments.ini]
+line_prefix = "; "
+
+[comments.latex]
+line_prefix = "% "
+
+# --- Scientific and Other ---
+[comments.r]
+line_prefix = "# "
+
+[comments.matlab]
+line_prefix = "% "
+block_delims = ["%{", "%}"]
+
+[comments.nim]
+line_prefix = "# "
+block_delims = ["#[", "]#"]
+
+[comments.crystal]
+line_prefix = "# "
+
+[comments.zig]
+line_prefix = "// "
+
+[comments.bat]
+line_prefix = "REM "
+
+
 [syntax_highlighting]
 
 [syntax_highlighting.python]
