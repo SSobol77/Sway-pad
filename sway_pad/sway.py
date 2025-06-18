@@ -33,7 +33,8 @@ import importlib.util
 import asyncio
 #import uuid 
 
-
+from ai_client import get_ai_client, BaseAiClient
+from ui_panels import CursesPanel
 from pygments.lexers import get_lexer_for_filename, guess_lexer, TextLexer
 from pygments import lex
 #from pygments.lexers.special import TextLexer
@@ -740,6 +741,19 @@ def load_config() -> dict:
             "zig": {"line_prefix": "// "},
             "bat": {"line_prefix": "REM "},
         },
+        "ai": {
+        "default_provider": "openai",
+        "keys": {
+            "openai": "",
+            "gemini": "",
+            "mistral": ""
+        },
+        "models": {
+            "openai": "gpt-4o-mini",
+            "gemini": "gemini-1.5-flash-latest",
+            "mistral": "mistral-large-latest"
+        }
+        },
         "git": {
             "enabled": True
         },
@@ -1326,7 +1340,7 @@ class KeyBinder:
             "handle_right": self.editor.handle_right,
             "handle_backspace": self.editor.handle_backspace,
             "handle_enter": self.editor.handle_enter,
-            "request_ai_explanation": self.editor.request_ai_explanation,
+            "request_ai_explanation": self.editor.select_ai_provider_and_ask,
             
             "debug_show_lexer": lambda: self.editor._set_status_message(
                 f"Current Lexer: {self.editor._lexer.name if self.editor._lexer else 'None'}"
@@ -4855,10 +4869,6 @@ class DrawScreen:
             pass
 
 
-# sway.py
-
-# ... (все ваши импорты, включая 'import threading', 'import asyncio', 'import queue')
-
 # ==================== AsyncEngine Class ====================
 
 class AsyncEngine:
@@ -4877,6 +4887,7 @@ class AsyncEngine:
         self.from_ui_queue: queue.Queue = queue.Queue()
         self.to_ui_queue: queue.Queue = to_ui_queue
         self._tasks = set()
+ 
 
     def _start_loop_in_thread(self):
         """Internal method to set up and run the event loop."""
@@ -4900,46 +4911,92 @@ class AsyncEngine:
         self.thread.start()
 
     async def main_loop(self):
-        """The main async loop that listens for tasks from the UI."""
-        logging.info("AsyncEngine main_loop running.")
-        # Здесь в будущем можно будет инициализировать долгоживущие клиенты
-        # self.ai_client = AiChatClient(...)
-        # self.lsp_client = LspClient(...)
-        # await self.lsp_client.start()
+        """
+        The main async loop that listens for tasks from the UI thread.
+        It runs until a stop signal (None) is received.
+        """
+        logging.info("AsyncEngine main_loop running and waiting for tasks.")
+
+        # Долгоживущие клиенты (например, LSP) можно инициализировать здесь.
+        # AI-клиенты создаются на лету, так как они в основном без состояния (кроме сессии).
 
         while True:
             try:
+                # Асинхронно и безопасно ждем задачу из потокобезопасной очереди.
+                # `run_in_executor` выполняет блокирующий `self.from_ui_queue.get()`
+                # в отдельном потоке из пула, не блокируя event loop.
                 task_data = await self.loop.run_in_executor(None, self.from_ui_queue.get)
+
+                # Сигнал для остановки цикла
                 if task_data is None:
-                    logging.info("AsyncEngine received stop signal (None).")
+                    logging.info("AsyncEngine received stop signal (None). Breaking main_loop.")
                     break
+
+                # Запускаем обработку задачи как фоновую задачу asyncio, не ожидая ее завершения.
+                # Это позволяет движку немедленно вернуться к ожиданию следующей задачи.
                 task = asyncio.create_task(self.dispatch_task(task_data))
+                
+                # Добавляем задачу в сет для отслеживания.
+                # Это полезно для корректной отмены при завершении работы.
                 self._tasks.add(task)
+                # По завершении задачи (успешном или с ошибкой) она автоматически удалится из сета.
                 task.add_done_callback(self._tasks.discard)
+
             except Exception as e:
-                logging.error(f"Error in AsyncEngine main_loop: {e}", exc_info=True)
+                logging.error(f"Critical error in AsyncEngine main_loop: {e}", exc_info=True)
+                # Пауза перед следующей попыткой, чтобы не спамить лог в случае постоянной ошибки.
                 await asyncio.sleep(1)
+        
+        # Перед выходом из `main_loop` отменяем все оставшиеся задачи.
         await self._cancel_all_tasks()
 
+
     async def dispatch_task(self, task_data: Dict[str, Any]):
-        """Dispatches a task to the correct async handler based on its type."""
+        """
+        Dispatches a task to the correct async handler based on its type.
+        This method is designed to be run as a separate asyncio task.
+        """
         task_type = task_data.get("type")
         logging.debug(f"AsyncEngine dispatching task of type: {task_type}")
+
+        ai_client: Optional[BaseAiClient] = None # Убедимся, что клиент будет закрыт
+
         try:
             if task_type == "ai_chat":
-                # Временно импортируем и создаем клиента здесь.
-                # В будущем он должен быть атрибутом класса.
-                # from ai_chat_client import AiChatClient
-                # ai_client = self.ai_client
-                # ЗАГЛУШКА: имитируем долгий AI-запрос
-                await asyncio.sleep(3) # Имитация работы
-                reply_text = f"AI reply for: '{task_data.get('prompt', '')[:30]}...'"
-                self.to_ui_queue.put({"type": "ai_reply", "text": reply_text})
+                provider = task_data.get("provider")
+                prompt = task_data.get("prompt")
+                config = task_data.get("config") # Конфиг передается из UI потока
+
+                if not all([provider, prompt, config]):
+                    raise ValueError("Missing 'provider', 'prompt', or 'config' for ai_chat task.")
+                
+                # Создаем нужного клиента с помощью фабричной функции.
+                # Это позволяет нам не хранить все ключи в памяти движка.
+                ai_client = get_ai_client(provider, config)
+                
+                reply_text = await ai_client.ask_async(prompt)
+                
+                # Отправляем результат обратно в UI-поток
+                self.to_ui_queue.put({"type": "ai_reply", "provider": provider, "text": reply_text})
+
+            # TODO: Здесь можно добавить другие типы задач, например, для LSP
+            # elif task_type == "lsp_completion":
+            #     ...
+            
             else:
                 logging.warning(f"AsyncEngine received unknown task type: {task_type}")
+
         except Exception as e:
-            logging.error(f"Error executing async task '{task_type}': {e}", exc_info=True)
+            error_message = f"Error executing async task '{task_type}': {e}"
+            logging.error(error_message, exc_info=True)
+            # Отправляем сообщение об ошибке обратно в UI
             self.to_ui_queue.put({"type": "task_error", "task_type": task_type, "error": str(e)})
+
+        finally:
+            # Важно: всегда закрываем сессию клиента после использования,
+            # чтобы избежать утечки соединений.
+            if ai_client:
+                await ai_client.close()
 
     def submit_task(self, task_data: Dict[str, Any]):
         """Thread-safe method for the UI thread to submit a task."""
@@ -4966,6 +5023,8 @@ class AsyncEngine:
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self.ai_client:
+            await self.ai_client.close()
         logging.info("All async tasks cancelled.")
 
 
@@ -9162,7 +9221,7 @@ class SwayEditor:
             # A full redraw with the error message is the main goal.
             return True
 
-    # --- SAVE_FILE ---------------------------------------------
+    # --- save file ------------------
     def save_file(self) -> bool:
         """
         Saves the current document to its existing filename.
@@ -11417,25 +11476,73 @@ class SwayEditor:
             self._force_full_redraw = True  # Signal main loop to redraw everything
             return True  # Indicates status changed or a major UI interaction happened.
 
-    # AI
-    def request_ai_explanation(self) -> bool:
-        """Sends selected text to the AI for an explanation."""
+    # show AI panel
+    def show_ai_panel(self, title: str, content: str) -> bool:
+        """
+        Displays a generic panel for showing content like AI responses.
+        This method hands over control to the CursesPanel instance.
+        """
+        try:
+            # Создаем и показываем панель. Метод show() блокирует, пока панель активна.
+            panel = CursesPanel(self.stdscr, title, content, self.colors)
+            panel.show()
+        except Exception as e:
+            logging.error(f"Error displaying CursesPanel: {e}", exc_info=True)
+            self._set_status_message(f"Panel display error: {e}")
+        
+        # После закрытия панели, нужно заставить основной цикл перерисовать экран
+        self._force_full_redraw = True
+        return True
+
+    # Shows a menu AI provider
+    def select_ai_provider_and_ask(self) -> bool:
+        """
+        Shows a menu to select an AI provider, then sends the selected text for explanation.
+        """
+        # 1. Получаем текст для отправки
         selected_text = self.get_selected_text()
         if not selected_text:
-            self._set_status_message("No text selected to explain.")
-            return True # Статус изменился
+            self._set_status_message("No text selected to send to AI.")
+            return True
 
+        # 2. Формируем меню выбора
+        default_provider = self.config.get("ai", {}).get("default_provider", "openai")
+        menu_items = {
+            "1": "openai",
+            "2": "gemini",
+            "3": "mistral",
+            "d": default_provider # d - default
+        }
+        menu_str = " ".join([f"{k}:{v}" for k, v in menu_items.items() if k != 'd'])
+        prompt_msg = f"Select AI [{menu_str}] (d: default): "
+
+        # 3. Показываем меню пользователю
+        choice = self.prompt(prompt_msg)
+        if not choice:
+            self._set_status_message("AI request cancelled.")
+            return True
+
+        # 4. Определяем провайдера
+        provider = menu_items.get(choice.lower())
+        if not provider:
+            self._set_status_message(f"Invalid choice '{choice}'.")
+            return True
+            
+        logging.info(f"User selected AI provider: {provider}")
+
+        # 5. Формируем промпт и отправляем задачу
         prompt_text = f"Please explain the following code snippet:\n\n```\n{selected_text}\n```"
         
-        # Отправляем задачу в асинхронный движок
-        self.async_engine.submit_task({
+        task = {
             "type": "ai_chat",
-            "prompt": prompt_text
-        })
+            "provider": provider,
+            "prompt": prompt_text,
+            "config": self.config # Передаем текущий конфиг в задачу
+        }
+        self.async_engine.submit_task(task)
         
-        self._set_status_message("Sent request to AI assistant...")
-        logging.info("Submitted AI explanation task.")
-        return True # Статус изменился
+        self._set_status_message(f"Sent request to {provider.capitalize()}...")
+        return True
 
     # ==================== QUEUE PROCESSING =======================
     def _process_all_queues(self) -> bool:
@@ -11492,18 +11599,19 @@ class SwayEditor:
                 async_result = self._async_results_q.get_nowait()
                 logging.debug(f"Processed async result: {async_result}")
                 
-                # Обрабатываем результат
                 if async_result.get("type") == "ai_reply":
-                    # Например, показываем ответ в панели или статус-баре
+                    # Вызываем новую панель для отображения ответа
                     reply_text = async_result.get("text", "AI response was empty.")
-                    # Давайте для простоты покажем его в статус-баре
-                    self._set_status_message(f"AI: {reply_text[:100]}")
-                elif async_result.get("type") == "task_error":
+                    # Важно! Вызов show_ai_panel() блокирующий, он прервет текущую итерацию
+                    # _process_all_queues. Но так как он запускается в конце цикла run(),
+                    # это приемлемо.
+                    self.show_ai_panel("AI Assistant Reply", reply_text)
+
+                elif async_result.get("type") == "task_error" or async_result.get("type") == "init_error":
                     error_msg = async_result.get("error", "Unknown async error.")
                     self._set_status_message(f"Async Error: {error_msg[:100]}")
                 
                 any_state_changed_by_queues = True
-
         except queue.Empty:
             pass
 
@@ -11788,4 +11896,4 @@ if __name__ == "__main__":
             traceback.print_exc(file=sys.stderr)
             print("--- End Final Traceback ---", file=sys.stderr)
 
-        sys.exit(1)  # Exit with an error code
+        sys.exit(1)
